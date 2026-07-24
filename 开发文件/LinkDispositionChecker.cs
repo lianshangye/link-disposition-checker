@@ -25,8 +25,8 @@ using Microsoft.Web.WebView2.WinForms;
 
 [assembly: AssemblyTitle("侵权链接处置核验工具")]
 [assembly: AssemblyProduct("侵权链接处置核验工具")]
-[assembly: AssemblyVersion("3.10.7.0")]
-[assembly: AssemblyFileVersion("3.10.7.0")]
+[assembly: AssemblyVersion("3.11.0.0")]
+[assembly: AssemblyFileVersion("3.11.0.0")]
 
 namespace LinkDispositionChecker
 {
@@ -485,7 +485,7 @@ namespace LinkDispositionChecker
 
     internal static class SessionStore
     {
-        public const string CurrentEngineVersion = "3.10.7";
+        public const string CurrentEngineVersion = "3.11.0";
         private static readonly object SyncRoot = new object();
         private static readonly JavaScriptSerializer Serializer = new JavaScriptSerializer { MaxJsonLength = Int32.MaxValue };
         public static readonly string SessionPath = Path.Combine(StoragePaths.UserDataDirectory, "last-session.json");
@@ -6101,6 +6101,141 @@ namespace LinkDispositionChecker
         }
     }
 
+    internal sealed class BatchPreflightSummary
+    {
+        internal readonly List<string> SampledKeys = new List<string>();
+        internal int Checked;
+        internal int Resolved;
+        internal int TransientRestrictions;
+        internal int EvidenceInsufficient;
+
+        internal bool ShouldAbort
+        {
+            get
+            {
+                return Checked >= 4 && TransientRestrictions >= 4 &&
+                    TransientRestrictions * 100 >= Checked * 60;
+            }
+        }
+
+        internal string Description
+        {
+            get
+            {
+                return "预检 " + Checked + " 条：可判定 " + Resolved +
+                    "，暂时异常 " + TransientRestrictions +
+                    "，证据不足 " + EvidenceInsufficient;
+            }
+        }
+    }
+
+    internal static class BatchPreflightPlanner
+    {
+        internal static List<CheckJob> SelectSamples(IEnumerable<CheckJob> jobs, int maximum, int maximumPerPlatform)
+        {
+            int limit = Math.Max(0, maximum);
+            int platformLimit = Math.Max(1, maximumPerPlatform);
+            var queues = (jobs ?? Enumerable.Empty<CheckJob>())
+                .Where(item => item != null)
+                .GroupBy(PlatformKey, StringComparer.OrdinalIgnoreCase)
+                .Select(group => new Queue<CheckJob>(group.Take(platformLimit)))
+                .ToList();
+            var selected = new List<CheckJob>();
+            while (selected.Count < limit && queues.Any(queue => queue.Count > 0))
+            {
+                foreach (Queue<CheckJob> queue in queues)
+                {
+                    if (selected.Count >= limit) break;
+                    if (queue.Count > 0) selected.Add(queue.Dequeue());
+                }
+            }
+            return selected;
+        }
+
+        internal static BatchPreflightSummary Analyze(IEnumerable<KeyValuePair<CheckJob, CheckResult>> observations)
+        {
+            var summary = new BatchPreflightSummary();
+            foreach (KeyValuePair<CheckJob, CheckResult> observation in observations ?? Enumerable.Empty<KeyValuePair<CheckJob, CheckResult>>())
+            {
+                CheckJob job = observation.Key;
+                CheckResult result = observation.Value;
+                if (job != null) summary.SampledKeys.Add(job.Key);
+                if (result == null) continue;
+                summary.Checked++;
+                if (result.Verdict == "已失效" || result.Verdict == "仍可访问") summary.Resolved++;
+                else if (NetworkRestrictionCircuitBreaker.IsTransientRestriction(result)) summary.TransientRestrictions++;
+                else summary.EvidenceInsufficient++;
+            }
+            return summary;
+        }
+
+        internal static string PlatformKey(CheckJob job)
+        {
+            Uri uri;
+            if (job != null && Uri.TryCreate(job.Url, UriKind.Absolute, out uri))
+            {
+                string key = Checker.RequestPacingKey(uri);
+                if (!String.IsNullOrWhiteSpace(key)) return key;
+            }
+            if (job != null && !String.IsNullOrWhiteSpace(job.Platform)) return job.Platform.Trim();
+            return "未知平台";
+        }
+    }
+
+    internal sealed class PlatformRestrictionController
+    {
+        private readonly object _sync = new object();
+        private readonly int _threshold;
+        private readonly Dictionary<string, int> _consecutive =
+            new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, string> _paused =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        internal PlatformRestrictionController(int threshold)
+        {
+            _threshold = Math.Max(2, threshold);
+        }
+
+        internal bool IsPaused(CheckJob job)
+        {
+            string key = BatchPreflightPlanner.PlatformKey(job);
+            lock (_sync) { return _paused.ContainsKey(key); }
+        }
+
+        internal bool Observe(CheckJob job, CheckResult result, out string pausedPlatform)
+        {
+            pausedPlatform = "";
+            string key = BatchPreflightPlanner.PlatformKey(job);
+            lock (_sync)
+            {
+                if (_paused.ContainsKey(key)) return false;
+                if (!NetworkRestrictionCircuitBreaker.IsTransientRestriction(result))
+                {
+                    _consecutive[key] = 0;
+                    return false;
+                }
+
+                int count;
+                _consecutive.TryGetValue(key, out count);
+                count++;
+                _consecutive[key] = count;
+                if (count < _threshold) return false;
+                pausedPlatform = !String.IsNullOrWhiteSpace(job == null ? "" : job.Platform)
+                    ? job.Platform.Trim() : key;
+                _paused[key] = pausedPlatform;
+                return true;
+            }
+        }
+
+        internal List<string> PausedPlatforms
+        {
+            get
+            {
+                lock (_sync) { return _paused.Values.Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(item => item).ToList(); }
+            }
+        }
+    }
+
     internal sealed class NetworkRestrictionCircuitBreaker
     {
         private readonly object _sync = new object();
@@ -6190,6 +6325,7 @@ namespace LinkDispositionChecker
         private string _excelPath;
         private CancellationTokenSource _cancellation;
         private bool _running;
+        private bool _preflightRunning;
         private int _animationFrame;
         private Stopwatch _runWatch;
         private int _runCompleted;
@@ -6359,37 +6495,62 @@ namespace LinkDispositionChecker
             var checker = new Checker(_performanceProfile.BodyBytes);
             var completedKeys = new HashSet<string>(_allRows.Select(ResultKey), StringComparer.OrdinalIgnoreCase);
             var pendingJobs = jobs.Where(job => !completedKeys.Contains(job.Key)).ToList();
-            int nextJob = -1;
             var circuitBreaker = new NetworkRestrictionCircuitBreaker(8);
+            var platformRestrictions = new PlatformRestrictionController(3);
             string circuitReason = "";
-            int workerCount = Math.Min(_performanceProfile.Workers, Math.Max(1, pendingJobs.Count));
-            var workers = Enumerable.Range(0, workerCount).Select(async workerNumber =>
+            bool cancelled = false;
+            BatchPreflightSummary preflightSummary = new BatchPreflightSummary();
+            try
             {
-                while (true)
+                if (pendingJobs.Count >= 20)
                 {
-                    int index = Interlocked.Increment(ref nextJob);
-                    if (index >= pendingJobs.Count) break;
-                    CheckJob job = pendingJobs[index];
-                    var item = await checker.CheckAsync(job.Url, job.Number, job.ExpectedTitle, job.ExpectedExcerpt, job.ExpectedAuthor, job.Platform, job.ContentType, false, _cancellation.Token);
-                    item.SourceSheet = job.SourceSheet; item.SourceRow = job.SourceRow;
-                    _uiResults.Enqueue(item);
-                    Interlocked.Increment(ref _runCompleted);
-                    string observedReason;
-                    if (circuitBreaker.Observe(item, out observedReason))
+                    preflightSummary = await RunBatchPreflightAsync(checker, pendingJobs, platformRestrictions);
+                    var sampledKeys = new HashSet<string>(preflightSummary.SampledKeys, StringComparer.OrdinalIgnoreCase);
+                    pendingJobs = pendingJobs.Where(job => !sampledKeys.Contains(job.Key)).ToList();
+                    if (preflightSummary.ShouldAbort)
                     {
-                        circuitReason = observedReason;
-                        _cancellation.Cancel();
-                        break;
+                        circuitReason = "网络预检未通过（" + preflightSummary.Description + "）";
+                        cancelled = true;
                     }
                 }
-            }).ToArray();
 
-            bool cancelled = false;
-            try { await Task.WhenAll(workers); }
+                if (!cancelled)
+                {
+                    int nextJob = -1;
+                    int workerCount = Math.Min(_performanceProfile.Workers, Math.Max(1, pendingJobs.Count));
+                    var workers = Enumerable.Range(0, workerCount).Select(async workerNumber =>
+                    {
+                        while (true)
+                        {
+                            int index = Interlocked.Increment(ref nextJob);
+                            if (index >= pendingJobs.Count) break;
+                            CheckJob job = pendingJobs[index];
+                            if (platformRestrictions.IsPaused(job)) continue;
+                            var item = await checker.CheckAsync(job.Url, job.Number, job.ExpectedTitle, job.ExpectedExcerpt, job.ExpectedAuthor, job.Platform, job.ContentType, false, _cancellation.Token);
+                            item.SourceSheet = job.SourceSheet; item.SourceRow = job.SourceRow;
+                            _uiResults.Enqueue(item);
+                            Interlocked.Increment(ref _runCompleted);
+                            string pausedPlatform;
+                            platformRestrictions.Observe(job, item, out pausedPlatform);
+                            string observedReason;
+                            if (circuitBreaker.Observe(item, out observedReason))
+                            {
+                                circuitReason = observedReason;
+                                _cancellation.Cancel();
+                                break;
+                            }
+                        }
+                    }).ToArray();
+                    await Task.WhenAll(workers);
+                }
+            }
             catch (OperationCanceledException) { cancelled = true; }
             finally
             {
                 if (!String.IsNullOrWhiteSpace(circuitReason)) cancelled = true;
+                List<string> pausedPlatforms = platformRestrictions.PausedPlatforms;
+                bool partiallyPaused = pausedPlatforms.Count > 0 && String.IsNullOrWhiteSpace(circuitReason);
+                bool interrupted = cancelled || partiallyPaused;
                 _animationTimer.Stop();
                 FlushUiResults(Int32.MaxValue);
                 if (_runWatch != null) _runWatch.Stop();
@@ -6398,18 +6559,20 @@ namespace LinkDispositionChecker
                 _performance.Enabled = true;
                 _networkMode.Enabled = true;
                 RefreshResumeButton(); SaveSessionSafe();
-                _activity.Text = cancelled ? "■" : "✓";
-                _activity.ForeColor = cancelled ? Color.FromArgb(180, 116, 20) : Color.FromArgb(22, 128, 85);
+                _activity.Text = interrupted ? "■" : "✓";
+                _activity.ForeColor = interrupted ? Color.FromArgb(180, 116, 20) : Color.FromArgb(22, 128, 85);
                 double seconds = Math.Max(0.1, _runWatch == null ? 0.1 : _runWatch.Elapsed.TotalSeconds);
                 double speed = Math.Max(0, (_runCompleted - _runStartCompleted) / seconds);
                 _progressText.Text = !String.IsNullOrWhiteSpace(circuitReason)
                     ? "网络风控已自动暂停  " + _runCompleted + " / " + jobs.Count + "，进度已保存"
+                    : partiallyPaused
+                    ? "受限平台已暂停，其他平台已继续  " + _runCompleted + " / " + jobs.Count + "，进度已保存"
                     : cancelled
                     ? "已停止  " + _runCompleted + " / " + jobs.Count + "，进度已保存"
                     : "核验完成  " + _runCompleted + " 条，用时 " + FormatDuration(_runWatch.Elapsed) + "，平均 " + speed.ToString("0.0") + " 条/秒";
                 _progressText.Text += "  ·  " + _performanceProfile.Name + "模式 / " + _performanceProfile.Workers + " 并发";
                 if (_allRows.Count > _performanceProfile.GridRows) _progressText.Text += "（" + _performanceProfile.Name + "模式仅显示前 " + _performanceProfile.GridRows.ToString("N0") + " 条，导出包含全部）";
-                if (!cancelled && _allRows.Count > 0)
+                if (!interrupted && _allRows.Count > 0)
                 {
                     string completionMessage = String.IsNullOrEmpty(_excelPath)
                         ? "快速核验已结束，进度已自动保存。\n\n“待后台复核候选”不是要求你逐条手动核验的数量。需要进一步确认时，请手动点击“启动后台复核候选项”；启动后会自动后台处理，最后只保留确实无法确认的项目。"
@@ -6422,7 +6585,45 @@ namespace LinkDispositionChecker
                         "这些记录会显示为“暂时异常”，不是要求人工逐条复核。请先暂停一段时间或切换到获准使用的正常网络出口，再点击“继续上次核验”。",
                         "网络风控已自动暂停", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
+                else if (partiallyPaused)
+                {
+                    MessageBox.Show("以下平台连续出现网络限制，已单独暂停：\n\n" +
+                        String.Join("、", pausedPlatforms.Take(12)) +
+                        (pausedPlatforms.Count > 12 ? " 等 " + pausedPlatforms.Count + " 个平台" : "") +
+                        "\n\n其他平台已经继续处理。受限平台的未处理链接已保留在断点中，稍后点击“继续上次核验”即可重新预检。",
+                        "部分平台已暂停", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
             }
+        }
+
+        private async Task<BatchPreflightSummary> RunBatchPreflightAsync(Checker checker, List<CheckJob> pendingJobs,
+            PlatformRestrictionController platformRestrictions)
+        {
+            _preflightRunning = true;
+            try
+            {
+                List<CheckJob> samples = BatchPreflightPlanner.SelectSamples(pendingJobs, 8, 2);
+                var observations = new List<KeyValuePair<CheckJob, CheckResult>>();
+                foreach (CheckJob job in samples)
+                {
+                    _progressText.Text = "正在进行网络预检  " + (observations.Count + 1) + " / " + samples.Count +
+                        "  ·  " + BatchPreflightPlanner.PlatformKey(job);
+                    CheckResult item = await checker.CheckAsync(job.Url, job.Number, job.ExpectedTitle, job.ExpectedExcerpt,
+                        job.ExpectedAuthor, job.Platform, job.ContentType, false, _cancellation.Token);
+                    item.SourceSheet = job.SourceSheet;
+                    item.SourceRow = job.SourceRow;
+                    _uiResults.Enqueue(item);
+                    Interlocked.Increment(ref _runCompleted);
+                    string pausedPlatform;
+                    platformRestrictions.Observe(job, item, out pausedPlatform);
+                    observations.Add(new KeyValuePair<CheckJob, CheckResult>(job, item));
+                    FlushUiResults(Int32.MaxValue);
+                    BatchPreflightSummary interim = BatchPreflightPlanner.Analyze(observations);
+                    if (interim.ShouldAbort) return interim;
+                }
+                return BatchPreflightPlanner.Analyze(observations);
+            }
+            finally { _preflightRunning = false; }
         }
 
         private void PrepareEdgeCompatibilityJobs(List<CheckJob> jobs, bool preserveExisting)
@@ -6477,6 +6678,7 @@ namespace LinkDispositionChecker
             _activity.ForeColor = Color.FromArgb(38 + (_animationFrame % 3) * 18, 99, 177);
             int completed = Math.Min(_runCompleted, _runTotal);
             _progress.Value = Math.Min(completed, _progress.Maximum);
+            if (_preflightRunning) return;
             double elapsed = Math.Max(0.1, _runWatch == null ? 0.1 : _runWatch.Elapsed.TotalSeconds);
             int completedThisRun = Math.Max(0, completed - _runStartCompleted);
             double speed = Math.Max(0.0, completedThisRun / elapsed);
@@ -6639,13 +6841,17 @@ namespace LinkDispositionChecker
                 List<CheckJob> restoredJobs = BuildJobs();
                 var validKeys = new HashSet<string>(restoredJobs.Select(job => job.Key), StringComparer.OrdinalIgnoreCase);
                 _allRows.RemoveAll(item => !validKeys.Contains(ResultKey(item)));
+                int transientRetries = 0;
                 if (engineChanged)
-                    _allRows.RemoveAll(item => item.Verdict != "已失效" && item.Verdict != "仍可访问");
+                    _allRows.RemoveAll(item => ShouldDiscardForResume(item, true));
+                else
+                    transientRetries = _allRows.RemoveAll(item => ShouldDiscardForResume(item, false));
                 ApplyFilter(); UpdateStats();
                 _deepReview.Enabled = _allRows.Count > 0;
                 int total = restoredJobs.Count;
                 _progressText.Text = "已恢复上次进度：" + _allRows.Count + " / " + total + " 条" +
-                    (engineChanged ? "；规则已升级，将自动重跑旧版待复核项" : "");
+                    (engineChanged ? "；规则已升级，将自动重跑旧版待复核项" :
+                    transientRetries > 0 ? "；将重新核验 " + transientRetries + " 条暂时异常" : "");
                 if (_allRows.Count < total) await StartChecksAsync(true);
                 else MessageBox.Show("上次快速核验已全部完成。\n\n可手动开始深度复核，或直接查看和导出结果。", "进度已恢复", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
@@ -6808,6 +7014,13 @@ namespace LinkDispositionChecker
             return result != null && !String.IsNullOrEmpty(result.SourceSheet) && result.SourceRow > 0
                 ? result.SourceSheet + "\n" + result.SourceRow
                 : (result == null ? "" : result.OriginalUrl ?? "");
+        }
+
+        internal static bool ShouldDiscardForResume(CheckResult result, bool engineChanged)
+        {
+            if (result == null) return false;
+            if (engineChanged) return result.Verdict != "已失效" && result.Verdict != "仍可访问";
+            return result.Verdict == "暂时异常";
         }
 
         private void ApplyFilter()

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.RegularExpressions;
 using LinkDispositionChecker;
 
@@ -51,6 +52,43 @@ internal static class RegressionTests
             Checker.NormalizeVisibleVerdict("疑似已处置") == "疑似已处置";
         Console.WriteLine((circuitPassed ? "PASS " : "FAIL ") + "连续网络风控自动熔断且保留真实结果标签");
         if (!circuitPassed) _failures++;
+
+        var preflightJobs = new List<CheckJob>();
+        for (int index = 0; index < 6; index++)
+        {
+            preflightJobs.Add(new CheckJob { Number = index + 1, Url = "https://www.zhihu.com/question/" + index, Platform = "知乎" });
+            preflightJobs.Add(new CheckJob { Number = index + 20, Url = "https://weibo.com/123/" + index, Platform = "微博" });
+            preflightJobs.Add(new CheckJob { Number = index + 40, Url = "https://www.toutiao.com/article/" + index, Platform = "今日头条" });
+        }
+        List<CheckJob> preflightSamples = BatchPreflightPlanner.SelectSamples(preflightJobs, 6, 2);
+        bool preflightSelectionPassed = preflightSamples.Count == 6 &&
+            preflightSamples.GroupBy(BatchPreflightPlanner.PlatformKey).Count() == 3 &&
+            preflightSamples.GroupBy(BatchPreflightPlanner.PlatformKey).All(group => group.Count() <= 2);
+        var blockedObservations = preflightSamples.Take(4).Select(job =>
+            new KeyValuePair<CheckJob, CheckResult>(job, new CheckResult
+            {
+                Verdict = "暂时异常",
+                StatusCode = "502",
+                Evidence = "网络预检站点服务异常"
+            })).ToList();
+        BatchPreflightSummary blockedSummary = BatchPreflightPlanner.Analyze(blockedObservations);
+        var platformController = new PlatformRestrictionController(3);
+        string pausedPlatform = "";
+        bool platformPausePassed =
+            !platformController.Observe(preflightJobs[0], blockedObservations[0].Value, out pausedPlatform) &&
+            !platformController.Observe(preflightJobs[0], blockedObservations[0].Value, out pausedPlatform) &&
+            platformController.Observe(preflightJobs[0], blockedObservations[0].Value, out pausedPlatform) &&
+            platformController.IsPaused(preflightJobs[0]) &&
+            !platformController.IsPaused(preflightJobs[1]);
+        bool preflightPassed = preflightSelectionPassed && blockedSummary.ShouldAbort &&
+            blockedSummary.TransientRestrictions == 4 && platformPausePassed;
+        preflightPassed = preflightPassed &&
+            MainForm.ShouldDiscardForResume(new CheckResult { Verdict = "暂时异常" }, false) &&
+            !MainForm.ShouldDiscardForResume(new CheckResult { Verdict = "人工复核" }, false) &&
+            MainForm.ShouldDiscardForResume(new CheckResult { Verdict = "人工复核" }, true) &&
+            !MainForm.ShouldDiscardForResume(new CheckResult { Verdict = "仍可访问" }, true);
+        Console.WriteLine((preflightPassed ? "PASS " : "FAIL ") + "跨平台小样本预检和平台独立熔断");
+        if (!preflightPassed) _failures++;
 
         bool baijiaIdPassed = Checker.ExtractBaiduArticleId(new Uri("https://baijiahao.baidu.com/s?id=1870762825559558263&wfr=spider&for=pc")) == "1870762825559558263";
         bool dtNidPassed = Checker.ExtractBaiduArticleNid(new Uri("https://mbd.baidu.com/newspage/data/dtlandingwise?nid=dt_5277434666597158759")) == "dt_5277434666597158759";

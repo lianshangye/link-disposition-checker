@@ -99,6 +99,11 @@ internal static class RegressionTests
             YunwuAiClient.NormalizeBaseUrl("https://yunwu.ai/v1/") == "https://yunwu.ai/v1" &&
             YunwuAiClient.ChatUrl("https://yunwu.ai/v1/chat/completions") == "https://yunwu.ai/v1/chat/completions" &&
             YunwuAiClient.ModelsUrl("https://yunwu.ai") == "https://yunwu.ai/v1/models";
+        using (var aiTransportClient = new YunwuAiClient("regression-placeholder-token"))
+        {
+            aiUrlPassed = aiUrlPassed &&
+                (System.Net.ServicePointManager.SecurityProtocol & System.Net.SecurityProtocolType.Tls12) != 0;
+        }
         var aiAlive = new CheckResult
         {
             Verdict = "人工复核",

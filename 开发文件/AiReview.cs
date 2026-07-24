@@ -104,11 +104,28 @@ namespace LinkDispositionChecker
         internal YunwuAiClient(string token)
         {
             if (String.IsNullOrWhiteSpace(token)) throw new InvalidOperationException("尚未配置 API Token");
+            try
+            {
+                ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
+                ServicePointManager.Expect100Continue = false;
+            }
+            catch { }
             var handler = new HttpClientHandler
             {
                 AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate,
-                UseProxy = true
+                UseProxy = true,
+                UseDefaultCredentials = true
             };
+            try
+            {
+                IWebProxy proxy = WebRequest.GetSystemWebProxy();
+                if (proxy != null)
+                {
+                    proxy.Credentials = CredentialCache.DefaultCredentials;
+                    handler.Proxy = proxy;
+                }
+            }
+            catch { }
             _client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(45) };
             _client.DefaultRequestHeaders.TryAddWithoutValidation("Authorization", "Bearer " + token.Trim());
             _client.DefaultRequestHeaders.TryAddWithoutValidation("Accept", "application/json");
@@ -497,6 +514,11 @@ namespace LinkDispositionChecker
         private static string SafeMessage(Exception ex)
         {
             string message = ex == null ? "未知错误" : ex.Message;
+            Exception inner = ex == null ? null : ex.InnerException;
+            for (int depth = 0; inner != null && depth < 4; depth++, inner = inner.InnerException)
+                if (!String.IsNullOrWhiteSpace(inner.Message)) message = inner.Message;
+            if (Regex.IsMatch(message ?? "", "发送请求时出错|request.*failed|connection.*closed|基础连接已经关闭", RegexOptions.IgnoreCase))
+                message = "无法连接 AI API；请检查系统代理、TLS、API 地址或单位网络白名单";
             return Regex.Replace(message ?? "", @"sk-[A-Za-z0-9_\-]+", "[Token已隐藏]");
         }
     }

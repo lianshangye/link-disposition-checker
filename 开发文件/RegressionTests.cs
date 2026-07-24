@@ -80,7 +80,11 @@ internal static class RegressionTests
             platformController.Observe(preflightJobs[0], blockedObservations[0].Value, out pausedPlatform) &&
             platformController.IsPaused(preflightJobs[0]) &&
             !platformController.IsPaused(preflightJobs[1]);
-        bool preflightPassed = preflightSelectionPassed && blockedSummary.ShouldAbort &&
+        bool preflightPassed = preflightSelectionPassed && blockedSummary.RequiresDecision &&
+            BatchRunSafetyPolicy.ShouldPauseAfterPreflight(blockedSummary, false) &&
+            !BatchRunSafetyPolicy.ShouldPauseAfterPreflight(blockedSummary, true) &&
+            !BatchRunSafetyPolicy.ShouldUseGlobalCircuitBreaker(true) &&
+            BatchRunSafetyPolicy.ShouldUseGlobalCircuitBreaker(false) &&
             blockedSummary.TransientRestrictions == 4 && platformPausePassed;
         preflightPassed = preflightPassed &&
             MainForm.ShouldDiscardForResume(new CheckResult { Verdict = "暂时异常" }, false) &&

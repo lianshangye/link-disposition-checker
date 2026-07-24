@@ -25,8 +25,8 @@ using Microsoft.Web.WebView2.WinForms;
 
 [assembly: AssemblyTitle("侵权链接处置核验工具")]
 [assembly: AssemblyProduct("侵权链接处置核验工具")]
-[assembly: AssemblyVersion("3.12.0.0")]
-[assembly: AssemblyFileVersion("3.12.0.0")]
+[assembly: AssemblyVersion("3.12.1.0")]
+[assembly: AssemblyFileVersion("3.12.1.0")]
 
 namespace LinkDispositionChecker
 {
@@ -490,7 +490,7 @@ namespace LinkDispositionChecker
 
     internal static class SessionStore
     {
-        public const string CurrentEngineVersion = "3.12.0";
+        public const string CurrentEngineVersion = "3.12.1";
         private static readonly object SyncRoot = new object();
         private static readonly JavaScriptSerializer Serializer = new JavaScriptSerializer { MaxJsonLength = Int32.MaxValue };
         public static readonly string SessionPath = Path.Combine(StoragePaths.UserDataDirectory, "last-session.json");
@@ -4276,6 +4276,15 @@ namespace LinkDispositionChecker
 
         private async Task<HttpResponseMessage> SendWithFallbackAsync(Uri uri, CancellationToken token)
         {
+            using (var fallbackBudget = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                fallbackBudget.CancelAfter(TimeSpan.FromSeconds(18));
+                return await SendWithFallbackWithinBudgetAsync(uri, token, fallbackBudget.Token);
+            }
+        }
+
+        private async Task<HttpResponseMessage> SendWithFallbackWithinBudgetAsync(Uri uri, CancellationToken callerToken, CancellationToken fallbackToken)
+        {
             var candidates = new List<Uri> { uri };
             if (uri != null && uri.Scheme == Uri.UriSchemeHttp)
             {
@@ -4290,27 +4299,42 @@ namespace LinkDispositionChecker
 
             HttpResponseMessage retainedResponse = null;
             var errors = new List<Exception>();
-            foreach (HttpClient client in new[] { _client, _directClient })
+            try
             {
-                foreach (Uri candidate in candidates)
+                foreach (HttpClient client in new[] { _client, _directClient })
                 {
-                    SendAttempt attempt = await TrySendClientAsync(client, candidate, token);
-                    if (attempt.Response != null)
+                    foreach (Uri candidate in candidates)
                     {
-                        if (!IsRetryableTransportStatus(attempt.Response, candidate))
+                        SendAttempt attempt = await TrySendClientAsync(client, candidate, fallbackToken);
+                        if (attempt.Response != null)
                         {
-                            if (retainedResponse != null) retainedResponse.Dispose();
-                            return attempt.Response;
+                            if (!IsRetryableTransportStatus(attempt.Response, candidate))
+                            {
+                                if (retainedResponse != null) retainedResponse.Dispose();
+                                return attempt.Response;
+                            }
+                            if (retainedResponse == null) retainedResponse = attempt.Response;
+                            else attempt.Response.Dispose();
                         }
-                        if (retainedResponse == null) retainedResponse = attempt.Response;
-                        else attempt.Response.Dispose();
+                        if (attempt.Error != null) errors.Add(attempt.Error);
                     }
-                    if (attempt.Error != null) errors.Add(attempt.Error);
                 }
+            }
+            catch (OperationCanceledException)
+            {
+                if (callerToken.IsCancellationRequested)
+                {
+                    if (retainedResponse != null) retainedResponse.Dispose();
+                    throw;
+                }
+                if (retainedResponse != null) return retainedResponse;
+                throw new TaskCanceledException("代理和直连重试超过 18 秒");
             }
 
             if (retainedResponse != null) return retainedResponse;
             Exception error = errors.LastOrDefault();
+            if (fallbackToken.IsCancellationRequested && !callerToken.IsCancellationRequested)
+                throw new TaskCanceledException("代理和直连重试超过 18 秒");
             if (error is TaskCanceledException) throw (TaskCanceledException)error;
             if (error is HttpRequestException) throw (HttpRequestException)error;
             throw new HttpRequestException("HTTP/HTTPS 的系统代理和直连均无法建立连接", error);
@@ -6121,7 +6145,7 @@ namespace LinkDispositionChecker
         internal int TransientRestrictions;
         internal int EvidenceInsufficient;
 
-        internal bool ShouldAbort
+        internal bool RequiresDecision
         {
             get
             {
@@ -6191,6 +6215,19 @@ namespace LinkDispositionChecker
             }
             if (job != null && !String.IsNullOrWhiteSpace(job.Platform)) return job.Platform.Trim();
             return "未知平台";
+        }
+    }
+
+    internal static class BatchRunSafetyPolicy
+    {
+        internal static bool ShouldPauseAfterPreflight(BatchPreflightSummary summary, bool userChoseContinue)
+        {
+            return summary != null && summary.RequiresDecision && !userChoseContinue;
+        }
+
+        internal static bool ShouldUseGlobalCircuitBreaker(bool userChoseContinue)
+        {
+            return !userChoseContinue;
         }
     }
 
@@ -6519,6 +6556,7 @@ namespace LinkDispositionChecker
             string circuitReason = "";
             bool cancelled = false;
             BatchPreflightSummary preflightSummary = new BatchPreflightSummary();
+            bool continueDespitePreflight = false;
             try
             {
                 if (pendingJobs.Count >= 20)
@@ -6526,10 +6564,21 @@ namespace LinkDispositionChecker
                     preflightSummary = await RunBatchPreflightAsync(checker, pendingJobs, platformRestrictions);
                     var sampledKeys = new HashSet<string>(preflightSummary.SampledKeys, StringComparer.OrdinalIgnoreCase);
                     pendingJobs = pendingJobs.Where(job => !sampledKeys.Contains(job.Key)).ToList();
-                    if (preflightSummary.ShouldAbort)
+                    if (preflightSummary.RequiresDecision)
                     {
-                        circuitReason = "网络预检未通过（" + preflightSummary.Description + "）";
-                        cancelled = true;
+                        DialogResult decision = MessageBox.Show(
+                            "网络预检发现较多临时异常：\n\n" + preflightSummary.Description +
+                            "\n\n这只说明当前部分网站或网络线路不稳定，不代表剩余链接都无法核验。" +
+                            "\n\n点击“是”：仍然继续，本轮不再因全局连续异常自动停止；连续受限的平台仍会单独暂停。" +
+                            "\n点击“否”：保存当前进度并暂停。",
+                            "网络预检发现异常，是否仍然继续？",
+                            MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button1);
+                        continueDespitePreflight = decision == DialogResult.Yes;
+                        if (BatchRunSafetyPolicy.ShouldPauseAfterPreflight(preflightSummary, continueDespitePreflight))
+                        {
+                            circuitReason = "使用者根据网络预检选择暂停（" + preflightSummary.Description + "）";
+                            cancelled = true;
+                        }
                     }
                 }
 
@@ -6552,7 +6601,8 @@ namespace LinkDispositionChecker
                             string pausedPlatform;
                             platformRestrictions.Observe(job, item, out pausedPlatform);
                             string observedReason;
-                            if (circuitBreaker.Observe(item, out observedReason))
+                            if (BatchRunSafetyPolicy.ShouldUseGlobalCircuitBreaker(continueDespitePreflight) &&
+                                circuitBreaker.Observe(item, out observedReason))
                             {
                                 circuitReason = observedReason;
                                 _cancellation.Cancel();
@@ -6638,7 +6688,7 @@ namespace LinkDispositionChecker
                     observations.Add(new KeyValuePair<CheckJob, CheckResult>(job, item));
                     FlushUiResults(Int32.MaxValue);
                     BatchPreflightSummary interim = BatchPreflightPlanner.Analyze(observations);
-                    if (interim.ShouldAbort) return interim;
+                    if (interim.RequiresDecision) return interim;
                 }
                 return BatchPreflightPlanner.Analyze(observations);
             }

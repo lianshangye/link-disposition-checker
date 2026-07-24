@@ -6203,7 +6203,7 @@ namespace LinkDispositionChecker
 
         public MainForm()
         {
-            Text = "侵权链接处置核验工具";
+            Text = "侵权链接处置核验工具 · v" + SessionStore.CurrentEngineVersion;
             StartPosition = FormStartPosition.CenterScreen;
             Rectangle working = Screen.PrimaryScreen == null ? new Rectangle(0, 0, 1280, 800) : Screen.PrimaryScreen.WorkingArea;
             int minimumWidth = Math.Min(1060, Math.Max(640, working.Width - 24));
@@ -6228,7 +6228,21 @@ namespace LinkDispositionChecker
             var header = new Panel { Dock = DockStyle.Top, Height = 82, BackColor = Color.FromArgb(27, 62, 111) };
             var title = new Label { Text = "侵权链接处置核验", ForeColor = Color.White, Font = new Font("微软雅黑", 19, FontStyle.Bold), AutoSize = true, Location = new Point(24, 13) };
             var sub = new Label { Text = "平台失效规则 + 延迟跳转监测 + Excel 原标题校验", ForeColor = Color.FromArgb(206, 220, 239), AutoSize = true, Location = new Point(27, 51) };
-            header.Controls.Add(title); header.Controls.Add(sub);
+            var versionPanel = new Panel { Dock = DockStyle.Right, Width = 152, BackColor = Color.FromArgb(27, 62, 111) };
+            var versionBadge = new Label
+            {
+                Text = "版本 " + SessionStore.CurrentEngineVersion,
+                ForeColor = Color.White,
+                BackColor = Color.FromArgb(38, 99, 177),
+                Font = new Font("微软雅黑", 10.5f, FontStyle.Bold),
+                AutoSize = false,
+                TextAlign = ContentAlignment.MiddleCenter,
+                Size = new Size(124, 34),
+                Location = new Point(8, 23),
+                BorderStyle = BorderStyle.FixedSingle
+            };
+            versionPanel.Controls.Add(versionBadge);
+            header.Controls.Add(title); header.Controls.Add(sub); header.Controls.Add(versionPanel);
 
             var main = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(18, 14, 18, 16), ColumnCount = 1, RowCount = 5 };
             main.RowStyles.Add(new RowStyle(SizeType.Absolute, 88));

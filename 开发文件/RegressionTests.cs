@@ -17,6 +17,17 @@ internal static class RegressionTests
 
     public static int Main()
     {
+        bool pacingPassed =
+            Checker.RequestPacingKey(new Uri("https://www.zhihu.com/question/1")) == "zhihu.com" &&
+            Checker.RequestPacingKey(new Uri("https://api.weibo.com/2/statuses/show.json")) == "weibo.com" &&
+            Checker.RequestPacingMilliseconds(new Uri("https://www.douyin.com/video/1")) >= 1500 &&
+            Checker.RequestPacingMilliseconds(new Uri("https://example.com/page")) < 1000 &&
+            PerformanceProfile.Resolve("低配模式").Workers == 1 &&
+            PerformanceProfile.Resolve("标准模式").Workers == 3 &&
+            PerformanceProfile.Resolve("高性能模式").Workers == 6;
+        Console.WriteLine((pacingPassed ? "PASS " : "FAIL ") + "平台级限速和保守并发配置");
+        if (!pacingPassed) _failures++;
+
         bool baijiaIdPassed = Checker.ExtractBaiduArticleId(new Uri("https://baijiahao.baidu.com/s?id=1870762825559558263&wfr=spider&for=pc")) == "1870762825559558263";
         bool dtNidPassed = Checker.ExtractBaiduArticleNid(new Uri("https://mbd.baidu.com/newspage/data/dtlandingwise?nid=dt_5277434666597158759")) == "dt_5277434666597158759";
         bool baiduPublicUrlPassed = Checker.BuildBaiduPublicArticleUrl("5277434666597158759").Contains("news_5277434666597158759");

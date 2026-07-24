@@ -25,8 +25,8 @@ using Microsoft.Web.WebView2.WinForms;
 
 [assembly: AssemblyTitle("侵权链接处置核验工具")]
 [assembly: AssemblyProduct("侵权链接处置核验工具")]
-[assembly: AssemblyVersion("3.10.5.0")]
-[assembly: AssemblyFileVersion("3.10.5.0")]
+[assembly: AssemblyVersion("3.10.6.0")]
+[assembly: AssemblyFileVersion("3.10.6.0")]
 
 namespace LinkDispositionChecker
 {
@@ -329,14 +329,14 @@ namespace LinkDispositionChecker
 
         public static PerformanceProfile Resolve(string selection)
         {
-            if (selection == "低配模式") return new PerformanceProfile { Name = "低配", Workers = 3, GridRows = 700, BodyBytes = 240000, RefreshMilliseconds = 500 };
-            if (selection == "标准模式") return new PerformanceProfile { Name = "标准", Workers = 10, GridRows = 2500, BodyBytes = 550000, RefreshMilliseconds = 260 };
-            if (selection == "高性能模式") return new PerformanceProfile { Name = "高性能", Workers = 24, GridRows = 5000, BodyBytes = 900000, RefreshMilliseconds = 180 };
+            if (selection == "低配模式") return new PerformanceProfile { Name = "低配", Workers = 1, GridRows = 700, BodyBytes = 240000, RefreshMilliseconds = 500 };
+            if (selection == "标准模式") return new PerformanceProfile { Name = "标准", Workers = 3, GridRows = 2500, BodyBytes = 550000, RefreshMilliseconds = 260 };
+            if (selection == "高性能模式") return new PerformanceProfile { Name = "高性能", Workers = 6, GridRows = 5000, BodyBytes = 900000, RefreshMilliseconds = 180 };
             if (!Environment.Is64BitProcess) return Resolve("低配模式");
             long memory = GetPhysicalMemoryBytes();
             int processors = Math.Max(1, Environment.ProcessorCount);
             if (processors <= 2 || (memory > 0 && memory <= 3L * 1024 * 1024 * 1024))
-                return new PerformanceProfile { Name = "低配", Workers = 2, GridRows = 500, BodyBytes = 180000, RefreshMilliseconds = 650 };
+                return new PerformanceProfile { Name = "低配", Workers = 1, GridRows = 500, BodyBytes = 180000, RefreshMilliseconds = 650 };
             if (processors <= 4 || (memory > 0 && memory <= 5L * 1024 * 1024 * 1024)) return Resolve("低配模式");
             if (processors <= 8 || (memory > 0 && memory <= 10L * 1024 * 1024 * 1024)) return Resolve("标准模式");
             return Resolve("高性能模式");
@@ -485,7 +485,7 @@ namespace LinkDispositionChecker
 
     internal static class SessionStore
     {
-        public const string CurrentEngineVersion = "3.10.5";
+        public const string CurrentEngineVersion = "3.10.6";
         private static readonly object SyncRoot = new object();
         private static readonly JavaScriptSerializer Serializer = new JavaScriptSerializer { MaxJsonLength = Int32.MaxValue };
         public static readonly string SessionPath = Path.Combine(StoragePaths.UserDataDirectory, "last-session.json");
@@ -1541,7 +1541,7 @@ namespace LinkDispositionChecker
         private static readonly SemaphoreSlim BaiduPublicProbeGate = new SemaphoreSlim(1, 1);
         private static readonly SemaphoreSlim KuaishouProbeGate = new SemaphoreSlim(1, 1);
         private static readonly SemaphoreSlim BilibiliProbeGate = new SemaphoreSlim(1, 1);
-        private static readonly SemaphoreSlim RenderedSocialProbeGate = new SemaphoreSlim(3, 3);
+        private static readonly SemaphoreSlim RenderedSocialProbeGate = new SemaphoreSlim(1, 1);
         private static readonly object ZhihuProbeTimingSync = new object();
         private static DateTime _lastZhihuProbeStartedUtc = DateTime.MinValue;
         private static readonly ConcurrentDictionary<string, Task<PlatformProbeOutcome>> DouyinProbeCache =
@@ -1550,8 +1550,55 @@ namespace LinkDispositionChecker
         private static readonly SemaphoreSlim WeiboProbeGate = new SemaphoreSlim(1, 1);
         private static string _weiboVisitorCookie = "";
         private static DateTime _weiboVisitorCookieCreatedUtc = DateTime.MinValue;
-        private static readonly SemaphoreSlim BrowserSemaphore = new SemaphoreSlim(4);
+        private static readonly SemaphoreSlim BrowserSemaphore = new SemaphoreSlim(1, 1);
+        private static readonly ConcurrentDictionary<string, RequestPacingState> RequestPacing =
+            new ConcurrentDictionary<string, RequestPacingState>(StringComparer.OrdinalIgnoreCase);
         private static readonly string BrowserPath = FindBrowserPath();
+
+        private sealed class RequestPacingState
+        {
+            public readonly SemaphoreSlim Gate = new SemaphoreSlim(1, 1);
+            public DateTime NextAllowedUtc = DateTime.MinValue;
+        }
+
+        internal static string RequestPacingKey(Uri uri)
+        {
+            string host = uri == null ? "" : (uri.Host ?? "").Trim().Trim('.').ToLowerInvariant();
+            foreach (string platform in new[]
+            {
+                "zhihu.com", "weibo.com", "weibo.cn", "douyin.com", "iesdouyin.com",
+                "toutiao.com", "xiaohongshu.com", "xhslink.com", "kuaishou.com",
+                "gifshow.com", "bilibili.com", "baidu.com", "dongchedi.com", "xueqiu.com"
+            })
+                if (host == platform || host.EndsWith("." + platform, StringComparison.Ordinal)) return platform;
+            return host;
+        }
+
+        internal static int RequestPacingMilliseconds(Uri uri)
+        {
+            string key = RequestPacingKey(uri);
+            return new[]
+            {
+                "zhihu.com", "weibo.com", "weibo.cn", "douyin.com", "iesdouyin.com",
+                "toutiao.com", "xiaohongshu.com", "xhslink.com", "kuaishou.com",
+                "gifshow.com", "bilibili.com", "baidu.com", "dongchedi.com", "xueqiu.com"
+            }.Contains(key, StringComparer.OrdinalIgnoreCase) ? 1600 : 350;
+        }
+
+        internal static async Task WaitForRequestSlotAsync(Uri uri, CancellationToken token)
+        {
+            string key = RequestPacingKey(uri);
+            if (String.IsNullOrWhiteSpace(key)) return;
+            RequestPacingState state = RequestPacing.GetOrAdd(key, ignored => new RequestPacingState());
+            await state.Gate.WaitAsync(token);
+            try
+            {
+                int delay = Math.Max(0, (int)(state.NextAllowedUtc - DateTime.UtcNow).TotalMilliseconds);
+                if (delay > 0) await Task.Delay(delay, token);
+                state.NextAllowedUtc = DateTime.UtcNow.AddMilliseconds(RequestPacingMilliseconds(uri));
+            }
+            finally { state.Gate.Release(); }
+        }
 
         private sealed class BrowserSnapshot
         {
@@ -3766,7 +3813,8 @@ namespace LinkDispositionChecker
             try
             {
                 ProbeResponse proxyResult = await ReadProbeWithClientAsync(_client, url, headers, token);
-                if (proxyResult != null && proxyResult.Status != 403 && proxyResult.Status != 407 && proxyResult.Status != 429)
+                if (proxyResult != null && proxyResult.Status == 429) return proxyResult;
+                if (proxyResult != null && proxyResult.Status != 403 && proxyResult.Status != 407)
                     return proxyResult;
 
                 // A company proxy may block an otherwise public platform API. Try direct once, but never
@@ -3783,6 +3831,8 @@ namespace LinkDispositionChecker
             await BaiduPublicProbeGate.WaitAsync(token);
             try
             {
+                Uri pacingUri;
+                if (Uri.TryCreate(url, UriKind.Absolute, out pacingUri)) await WaitForRequestSlotAsync(pacingUri, token);
                 return await Task.Run(delegate
                 {
                     token.ThrowIfCancellationRequested();
@@ -3838,6 +3888,8 @@ namespace LinkDispositionChecker
         {
             try
             {
+                Uri pacingUri;
+                if (Uri.TryCreate(url, UriKind.Absolute, out pacingUri)) await WaitForRequestSlotAsync(pacingUri, token);
                 using (var request = new HttpRequestMessage(HttpMethod.Get, url))
                 {
                     if (headers != null)
@@ -3862,6 +3914,8 @@ namespace LinkDispositionChecker
         {
             try
             {
+                Uri pacingUri;
+                if (Uri.TryCreate(url, UriKind.Absolute, out pacingUri)) await WaitForRequestSlotAsync(pacingUri, token);
                 using (var request = new HttpRequestMessage(HttpMethod.Post, url))
                 {
                     request.Content = new StringContent(form ?? "", Encoding.UTF8, "application/x-www-form-urlencoded");
@@ -4249,6 +4303,7 @@ namespace LinkDispositionChecker
         {
             try
             {
+                await WaitForRequestSlotAsync(uri, token);
                 using (var request = new HttpRequestMessage(HttpMethod.Get, uri))
                     return new SendAttempt { Response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token) };
             }
@@ -4264,7 +4319,7 @@ namespace LinkDispositionChecker
         {
             if (response == null) return true;
             int code = (int)response.StatusCode;
-            if (code == 407 || code == 408 || code == 426 || code == 429 || code == 502 || code == 503 || code == 504) return true;
+            if (code == 407 || code == 408 || code == 426 || code == 502 || code == 503 || code == 504) return true;
             return candidate != null && candidate.Scheme == Uri.UriSchemeHttp && (code == 400 || code == 403);
         }
 
@@ -5157,9 +5212,9 @@ namespace LinkDispositionChecker
                 {
                     item.Verdict = "人工复核";
                     string platformKey = VerificationPlatformKey(item.OriginalUrl);
-                    bool pausePlatform = platformKey == "zhihu.com" && IsSecurityVerificationDecision(decision);
+                    bool pausePlatform = IsSecurityVerificationDecision(decision);
                     item.Evidence = decision.Evidence + (pausePlatform
-                        ? "；已暂停本批剩余知乎链接，保留未完成记录，下次可继续复核"
+                        ? "；已暂停本批该平台剩余链接，保留未完成记录，下次可继续复核"
                         : "；后台复核未停留等待，已自动继续下一条") +
                         (String.IsNullOrWhiteSpace(profile.Limitation) ? "" : "；平台限制：" + profile.Limitation);
                     item.CheckedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
@@ -5283,7 +5338,7 @@ namespace LinkDispositionChecker
             _processing = true;
             int next = -1;
             int completed = 0;
-            int workers = !Environment.Is64BitProcess || Environment.ProcessorCount <= 4 ? 2 : 4;
+            int workers = 1;
             var probeQueue = new ConcurrentQueue<CheckResult>();
             var renderQueue = new Queue<CheckResult>();
             try
@@ -5358,12 +5413,12 @@ namespace LinkDispositionChecker
                     try
                     {
                         RenderedPageData rendered = await ReadFastRenderedPageAsync(_browser, pendingItem.OriginalUrl, _cancellation.Token);
-                        if (IsZhihuSecurityPage(pendingItem, rendered))
+                        if (IsPlatformSecurityPage(rendered))
                         {
                             pendingItem.Verdict = "人工复核";
                             pendingItem.EdgeFastReviewed = false;
                             pendingItem.DeepReviewed = false;
-                            pendingItem.Evidence = "知乎出现安全验证，本批已暂停知乎剩余链接；当前及剩余记录可在稍后继续";
+                            pendingItem.Evidence = "平台出现安全验证或访问频繁提示，本批已暂停该平台剩余链接；当前及剩余记录可在稍后继续";
                             pausedRenderPlatforms.Add(platformKey);
                         }
                         else if (ApplyFastRenderedPage(pendingItem, rendered)) ResolvedCount++;
@@ -5419,20 +5474,20 @@ namespace LinkDispositionChecker
                 platform.Contains("b站") || platform.Contains("知乎");
         }
 
-        private static bool IsZhihuSecurityPage(CheckResult item, RenderedPageData page)
+        private static bool IsPlatformSecurityPage(RenderedPageData page)
         {
-            Uri uri;
-            if (item == null || !Uri.TryCreate(item.OriginalUrl, UriKind.Absolute, out uri) ||
-                !uri.Host.EndsWith("zhihu.com", StringComparison.OrdinalIgnoreCase)) return false;
             string evidence = ((page == null ? "" : page.Title) + " " + (page == null ? "" : page.Text) + " " +
                 (page == null ? "" : page.Url)).ToLowerInvariant();
             return evidence.Contains("安全验证") || evidence.Contains("访问过于频繁") ||
                 evidence.Contains("操作频繁") || evidence.Contains("captcha") ||
-                evidence.Contains("verify you are human");
+                evidence.Contains("verify you are human") || evidence.Contains("unusual traffic") ||
+                evidence.Contains("too many requests");
         }
 
         internal static async Task<RenderedPageData> ReadFastRenderedPageAsync(WebView2 browser, string url, CancellationToken token)
         {
+            Uri pacingUri;
+            if (Uri.TryCreate(url, UriKind.Absolute, out pacingUri)) await Checker.WaitForRequestSlotAsync(pacingUri, token);
             var completion = new TaskCompletionSource<bool>();
             EventHandler<CoreWebView2NavigationCompletedEventArgs> handler = null;
             handler = delegate(object sender, CoreWebView2NavigationCompletedEventArgs args)
@@ -5564,6 +5619,8 @@ namespace LinkDispositionChecker
         internal static async Task<EdgeFetchedResponse> LoadEdgeResourceAsync(CoreWebView2 core, string url, int maxBytes, CancellationToken token)
         {
             if (core == null) return new EdgeFetchedResponse { Error = "Edge 内核尚未初始化" };
+            Uri pacingUri;
+            if (Uri.TryCreate(url, UriKind.Absolute, out pacingUri)) await Checker.WaitForRequestSlotAsync(pacingUri, token);
             var serializer = new JavaScriptSerializer { MaxJsonLength = 2000000 };
             string frameJson = await AwaitCdpAsync(core.CallDevToolsProtocolMethodAsync("Page.getFrameTree", "{}"), 8000, token);
             var frameRoot = serializer.DeserializeObject(frameJson) as Dictionary<string, object>;
@@ -5987,6 +6044,8 @@ namespace LinkDispositionChecker
 
         private async Task NavigateAsync(string url, int timeoutMilliseconds = 13000)
         {
+            Uri pacingUri;
+            if (Uri.TryCreate(url, UriKind.Absolute, out pacingUri)) await Checker.WaitForRequestSlotAsync(pacingUri, _cancellation.Token);
             var completion = new TaskCompletionSource<bool>();
             EventHandler<CoreWebView2NavigationCompletedEventArgs> handler = null;
             handler = delegate(object sender, CoreWebView2NavigationCompletedEventArgs args)

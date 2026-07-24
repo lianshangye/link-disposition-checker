@@ -1,0 +1,325 @@
+﻿{
+  "Version": 2,
+  "RemovedSignals": [
+    "资源已被删除",
+    "内容暂不可见",
+    "作品已被移除",
+    "发布者已删除",
+    "作者已删除",
+    "作者删除了该内容",
+    "作者已将作品设为私密",
+    "作者已将内容设为私密",
+    "该作品为私密作品",
+    "该资源不存在"
+  ],
+  "RestrictedSignals": [
+    "请完成身份验证",
+    "请在客户端内查看",
+    "登录后继续访问",
+    "当前访问存在风险"
+  ],
+  "Platforms": [
+    {
+      "Name": "微博",
+      "Domains": ["weibo.com", "weibo.cn"],
+      "LoginUrl": "https://weibo.com/",
+      "DynamicShell": true,
+      "ReviewTier": "动态公开页",
+      "MinimumWaitMilliseconds": 1200,
+      "MaximumWaitMilliseconds": 4200,
+      "NavigationTimeoutMilliseconds": 12000,
+      "Limitation": "未登录、账号风控或只返回推荐流时，网页端无法可靠确认原微博",
+      "RemovedSignals": ["微博不存在或暂无查看权限", "抱歉，此微博已被删除"],
+      "RestrictedSignals": []
+    },
+    {
+      "Name": "知乎",
+      "Domains": ["zhihu.com"],
+      "LoginUrl": "https://www.zhihu.com/",
+      "DynamicShell": true,
+      "ReviewTier": "动态公开页",
+      "MinimumWaitMilliseconds": 1500,
+      "MaximumWaitMilliseconds": 4800,
+      "NavigationTimeoutMilliseconds": 13000,
+      "Limitation": "回答跳回同一问题且回答编号从最终地址消失可确认失效；登录弹窗本身不能判下架，安全验证时暂停本平台并稍后续跑",
+      "RemovedSignals": ["没有知识存在的荒原"],
+      "RestrictedSignals": []
+    },
+    {
+      "Name": "今日头条",
+      "Domains": ["toutiao.com"],
+      "LoginUrl": "https://www.toutiao.com/",
+      "DynamicShell": true,
+      "ReviewTier": "动态公开页",
+      "MinimumWaitMilliseconds": 1400,
+      "MaximumWaitMilliseconds": 4600,
+      "NavigationTimeoutMilliseconds": 13000,
+      "Limitation": "只剩推荐流、公开接口缓存或登录页时，不能确定原内容状态",
+      "RemovedSignals": [],
+      "RestrictedSignals": []
+    },
+    {
+      "Name": "抖音",
+      "Domains": ["douyin.com", "iesdouyin.com"],
+      "LoginUrl": "https://www.douyin.com/",
+      "DynamicShell": true,
+      "ReviewTier": "动态公开页",
+      "MinimumWaitMilliseconds": 1400,
+      "MaximumWaitMilliseconds": 4800,
+      "NavigationTimeoutMilliseconds": 13000,
+      "Limitation": "登录、滑块验证、设备风控或只显示推荐视频时无法自动确认目标作品",
+      "RemovedSignals": ["该作品不存在", "视频已下线"],
+      "RestrictedSignals": []
+    },
+    {
+      "Name": "懂车帝",
+      "Domains": ["dongchedi.com", "dcdapp.com"],
+      "LoginUrl": "https://www.dongchedi.com/",
+      "DynamicShell": true,
+      "ReviewTier": "动态公开页",
+      "MinimumWaitMilliseconds": 1200,
+      "MaximumWaitMilliseconds": 4200,
+      "NavigationTimeoutMilliseconds": 12000,
+      "Limitation": "登录或风控页与失效页可能共享动态外壳，未看到正文时只能保留复核",
+      "RemovedSignals": [],
+      "RestrictedSignals": []
+    },
+    {
+      "Name": "小红书",
+      "Domains": ["xiaohongshu.com", "xhslink.com"],
+      "LoginUrl": "https://www.xiaohongshu.com/",
+      "DynamicShell": true,
+      "ReviewTier": "平台受限",
+      "MinimumWaitMilliseconds": 900,
+      "MaximumWaitMilliseconds": 2800,
+      "NavigationTimeoutMilliseconds": 9000,
+      "Limitation": "部分笔记强制扫码或 App 内打开，电脑网页无法稳定获得正文",
+      "RemovedSignals": ["该笔记已被删除", "笔记已删除"],
+      "RestrictedSignals": ["打开小红书App", "请在小红书App内打开"]
+    },
+    {
+      "Name": "百度系平台",
+      "Domains": ["baidu.com", "baijiahao.baidu.com", "haokan.baidu.com", "yoojia.baidu.com"],
+      "LoginUrl": "https://www.baidu.com/",
+      "DynamicShell": true,
+      "ReviewTier": "动态公开页",
+      "MinimumWaitMilliseconds": 1000,
+      "MaximumWaitMilliseconds": 3600,
+      "NavigationTimeoutMilliseconds": 11000,
+      "Limitation": "共享页面或接口中的内容编号可能是缓存，必须由当前网页正文或专用错误页再次确认",
+      "RemovedSignals": ["这里空空如也"],
+      "RestrictedSignals": []
+    },
+    {
+      "Name": "腾讯系平台",
+      "Domains": ["qq.com", "weishi.qq.com", "v.qq.com"],
+      "LoginUrl": "https://www.qq.com/",
+      "DynamicShell": true,
+      "ReviewTier": "动态公开页",
+      "MinimumWaitMilliseconds": 1100,
+      "MaximumWaitMilliseconds": 4000,
+      "NavigationTimeoutMilliseconds": 12000,
+      "Limitation": "视频号及部分腾讯内容依赖账号、微信或客户端环境；自选股、腾讯新闻和腾讯视频已有公开接口/官方移动页补证",
+      "RemovedSignals": [],
+      "RestrictedSignals": []
+    },
+    {
+      "Name": "有驾",
+      "Domains": ["yoojia.com"],
+      "LoginUrl": "",
+      "DynamicShell": true,
+      "ReviewTier": "动态公开页",
+      "MinimumWaitMilliseconds": 1200,
+      "MaximumWaitMilliseconds": 4200,
+      "NavigationTimeoutMilliseconds": 12000,
+      "Limitation": "PC 页、移动页和百度共享页可能跳转不同，必须看到目标正文或明确错误状态",
+      "RemovedSignals": ["该文章已经删除"],
+      "RestrictedSignals": []
+    },
+    {
+      "Name": "雪球",
+      "Domains": ["xueqiu.com"],
+      "LoginUrl": "https://xueqiu.com/",
+      "DynamicShell": true,
+      "ReviewTier": "动态公开页",
+      "MinimumWaitMilliseconds": 1200,
+      "MaximumWaitMilliseconds": 4200,
+      "NavigationTimeoutMilliseconds": 12000,
+      "Limitation": "采集标题常是正文首句；只有通用网页标题或登录外壳时无法自动确认",
+      "RemovedSignals": [],
+      "RestrictedSignals": []
+    },
+    {
+      "Name": "快手",
+      "Domains": ["kuaishou.com", "gifshow.com"],
+      "LoginUrl": "https://www.kuaishou.com/",
+      "DynamicShell": true,
+      "ReviewTier": "动态公开页",
+      "MinimumWaitMilliseconds": 1100,
+      "MaximumWaitMilliseconds": 3800,
+      "NavigationTimeoutMilliseconds": 11000,
+      "Limitation": "通用视频外壳会回显目标编号，编号本身不能证明作品仍在",
+      "RemovedSignals": [],
+      "RestrictedSignals": []
+    },
+    {
+      "Name": "东方财富/股吧",
+      "Domains": ["eastmoney.com"],
+      "LoginUrl": "https://passport2.eastmoney.com/",
+      "DynamicShell": false,
+      "ReviewTier": "高把握",
+      "MinimumWaitMilliseconds": 600,
+      "MaximumWaitMilliseconds": 2200,
+      "NavigationTimeoutMilliseconds": 8500,
+      "Limitation": "普通文章可快速确认；股吧明确跳转 error?type=2 才判失效",
+      "RemovedSignals": [],
+      "RestrictedSignals": []
+    },
+    {
+      "Name": "网易",
+      "Domains": ["163.com"],
+      "LoginUrl": "https://reg.163.com/",
+      "DynamicShell": false,
+      "ReviewTier": "高把握",
+      "MinimumWaitMilliseconds": 600,
+      "MaximumWaitMilliseconds": 2200,
+      "NavigationTimeoutMilliseconds": 8500,
+      "Limitation": "以当前正文、HTTP 404/410 或明确错误页为准",
+      "RemovedSignals": [],
+      "RestrictedSignals": []
+    },
+    {
+      "Name": "UC头条/大鱼号",
+      "Domains": ["uc.cn", "uczzd.cn"],
+      "LoginUrl": "https://www.uc.cn/",
+      "DynamicShell": true,
+      "RemovedSignals": [],
+      "RestrictedSignals": []
+    },
+    {
+      "Name": "同花顺",
+      "Domains": ["10jqka.com.cn"],
+      "LoginUrl": "https://upass.10jqka.com.cn/",
+      "DynamicShell": true,
+      "RemovedSignals": [],
+      "RestrictedSignals": []
+    },
+    {
+      "Name": "搜狐",
+      "Domains": ["sohu.com"],
+      "LoginUrl": "https://www.sohu.com/",
+      "DynamicShell": false,
+      "ReviewTier": "高把握",
+      "MinimumWaitMilliseconds": 700,
+      "MaximumWaitMilliseconds": 2400,
+      "NavigationTimeoutMilliseconds": 9000,
+      "Limitation": "时间线或自媒体动态页若只显示推荐流，仍需要人工确认",
+      "RemovedSignals": ["您访问的页面已经不存在"],
+      "RestrictedSignals": []
+    },
+    {
+      "Name": "哔哩哔哩/B站",
+      "Domains": ["bilibili.com", "b23.tv"],
+      "LoginUrl": "https://passport.bilibili.com/login",
+      "DynamicShell": true,
+      "RemovedSignals": ["视频去哪了呢"],
+      "RestrictedSignals": []
+    },
+    {
+      "Name": "易车",
+      "Domains": ["yiche.com", "bitauto.com"],
+      "LoginUrl": "https://i.yiche.com/",
+      "DynamicShell": true,
+      "RemovedSignals": [],
+      "RestrictedSignals": []
+    },
+    {
+      "Name": "汽车之家",
+      "Domains": ["autohome.com.cn"],
+      "LoginUrl": "https://account.autohome.com.cn/",
+      "DynamicShell": true,
+      "RemovedSignals": [],
+      "RestrictedSignals": []
+    },
+    {
+      "Name": "新浪",
+      "Domains": ["sina.com.cn", "sina.cn"],
+      "LoginUrl": "https://login.sina.com.cn/",
+      "DynamicShell": false,
+      "ReviewTier": "高把握",
+      "MinimumWaitMilliseconds": 600,
+      "MaximumWaitMilliseconds": 2200,
+      "NavigationTimeoutMilliseconds": 8500,
+      "Limitation": "以正文、404/410 或“该文章已不存在”等明确页面为准",
+      "RemovedSignals": ["该文章已不存在"],
+      "RestrictedSignals": []
+    },
+    {
+      "Name": "一点资讯",
+      "Domains": ["yidianzixun.com"],
+      "LoginUrl": "https://www.yidianzixun.com/",
+      "DynamicShell": true,
+      "RemovedSignals": ["出错了！文章没有找到哦", "文章没有找到哦"],
+      "RestrictedSignals": []
+    },
+    {
+      "Name": "凤凰网",
+      "Domains": ["ifeng.com"],
+      "LoginUrl": "https://user.ifeng.com/",
+      "DynamicShell": false,
+      "RemovedSignals": [],
+      "RestrictedSignals": []
+    },
+    {
+      "Name": "爱奇艺",
+      "Domains": ["iqiyi.com"],
+      "LoginUrl": "https://passport.iqiyi.com/",
+      "DynamicShell": true,
+      "RemovedSignals": [],
+      "RestrictedSignals": []
+    },
+    {
+      "Name": "喜马拉雅",
+      "Domains": ["ximalaya.com"],
+      "LoginUrl": "https://www.ximalaya.com/",
+      "DynamicShell": true,
+      "RemovedSignals": [],
+      "RestrictedSignals": []
+    },
+    {
+      "Name": "趣头条",
+      "Domains": ["qktoutiao.com"],
+      "LoginUrl": "https://www.qktoutiao.com/",
+      "DynamicShell": true,
+      "RemovedSignals": [],
+      "RestrictedSignals": []
+    },
+    {
+      "Name": "快资讯",
+      "Domains": ["360kuai.com"],
+      "LoginUrl": "https://www.360kuai.com/",
+      "DynamicShell": false,
+      "ReviewTier": "高把握",
+      "MinimumWaitMilliseconds": 600,
+      "MaximumWaitMilliseconds": 2200,
+      "NavigationTimeoutMilliseconds": 8500,
+      "Limitation": "可由正文或专用 404 页面确认，普通推荐页不判失效",
+      "RemovedSignals": ["您访问的文章走失了"],
+      "RestrictedSignals": []
+    },
+    {
+      "Name": "ZAKER",
+      "Domains": ["myzaker.com", "zaker.cn"],
+      "LoginUrl": "https://www.myzaker.com/",
+      "DynamicShell": true,
+      "ReviewTier": "平台受限",
+      "MinimumWaitMilliseconds": 900,
+      "MaximumWaitMilliseconds": 2800,
+      "NavigationTimeoutMilliseconds": 9000,
+      "Limitation": "分享页验证码不能区分状态；工具会先尝试 ZAKER 官方内容页，仍受限时再保留人工复核",
+      "RemovedSignals": [],
+      "RestrictedSignals": ["请完成验证", "验证码", "captcha"]
+    }
+  ]
+}
+

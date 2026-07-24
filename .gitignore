@@ -1,0 +1,28 @@
+# Build and packaged outputs
+便携版/
+开发文件/build-output/
+开发文件/dependencies/
+*.exe
+*.dll
+*.pdb
+
+# Browser profiles, captured pages, test fixtures, and results
+开发文件/test-data/
+核验结果/
+__pycache__/
+*.py[cod]
+
+# Local credentials and environment
+.env
+.env.*
+*.pem
+*.key
+credentials*.json
+auth*.json
+
+# OS and editor files
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+

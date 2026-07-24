@@ -14,6 +14,7 @@ if (-not $buildScript) {
 
 $developmentRoot = Split-Path -Parent $buildScript
 $dependencyRoot = Join-Path $developmentRoot 'dependencies'
+$sourcePath = Join-Path $developmentRoot 'LinkDispositionChecker.cs'
 $webViewVersion = '1.0.4078.44'
 $packageUrl = "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/$webViewVersion/microsoft.web.webview2.$webViewVersion.nupkg"
 $cacheRoot = Join-Path $env:LOCALAPPDATA "LinkDispositionChecker\packages\$webViewVersion"
@@ -35,7 +36,22 @@ function Assert-File {
     }
 }
 
+$expectedVersion = ''
+if (Test-Path -LiteralPath $sourcePath -PathType Leaf) {
+    $versionMatch = [regex]::Match(
+        [System.IO.File]::ReadAllText($sourcePath),
+        'AssemblyFileVersion\("([0-9.]+)"\)'
+    )
+    if ($versionMatch.Success) {
+        $expectedVersion = $versionMatch.Groups[1].Value
+    }
+}
+
 $runtimeReady = @($runtimeFiles | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }).Count -eq 0
+if ($runtimeReady -and -not [String]::IsNullOrWhiteSpace($expectedVersion)) {
+    $installedVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($outputPath).FileVersion
+    $runtimeReady = [String]::Equals($installedVersion, $expectedVersion, [StringComparison]::OrdinalIgnoreCase)
+}
 if (-not $runtimeReady) {
     $coreSource = Join-Path $packageRoot 'lib\net462\Microsoft.Web.WebView2.Core.dll'
     $formsSource = Join-Path $packageRoot 'lib\net462\Microsoft.Web.WebView2.WinForms.dll'
@@ -75,6 +91,13 @@ if (-not $runtimeReady) {
 
 foreach ($file in $runtimeFiles) {
     Assert-File -Path $file
+}
+
+if (-not [String]::IsNullOrWhiteSpace($expectedVersion)) {
+    $installedVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($outputPath).FileVersion
+    if (-not [String]::Equals($installedVersion, $expectedVersion, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "The installed EXE is version $installedVersion but source requires $expectedVersion. Close the running tool and retry."
+    }
 }
 
 Write-Host 'Runtime preparation completed.'

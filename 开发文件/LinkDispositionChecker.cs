@@ -25,8 +25,8 @@ using Microsoft.Web.WebView2.WinForms;
 
 [assembly: AssemblyTitle("侵权链接处置核验工具")]
 [assembly: AssemblyProduct("侵权链接处置核验工具")]
-[assembly: AssemblyVersion("3.11.0.0")]
-[assembly: AssemblyFileVersion("3.11.0.0")]
+[assembly: AssemblyVersion("3.12.0.0")]
+[assembly: AssemblyFileVersion("3.12.0.0")]
 
 namespace LinkDispositionChecker
 {
@@ -52,6 +52,11 @@ namespace LinkDispositionChecker
         public bool DeepReviewed { get; set; }
         public bool EdgeFastReviewed { get; set; }
         public List<VerificationEvidence> EvidenceTrail { get; set; }
+        public string AnalysisContext { get; set; }
+        public bool AiReviewed { get; set; }
+        public string AiDecision { get; set; }
+        public double AiConfidence { get; set; }
+        public string AiModel { get; set; }
     }
 
     internal sealed class RenderedPageData
@@ -485,7 +490,7 @@ namespace LinkDispositionChecker
 
     internal static class SessionStore
     {
-        public const string CurrentEngineVersion = "3.11.0";
+        public const string CurrentEngineVersion = "3.12.0";
         private static readonly object SyncRoot = new object();
         private static readonly JavaScriptSerializer Serializer = new JavaScriptSerializer { MaxJsonLength = Int32.MaxValue };
         public static readonly string SessionPath = Path.Combine(StoragePaths.UserDataDirectory, "last-session.json");
@@ -1810,6 +1815,9 @@ namespace LinkDispositionChecker
                     string body = await ReadLimitedBodyAsync(response.Content, _bodyBytes, token);
                     string title = ExtractTitle(body);
                     result.Title = title;
+                    string visibleForAi = ExtractVisibleText(body);
+                    result.AnalysisContext = AiReviewPolicy.BuildObservedContext(title,
+                        ExtractProbableMainContentText(body), visibleForAi);
 
                     PlatformProbeOutcome platformProbe = await ProbePlatformContentAsync(uri, expectedTitle, expectedExcerpt, expectedAuthor, token);
                     if (platformProbe != null && platformProbe.Evidences != null)
@@ -1858,7 +1866,7 @@ namespace LinkDispositionChecker
                     }
                     else
                     {
-                        string visible = ExtractVisibleText(body);
+                        string visible = visibleForAi;
                         string combined = (title + " " + visible).ToLowerInvariant();
                         string signal = FirstNonEmpty(FindSignal(combined, RemovedSignals), PlatformRules.FindRemovedSignal(combined, uri));
                         string restriction = FirstNonEmpty(FindSignal(combined, RestrictedSignals), PlatformRules.FindRestrictedSignal(combined, uri));
@@ -3995,6 +4003,8 @@ namespace LinkDispositionChecker
 
             string browserTitle = ExtractTitle(snapshot.Html);
             string browserVisible = ExtractVisibleText(snapshot.Html);
+            result.AnalysisContext = AiReviewPolicy.BuildObservedContext(browserTitle,
+                ExtractProbableMainContentText(snapshot.Html), browserVisible);
             string combined = (browserTitle + " " + browserVisible).ToLowerInvariant();
             string signal = FindSignal(combined, RemovedSignals);
             string restriction = FindSignal(combined, RestrictedSignals);
@@ -5537,6 +5547,7 @@ namespace LinkDispositionChecker
         internal static bool ApplyFastRenderedPage(CheckResult item, RenderedPageData page)
         {
             if (item == null || page == null || String.IsNullOrWhiteSpace(page.Html)) return false;
+            item.AnalysisContext = AiReviewPolicy.BuildObservedContext(page.Title, page.MainText, page.Text);
             DeepDecision decision = Checker.ClassifyRenderedPage(item, page);
             if (!String.IsNullOrWhiteSpace(page.Title)) item.Title = page.Title;
             if (!String.IsNullOrWhiteSpace(page.Url)) item.FinalUrl = page.Url;
@@ -5614,6 +5625,7 @@ namespace LinkDispositionChecker
             }
 
             RenderedPageData page = Checker.BuildRenderedPageData(response.Body, item.OriginalUrl);
+            item.AnalysisContext = AiReviewPolicy.BuildObservedContext(page.Title, page.MainText, page.Text);
             if (!String.IsNullOrWhiteSpace(page.Title)) item.Title = page.Title;
             DeepDecision decision = Checker.ClassifyRenderedPage(item, page);
             if (decision.Resolved && (decision.Verdict == "已失效" || decision.Verdict == "仍可访问"))
@@ -6305,6 +6317,8 @@ namespace LinkDispositionChecker
         private readonly Button _clear = new Button();
         private readonly Button _export = new Button();
         private readonly Button _deepReview = new Button();
+        private readonly Button _aiReview = new Button();
+        private readonly Button _aiSettings = new Button();
         private readonly Button _open = new Button();
         private readonly ComboBox _filter = new ComboBox();
         private readonly ComboBox _performance = new ComboBox();
@@ -6417,10 +6431,15 @@ namespace LinkDispositionChecker
             main.Controls.Add(inputPanel, 0, 1);
 
             var toolbar = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = true, AutoScroll = true, Padding = new Padding(0, 6, 0, 4) };
-            StyleButton(_start, "开始核验", true); StyleButton(_stop, "停止", false); StyleButton(_deepReview, "启动后台复核候选项", false); StyleButton(_export, "导出结果", false); StyleButton(_open, "打开选中链接", false);
-            _stop.Enabled = false; _deepReview.Enabled = false; _start.Click += async delegate { await StartChecksAsync(false); }; _stop.Click += delegate { if (_cancellation != null) _cancellation.Cancel(); };
+            StyleButton(_start, "开始核验", true); StyleButton(_stop, "停止", false); StyleButton(_deepReview, "启动后台复核候选项", false);
+            StyleButton(_aiReview, "AI 辅助复核", false); StyleButton(_aiSettings, "AI 设置", false);
+            StyleButton(_export, "导出结果", false); StyleButton(_open, "打开选中链接", false);
+            _stop.Enabled = false; _deepReview.Enabled = false; _aiReview.Enabled = false;
+            _start.Click += async delegate { await StartChecksAsync(false); }; _stop.Click += delegate { if (_cancellation != null) _cancellation.Cancel(); };
             _deepReview.Click += delegate { RunSelectedReview(); }; _export.Click += ExportClick; _open.Click += OpenSelectedClick;
-            toolbar.Controls.Add(_start); toolbar.Controls.Add(_stop); toolbar.Controls.Add(_deepReview); toolbar.Controls.Add(_export); toolbar.Controls.Add(_open);
+            _aiReview.Click += async delegate { await RunAiReviewAsync(); };
+            _aiSettings.Click += delegate { ShowAiSettings(); };
+            toolbar.Controls.Add(_start); toolbar.Controls.Add(_stop); toolbar.Controls.Add(_deepReview); toolbar.Controls.Add(_aiReview); toolbar.Controls.Add(_aiSettings); toolbar.Controls.Add(_export); toolbar.Controls.Add(_open);
             toolbar.Controls.Add(new Label { Text = "    显示：", AutoSize = true, Margin = new Padding(8, 9, 0, 0), ForeColor = Color.FromArgb(75, 85, 99) });
             _filter.DropDownStyle = ComboBoxStyle.DropDownList; _filter.Width = 160; _filter.Margin = new Padding(4, 4, 0, 0);
             _filter.Items.AddRange(new object[] { "全部结果", "高置信已失效", "仍可访问", "待重试/复核" }); _filter.SelectedIndex = 0; _filter.SelectedIndexChanged += delegate { ApplyFilter(); };
@@ -6455,7 +6474,7 @@ namespace LinkDispositionChecker
             _grid.BackgroundColor = Color.White; _grid.BorderStyle = BorderStyle.None; _grid.GridColor = Color.FromArgb(229, 231, 235); _grid.RowTemplate.Height = 34;
             _grid.ColumnHeadersHeight = 38; _grid.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(238, 242, 247); _grid.ColumnHeadersDefaultCellStyle.ForeColor = Color.FromArgb(55, 65, 81);
             _grid.ColumnHeadersDefaultCellStyle.Font = new Font("微软雅黑", 9.2f, FontStyle.Bold); _grid.EnableHeadersVisualStyles = false;
-            AddColumn("Number", "#", 46); AddColumn("Verdict", "核验结果", 130); AddColumn("StatusCode", "HTTP", 68); AddColumn("Platform", "平台", 110); AddColumn("ContentType", "内容类型", 75); AddColumn("ExpectedAuthor", "发文作者", 120); AddColumn("Title", "页面标题", 190);
+            AddColumn("Number", "#", 46); AddColumn("Verdict", "核验结果", 130); AddColumn("AiDecision", "AI建议", 105); AddColumn("StatusCode", "HTTP", 68); AddColumn("Platform", "平台", 110); AddColumn("ContentType", "内容类型", 75); AddColumn("ExpectedAuthor", "发文作者", 120); AddColumn("Title", "页面标题", 190);
             AddColumn("OriginalUrl", "原链接", 300); AddColumn("Evidence", "判定依据", 330); AddColumn("FinalUrl", "最终地址", 250); AddColumn("CheckedAt", "核验时间", 145); AddColumn("Duration", "耗时", 62);
             _grid.CellFormatting += GridCellFormatting;
             _grid.CellDoubleClick += delegate { OpenSelected(); };
@@ -6555,7 +6574,7 @@ namespace LinkDispositionChecker
                 FlushUiResults(Int32.MaxValue);
                 if (_runWatch != null) _runWatch.Stop();
                 _allRows.Sort((a, b) => a.Number.CompareTo(b.Number));
-                _running = false; ApplyFilter(); _start.Enabled = true; _stop.Enabled = false; _deepReview.Enabled = _allRows.Count > 0; _import.Enabled = true; _clear.Enabled = true; _input.ReadOnly = false;
+                _running = false; ApplyFilter(); UpdateStats(); _start.Enabled = true; _stop.Enabled = false; _deepReview.Enabled = _allRows.Count > 0; _import.Enabled = true; _clear.Enabled = true; _input.ReadOnly = false;
                 _performance.Enabled = true;
                 _networkMode.Enabled = true;
                 RefreshResumeButton(); SaveSessionSafe();
@@ -6770,6 +6789,113 @@ namespace LinkDispositionChecker
                 (item.Verdict == "人工复核" || item.Verdict == "暂时异常" || item.Verdict == "疑似已处置"));
             if (hasFastPending) RunEdgeFastReview();
             else RunDeepReview(false);
+        }
+
+        private void ShowAiSettings()
+        {
+            if (_running) return;
+            using (var form = new AiSettingsForm()) form.ShowDialog(this);
+            UpdateStats();
+        }
+
+        private async Task RunAiReviewAsync()
+        {
+            if (_running) return;
+            AiRuntimeSettings settings = AiSettingsStore.Load();
+            if (String.IsNullOrWhiteSpace(settings.Token) || String.IsNullOrWhiteSpace(settings.Model))
+            {
+                using (var form = new AiSettingsForm())
+                {
+                    if (form.ShowDialog(this) != DialogResult.OK || !form.SettingsSaved) return;
+                }
+                settings = AiSettingsStore.Load();
+            }
+
+            List<CheckResult> candidates = _allRows.Where(AiReviewPolicy.IsEligible).OrderBy(item => item.Number).Take(100).ToList();
+            if (candidates.Count == 0)
+            {
+                int withoutContext = _allRows.Count(item =>
+                    (item.Verdict == "人工复核" || item.Verdict == "疑似已处置") &&
+                    !NetworkRestrictionCircuitBreaker.IsTransientRestriction(item) &&
+                    String.IsNullOrWhiteSpace(item.AnalysisContext));
+                MessageBox.Show(withoutContext > 0
+                    ? "当前结果没有可发送给 AI 的页面正文摘要。\n\n请使用当前版本重新核验这些待复核链接；新版会在本地保存必要的可见页面摘要，再由 AI 辅助判断。"
+                    : "当前没有适合 AI 辅助复核的结果。\n\n网络异常、验证码、登录页和已经确定的结果不会发送给 AI。",
+                    "暂无 AI 复核候选", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            DialogResult answer = MessageBox.Show("将把 " + candidates.Count + " 条记录的链接、标题、作者、HTTP 状态、机器证据和可见正文摘要发送到 Yunwu API。\n\n" +
+                "不会发送 Cookie、账号、完整 Excel 或浏览器凭证。最多处理 100 条，可能产生 API 费用。\n\n是否继续？",
+                "开始 AI 辅助复核", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (answer != DialogResult.Yes) return;
+
+            _running = true;
+            _cancellation = new CancellationTokenSource();
+            SetAiReviewBusy(true);
+            int processed = 0;
+            int resolved = 0;
+            try
+            {
+                using (var client = new YunwuAiClient(settings.Token))
+                {
+                    foreach (CheckResult item in candidates)
+                    {
+                        _cancellation.Token.ThrowIfCancellationRequested();
+                        _progressText.Text = "AI 辅助复核  " + (processed + 1) + " / " + candidates.Count +
+                            "  ·  " + (String.IsNullOrWhiteSpace(item.Platform) ? "未知平台" : item.Platform);
+                        AiReviewDecision decision = await client.ReviewAsync(settings, item, _cancellation.Token);
+                        AiReviewApplication application = AiReviewPolicy.Apply(item, decision, settings.Model);
+                        if (application.Resolved) resolved++;
+                        processed++;
+                        SessionStore.Append(item);
+                        RecalculateCounters();
+                        ApplyFilter();
+                        UpdateStats();
+                        await Task.Delay(450, _cancellation.Token);
+                    }
+                }
+                _progressText.Text = "AI 辅助复核完成：处理 " + processed + " 条，新增自动确认 " + resolved +
+                    " 条，其余已记录 AI 建议";
+                MessageBox.Show("AI 辅助复核完成。\n\n处理：" + processed + " 条\n新增自动确认：" + resolved +
+                    " 条\n保留建议或疑似项：" + Math.Max(0, processed - resolved) + " 条",
+                    "AI 复核完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (OperationCanceledException)
+            {
+                _progressText.Text = "AI 辅助复核已停止，已处理 " + processed + " / " + candidates.Count + " 条，进度已保存";
+            }
+            catch (Exception ex)
+            {
+                _progressText.Text = "AI 辅助复核失败，已处理结果仍已保存";
+                MessageBox.Show("AI 辅助复核失败：\n" + Regex.Replace(ex.Message ?? "", @"sk-[A-Za-z0-9_\-]+", "[Token已隐藏]"),
+                    "AI API 错误", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            finally
+            {
+                _running = false;
+                SetAiReviewBusy(false);
+                SaveSessionSafe();
+                RecalculateCounters();
+                ApplyFilter();
+                UpdateStats();
+            }
+        }
+
+        private void SetAiReviewBusy(bool busy)
+        {
+            _start.Enabled = !busy;
+            _stop.Enabled = busy;
+            _import.Enabled = !busy;
+            _resume.Enabled = !busy && SessionStore.Exists;
+            _clear.Enabled = !busy;
+            _deepReview.Enabled = !busy && _allRows.Count > 0;
+            _aiSettings.Enabled = !busy;
+            _aiReview.Enabled = !busy && _allRows.Any(AiReviewPolicy.IsEligible);
+            _export.Enabled = !busy;
+            _input.ReadOnly = busy;
+            _performance.Enabled = !busy;
+            _networkMode.Enabled = !busy;
         }
 
         private void RunEdgeFastReview()
@@ -7041,6 +7167,8 @@ namespace LinkDispositionChecker
             _removedCount.Text = _removedTotal.ToString();
             _aliveCount.Text = _aliveTotal.ToString();
             _reviewCount.Text = _reviewTotal.ToString();
+            _aiSettings.Enabled = !_running;
+            _aiReview.Enabled = !_running && _allRows.Any(AiReviewPolicy.IsEligible);
         }
 
         private void ImportClick(object sender, EventArgs e)
@@ -7152,9 +7280,9 @@ namespace LinkDispositionChecker
         {
             using (var writer = new StreamWriter(path, false, new UTF8Encoding(true)))
             {
-                writer.WriteLine("序号,核验结果,HTTP状态,平台,内容类型,发文作者,页面标题,原链接,最终地址,判定依据,核验时间,耗时");
+                writer.WriteLine("序号,核验结果,AI建议,AI置信度,AI模型,HTTP状态,平台,内容类型,发文作者,页面标题,原链接,最终地址,判定依据,核验时间,耗时");
                 foreach (var r in rows.OrderBy(x => x.Number))
-                    writer.WriteLine(String.Join(",", new[] { r.Number.ToString(), Csv(Checker.NormalizeVisibleVerdict(r.Verdict)), Csv(r.StatusCode), Csv(r.Platform), Csv(r.ContentType), Csv(r.ExpectedAuthor), Csv(r.Title), Csv(r.OriginalUrl), Csv(r.FinalUrl), Csv(r.Evidence), Csv(r.CheckedAt), Csv(r.Duration) }));
+                    writer.WriteLine(String.Join(",", new[] { r.Number.ToString(), Csv(Checker.NormalizeVisibleVerdict(r.Verdict)), Csv(r.AiDecision), Csv(r.AiReviewed ? r.AiConfidence.ToString("P0") : ""), Csv(r.AiModel), Csv(r.StatusCode), Csv(r.Platform), Csv(r.ContentType), Csv(r.ExpectedAuthor), Csv(r.Title), Csv(r.OriginalUrl), Csv(r.FinalUrl), Csv(r.Evidence), Csv(r.CheckedAt), Csv(r.Duration) }));
             }
         }
 

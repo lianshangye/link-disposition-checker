@@ -90,6 +90,52 @@ internal static class RegressionTests
         Console.WriteLine((preflightPassed ? "PASS " : "FAIL ") + "跨平台小样本预检和平台独立熔断");
         if (!preflightPassed) _failures++;
 
+        bool aiUrlPassed =
+            YunwuAiClient.NormalizeBaseUrl("https://yunwu.ai") == "https://yunwu.ai/v1" &&
+            YunwuAiClient.NormalizeBaseUrl("https://yunwu.ai/v1/") == "https://yunwu.ai/v1" &&
+            YunwuAiClient.ChatUrl("https://yunwu.ai/v1/chat/completions") == "https://yunwu.ai/v1/chat/completions" &&
+            YunwuAiClient.ModelsUrl("https://yunwu.ai") == "https://yunwu.ai/v1/models";
+        var aiAlive = new CheckResult
+        {
+            Verdict = "人工复核",
+            StatusCode = "200",
+            ExpectedTitle = "新能源汽车行业进入新的技术竞争阶段",
+            AnalysisContext = "页面标题：行业观察 页面可见内容：新能源汽车行业进入新的技术竞争阶段，作者继续介绍市场、技术、产品和用户反馈，正文内容仍然完整可读。文章还包含发布时间、连续段落、评论、收藏和分享区域，可确认这不是平台首页或空白网页外壳。",
+            Evidence = "页面已经打开但通用规则证据不足"
+        };
+        bool aiEligiblePassed = AiReviewPolicy.IsEligible(aiAlive) &&
+            !AiReviewPolicy.IsEligible(new CheckResult
+            {
+                Verdict = "暂时异常",
+                StatusCode = "502",
+                AnalysisContext = new string('字', 120),
+                Evidence = "站点服务异常"
+            });
+        AiReviewApplication aiAliveApplied = AiReviewPolicy.Apply(aiAlive, new AiReviewDecision
+        {
+            Verdict = "仍可访问",
+            Confidence = 0.98,
+            Reason = "当前页面明确出现目标标题和连续正文"
+        }, "test-model");
+        var aiRemoved = new CheckResult
+        {
+            Verdict = "人工复核",
+            StatusCode = "200",
+            ExpectedTitle = "目标文章",
+            AnalysisContext = "页面标题：提示 页面可见内容：该文章已被删除，返回首页。" + new string('证', 100),
+            Evidence = "页面出现删除提示但位置尚未确认"
+        };
+        AiReviewApplication aiRemovedApplied = AiReviewPolicy.Apply(aiRemoved, new AiReviewDecision
+        {
+            Verdict = "已失效",
+            Confidence = 0.99,
+            Reason = "页面明确提示目标文章已删除"
+        }, "test-model");
+        bool aiPolicyPassed = aiUrlPassed && aiEligiblePassed && aiAliveApplied.Resolved &&
+            aiAlive.Verdict == "仍可访问" && !aiRemovedApplied.Resolved && aiRemoved.Verdict == "疑似已处置";
+        Console.WriteLine((aiPolicyPassed ? "PASS " : "FAIL ") + "Yunwu 兼容接口、AI候选过滤和本地安全门");
+        if (!aiPolicyPassed) _failures++;
+
         bool baijiaIdPassed = Checker.ExtractBaiduArticleId(new Uri("https://baijiahao.baidu.com/s?id=1870762825559558263&wfr=spider&for=pc")) == "1870762825559558263";
         bool dtNidPassed = Checker.ExtractBaiduArticleNid(new Uri("https://mbd.baidu.com/newspage/data/dtlandingwise?nid=dt_5277434666597158759")) == "dt_5277434666597158759";
         bool baiduPublicUrlPassed = Checker.BuildBaiduPublicArticleUrl("5277434666597158759").Contains("news_5277434666597158759");

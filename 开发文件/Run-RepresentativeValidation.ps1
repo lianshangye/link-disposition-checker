@@ -14,6 +14,7 @@ if ([String]::IsNullOrWhiteSpace($OutputCsv)) {
 }
 
 $source = Join-Path $PSScriptRoot 'LinkDispositionChecker.cs'
+$aiSource = Join-Path $PSScriptRoot 'AiReview.cs'
 $runnerSource = Join-Path $PSScriptRoot 'FastAuditRunner.cs'
 $dependencyRoot = Join-Path $PSScriptRoot 'dependencies'
 $webViewCore = Join-Path $dependencyRoot 'Microsoft.Web.WebView2.Core.dll'
@@ -29,9 +30,9 @@ try {
     $runner = Join-Path $runDirectory 'Representative.exe'
     & $compiler /nologo /target:exe /platform:x64 /optimize+ /out:$runner /main:FastAuditRunner `
         /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll `
-        /reference:System.Windows.Forms.dll /reference:System.Net.Http.dll /reference:System.Web.Extensions.dll `
+        /reference:System.Windows.Forms.dll /reference:System.Net.Http.dll /reference:System.Web.Extensions.dll /reference:System.Security.dll `
         /reference:Microsoft.CSharp.dll /reference:System.Xml.Linq.dll /reference:System.IO.Compression.dll `
-        /reference:System.IO.Compression.FileSystem.dll /reference:$webViewCore /reference:$webViewForms $source $runnerSource
+        /reference:System.IO.Compression.FileSystem.dll /reference:$webViewCore /reference:$webViewForms $source $aiSource $runnerSource
     if ($LASTEXITCODE -ne 0) { throw 'Representative runner compilation failed.' }
 
     $arguments = '"' + $InputCsv + '" "' + $OutputCsv + '"'

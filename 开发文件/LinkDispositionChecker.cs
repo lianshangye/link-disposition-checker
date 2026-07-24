@@ -25,8 +25,8 @@ using Microsoft.Web.WebView2.WinForms;
 
 [assembly: AssemblyTitle("侵权链接处置核验工具")]
 [assembly: AssemblyProduct("侵权链接处置核验工具")]
-[assembly: AssemblyVersion("3.10.6.0")]
-[assembly: AssemblyFileVersion("3.10.6.0")]
+[assembly: AssemblyVersion("3.10.7.0")]
+[assembly: AssemblyFileVersion("3.10.7.0")]
 
 namespace LinkDispositionChecker
 {
@@ -485,7 +485,7 @@ namespace LinkDispositionChecker
 
     internal static class SessionStore
     {
-        public const string CurrentEngineVersion = "3.10.6";
+        public const string CurrentEngineVersion = "3.10.7";
         private static readonly object SyncRoot = new object();
         private static readonly JavaScriptSerializer Serializer = new JavaScriptSerializer { MaxJsonLength = Int32.MaxValue };
         public static readonly string SessionPath = Path.Combine(StoragePaths.UserDataDirectory, "last-session.json");
@@ -1826,7 +1826,12 @@ namespace LinkDispositionChecker
                         result.Verdict = "已失效";
                         result.Evidence = "服务器返回 HTTP " + code;
                     }
-                    else if (code == 401 || code == 403 || code == 407 || code == 429)
+                    else if (code == 429 || code == 444)
+                    {
+                        result.Verdict = "暂时异常";
+                        result.Evidence = "当前网络出口受到站点限制（HTTP " + code + "），已保留稍后重试";
+                    }
+                    else if (code == 401 || code == 403 || code == 407)
                     {
                         result.Verdict = "人工复核";
                         result.Evidence = "访问被限制（HTTP " + code + "），不能据此判定已处置";
@@ -1892,7 +1897,8 @@ namespace LinkDispositionChecker
                         }
                         else if (LooksLikeLogin(result.FinalUrl) || !String.IsNullOrEmpty(restriction))
                         {
-                            result.Verdict = "人工复核";
+                            result.Verdict = NetworkRestrictionCircuitBreaker.IsSecurityOrRateLimitText(restriction)
+                                ? "暂时异常" : "人工复核";
                             result.Evidence = !String.IsNullOrEmpty(restriction)
                                 ? "遇到登录/验证/风控提示“" + restriction + "”"
                                 : "链接跳转到登录或验证页";
@@ -1959,7 +1965,7 @@ namespace LinkDispositionChecker
             }
             catch (HttpRequestException ex)
             {
-                result.Verdict = "人工复核";
+                result.Verdict = "暂时异常";
                 result.StatusCode = "连接失败";
                 result.Evidence = FriendlyError(ex);
             }
@@ -4027,7 +4033,8 @@ namespace LinkDispositionChecker
             }
             else if (!String.IsNullOrEmpty(restriction) || LooksLikeLogin(result.FinalUrl))
             {
-                result.Verdict = "人工复核";
+                result.Verdict = NetworkRestrictionCircuitBreaker.IsSecurityOrRateLimitText(restriction)
+                    ? "暂时异常" : "人工复核";
                 result.Evidence = !String.IsNullOrEmpty(restriction)
                     ? "Edge 深度核验遇到验证/风控提示“" + restriction + "”"
                     : "Edge 深度核验跳转到登录页";
@@ -4620,7 +4627,8 @@ namespace LinkDispositionChecker
 
         internal static string NormalizeVisibleVerdict(string verdict)
         {
-            return verdict == "已失效" || verdict == "仍可访问" || verdict == "人工复核"
+            return verdict == "已失效" || verdict == "仍可访问" || verdict == "人工复核" ||
+                verdict == "暂时异常" || verdict == "疑似已处置"
                 ? verdict : "人工复核";
         }
 
@@ -5571,7 +5579,13 @@ namespace LinkDispositionChecker
                 item.Evidence = "Edge 快速核验确认服务器返回 HTTP " + code;
                 return true;
             }
-            if (code == 401 || code == 403 || code == 407 || code == 429)
+            if (code == 429 || code == 444)
+            {
+                item.Verdict = "暂时异常";
+                item.Evidence = "Edge 快速请求受到站点限流（HTTP " + code + "），已保留稍后重试";
+                return false;
+            }
+            if (code == 401 || code == 403 || code == 407)
             {
                 item.Verdict = "人工复核";
                 item.Evidence = "Edge 快速请求受到访问限制（HTTP " + code + "），不能据此判定失效";
@@ -6087,6 +6101,65 @@ namespace LinkDispositionChecker
         }
     }
 
+    internal sealed class NetworkRestrictionCircuitBreaker
+    {
+        private readonly object _sync = new object();
+        private readonly int _threshold;
+        private int _consecutiveRestrictions;
+        private bool _tripped;
+
+        internal NetworkRestrictionCircuitBreaker(int threshold)
+        {
+            _threshold = Math.Max(2, threshold);
+        }
+
+        internal bool Observe(CheckResult item, out string reason)
+        {
+            reason = "";
+            lock (_sync)
+            {
+                if (_tripped) return false;
+                if (!IsTransientRestriction(item))
+                {
+                    _consecutiveRestrictions = 0;
+                    return false;
+                }
+
+                _consecutiveRestrictions++;
+                if (_consecutiveRestrictions < _threshold) return false;
+                _tripped = true;
+                reason = "连续 " + _consecutiveRestrictions + " 条返回限流、验证码或网络异常";
+                return true;
+            }
+        }
+
+        internal static bool IsTransientRestriction(CheckResult item)
+        {
+            if (item == null) return false;
+            int statusCode;
+            if (Int32.TryParse(item.StatusCode ?? "", out statusCode) &&
+                (statusCode == 408 || statusCode == 429 || statusCode == 444 || statusCode >= 500))
+                return true;
+            if (String.Equals(item.Verdict, "暂时异常", StringComparison.OrdinalIgnoreCase)) return true;
+            if (String.Equals(item.StatusCode, "超时", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(item.StatusCode, "连接失败", StringComparison.OrdinalIgnoreCase))
+                return true;
+            return IsSecurityOrRateLimitText(item.Evidence);
+        }
+
+        internal static bool IsSecurityOrRateLimitText(string text)
+        {
+            string evidence = (text ?? "").ToLowerInvariant();
+            return evidence.Contains("安全验证") || evidence.Contains("验证码") ||
+                evidence.Contains("滑动验证") || evidence.Contains("访问过于频繁") ||
+                evidence.Contains("操作频繁") || evidence.Contains("风控") ||
+                evidence.Contains("访问受限") || evidence.Contains("captcha") ||
+                evidence.Contains("verify you are human") || evidence.Contains("unusual traffic") ||
+                evidence.Contains("too many requests") || evidence.Contains("连接关闭") ||
+                evidence.Contains("无法建立连接") || evidence.Contains("代理和直连都失败");
+        }
+    }
+
     internal sealed class MainForm : Form
     {
         private readonly TextBox _input = new TextBox();
@@ -6109,7 +6182,7 @@ namespace LinkDispositionChecker
         private readonly Label _allCount = MakeStat("0", "总链接");
         private readonly Label _removedCount = MakeStat("0", "高置信已失效");
         private readonly Label _aliveCount = MakeStat("0", "仍可访问");
-        private readonly Label _reviewCount = MakeStat("0", "待后台复核候选");
+        private readonly Label _reviewCount = MakeStat("0", "待重试/复核");
         private readonly BindingList<CheckResult> _rows = new BindingList<CheckResult>();
         private readonly List<CheckResult> _allRows = new List<CheckResult>();
         private List<ExcelSheetPlan> _excelPlans = new List<ExcelSheetPlan>();
@@ -6200,7 +6273,7 @@ namespace LinkDispositionChecker
             toolbar.Controls.Add(_start); toolbar.Controls.Add(_stop); toolbar.Controls.Add(_deepReview); toolbar.Controls.Add(_export); toolbar.Controls.Add(_open);
             toolbar.Controls.Add(new Label { Text = "    显示：", AutoSize = true, Margin = new Padding(8, 9, 0, 0), ForeColor = Color.FromArgb(75, 85, 99) });
             _filter.DropDownStyle = ComboBoxStyle.DropDownList; _filter.Width = 160; _filter.Margin = new Padding(4, 4, 0, 0);
-            _filter.Items.AddRange(new object[] { "全部结果", "高置信已失效", "仍可访问", "待后台复核候选" }); _filter.SelectedIndex = 0; _filter.SelectedIndexChanged += delegate { ApplyFilter(); };
+            _filter.Items.AddRange(new object[] { "全部结果", "高置信已失效", "仍可访问", "待重试/复核" }); _filter.SelectedIndex = 0; _filter.SelectedIndexChanged += delegate { ApplyFilter(); };
             toolbar.Controls.Add(_filter); main.Controls.Add(toolbar, 0, 2);
             toolbar.Controls.Add(new Label { Text = "    性能：", AutoSize = true, Margin = new Padding(8, 9, 0, 0), ForeColor = Color.FromArgb(75, 85, 99) });
             _performance.DropDownStyle = ComboBoxStyle.DropDownList; _performance.Width = 115; _performance.Margin = new Padding(4, 4, 0, 0);
@@ -6273,6 +6346,8 @@ namespace LinkDispositionChecker
             var completedKeys = new HashSet<string>(_allRows.Select(ResultKey), StringComparer.OrdinalIgnoreCase);
             var pendingJobs = jobs.Where(job => !completedKeys.Contains(job.Key)).ToList();
             int nextJob = -1;
+            var circuitBreaker = new NetworkRestrictionCircuitBreaker(8);
+            string circuitReason = "";
             int workerCount = Math.Min(_performanceProfile.Workers, Math.Max(1, pendingJobs.Count));
             var workers = Enumerable.Range(0, workerCount).Select(async workerNumber =>
             {
@@ -6285,6 +6360,13 @@ namespace LinkDispositionChecker
                     item.SourceSheet = job.SourceSheet; item.SourceRow = job.SourceRow;
                     _uiResults.Enqueue(item);
                     Interlocked.Increment(ref _runCompleted);
+                    string observedReason;
+                    if (circuitBreaker.Observe(item, out observedReason))
+                    {
+                        circuitReason = observedReason;
+                        _cancellation.Cancel();
+                        break;
+                    }
                 }
             }).ToArray();
 
@@ -6293,6 +6375,7 @@ namespace LinkDispositionChecker
             catch (OperationCanceledException) { cancelled = true; }
             finally
             {
+                if (!String.IsNullOrWhiteSpace(circuitReason)) cancelled = true;
                 _animationTimer.Stop();
                 FlushUiResults(Int32.MaxValue);
                 if (_runWatch != null) _runWatch.Stop();
@@ -6305,7 +6388,9 @@ namespace LinkDispositionChecker
                 _activity.ForeColor = cancelled ? Color.FromArgb(180, 116, 20) : Color.FromArgb(22, 128, 85);
                 double seconds = Math.Max(0.1, _runWatch == null ? 0.1 : _runWatch.Elapsed.TotalSeconds);
                 double speed = Math.Max(0, (_runCompleted - _runStartCompleted) / seconds);
-                _progressText.Text = cancelled
+                _progressText.Text = !String.IsNullOrWhiteSpace(circuitReason)
+                    ? "网络风控已自动暂停  " + _runCompleted + " / " + jobs.Count + "，进度已保存"
+                    : cancelled
                     ? "已停止  " + _runCompleted + " / " + jobs.Count + "，进度已保存"
                     : "核验完成  " + _runCompleted + " 条，用时 " + FormatDuration(_runWatch.Elapsed) + "，平均 " + speed.ToString("0.0") + " 条/秒";
                 _progressText.Text += "  ·  " + _performanceProfile.Name + "模式 / " + _performanceProfile.Workers + " 并发";
@@ -6316,6 +6401,12 @@ namespace LinkDispositionChecker
                         ? "快速核验已结束，进度已自动保存。\n\n“待后台复核候选”不是要求你逐条手动核验的数量。需要进一步确认时，请手动点击“启动后台复核候选项”；启动后会自动后台处理，最后只保留确实无法确认的项目。"
                         : "快速核验已结束，进度已自动保存，尚未修改原 Excel。\n\n“待后台复核候选”不是要求你逐条手动核验的数量。需要进一步确认时请手动开始，后台完成后再写回 Excel。";
                     MessageBox.Show(completionMessage, "已完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                else if (!String.IsNullOrWhiteSpace(circuitReason))
+                {
+                    MessageBox.Show("检测到" + circuitReason + "，工具已自动停止继续请求并保存进度。\n\n" +
+                        "这些记录会显示为“暂时异常”，不是要求人工逐条复核。请先暂停一段时间或切换到获准使用的正常网络出口，再点击“继续上次核验”。",
+                        "网络风控已自动暂停", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
             }
         }

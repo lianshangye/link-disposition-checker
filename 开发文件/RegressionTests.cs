@@ -28,6 +28,30 @@ internal static class RegressionTests
         Console.WriteLine((pacingPassed ? "PASS " : "FAIL ") + "平台级限速和保守并发配置");
         if (!pacingPassed) _failures++;
 
+        var circuitBreaker = new NetworkRestrictionCircuitBreaker(8);
+        bool circuitPassed = true;
+        string circuitReason = "";
+        for (int index = 0; index < 7; index++)
+        {
+            circuitPassed = circuitPassed && !circuitBreaker.Observe(new CheckResult
+            {
+                Verdict = "暂时异常",
+                StatusCode = index % 2 == 0 ? "502" : "444",
+                Evidence = "站点服务异常"
+            }, out circuitReason);
+        }
+        circuitPassed = circuitPassed && circuitBreaker.Observe(new CheckResult
+        {
+            Verdict = "暂时异常",
+            StatusCode = "200",
+            Evidence = "遇到验证码"
+        }, out circuitReason);
+        circuitPassed = circuitPassed && !String.IsNullOrWhiteSpace(circuitReason) &&
+            Checker.NormalizeVisibleVerdict("暂时异常") == "暂时异常" &&
+            Checker.NormalizeVisibleVerdict("疑似已处置") == "疑似已处置";
+        Console.WriteLine((circuitPassed ? "PASS " : "FAIL ") + "连续网络风控自动熔断且保留真实结果标签");
+        if (!circuitPassed) _failures++;
+
         bool baijiaIdPassed = Checker.ExtractBaiduArticleId(new Uri("https://baijiahao.baidu.com/s?id=1870762825559558263&wfr=spider&for=pc")) == "1870762825559558263";
         bool dtNidPassed = Checker.ExtractBaiduArticleNid(new Uri("https://mbd.baidu.com/newspage/data/dtlandingwise?nid=dt_5277434666597158759")) == "dt_5277434666597158759";
         bool baiduPublicUrlPassed = Checker.BuildBaiduPublicArticleUrl("5277434666597158759").Contains("news_5277434666597158759");

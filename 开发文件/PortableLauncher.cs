@@ -9,8 +9,8 @@ using System.Windows.Forms;
 using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("链接失效核验工具启动检查")]
-[assembly: System.Reflection.AssemblyVersion("3.10.5.0")]
-[assembly: System.Reflection.AssemblyFileVersion("3.10.5.0")]
+[assembly: System.Reflection.AssemblyVersion("3.10.7.0")]
+[assembly: System.Reflection.AssemblyFileVersion("3.10.7.0")]
 
 internal static class PortableLauncher
 {

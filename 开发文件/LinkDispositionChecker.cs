@@ -25,8 +25,8 @@ using Microsoft.Web.WebView2.WinForms;
 
 [assembly: AssemblyTitle("侵权链接处置核验工具")]
 [assembly: AssemblyProduct("侵权链接处置核验工具")]
-[assembly: AssemblyVersion("3.12.2.0")]
-[assembly: AssemblyFileVersion("3.12.2.0")]
+[assembly: AssemblyVersion("3.13.0.0")]
+[assembly: AssemblyFileVersion("3.13.0.0")]
 
 namespace LinkDispositionChecker
 {
@@ -490,7 +490,7 @@ namespace LinkDispositionChecker
 
     internal static class SessionStore
     {
-        public const string CurrentEngineVersion = "3.12.2";
+        public const string CurrentEngineVersion = "3.13.0";
         private static readonly object SyncRoot = new object();
         private static readonly JavaScriptSerializer Serializer = new JavaScriptSerializer { MaxJsonLength = Int32.MaxValue };
         public static readonly string SessionPath = Path.Combine(StoragePaths.UserDataDirectory, "last-session.json");
@@ -6357,6 +6357,7 @@ namespace LinkDispositionChecker
         private readonly Button _aiReview = new Button();
         private readonly Button _aiSettings = new Button();
         private readonly Button _open = new Button();
+        private readonly Button _openLog = new Button();
         private readonly ComboBox _filter = new ComboBox();
         private readonly ComboBox _performance = new ComboBox();
         private readonly ComboBox _networkMode = new ComboBox();
@@ -6470,13 +6471,14 @@ namespace LinkDispositionChecker
             var toolbar = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = true, AutoScroll = true, Padding = new Padding(0, 6, 0, 4) };
             StyleButton(_start, "开始核验", true); StyleButton(_stop, "停止", false); StyleButton(_deepReview, "启动后台复核候选项", false);
             StyleButton(_aiReview, "AI 辅助复核", false); StyleButton(_aiSettings, "AI 设置", false);
-            StyleButton(_export, "导出结果", false); StyleButton(_open, "打开选中链接", false);
+            StyleButton(_export, "导出结果", false); StyleButton(_open, "打开选中链接", false); StyleButton(_openLog, "查看执行日志", false);
             _stop.Enabled = false; _deepReview.Enabled = false; _aiReview.Enabled = false;
             _start.Click += async delegate { await StartChecksAsync(false); }; _stop.Click += delegate { if (_cancellation != null) _cancellation.Cancel(); };
             _deepReview.Click += delegate { RunSelectedReview(); }; _export.Click += ExportClick; _open.Click += OpenSelectedClick;
             _aiReview.Click += async delegate { await RunAiReviewAsync(); };
             _aiSettings.Click += delegate { ShowAiSettings(); };
-            toolbar.Controls.Add(_start); toolbar.Controls.Add(_stop); toolbar.Controls.Add(_deepReview); toolbar.Controls.Add(_aiReview); toolbar.Controls.Add(_aiSettings); toolbar.Controls.Add(_export); toolbar.Controls.Add(_open);
+            _openLog.Click += delegate { OpenLatestExecutionLog(); };
+            toolbar.Controls.Add(_start); toolbar.Controls.Add(_stop); toolbar.Controls.Add(_deepReview); toolbar.Controls.Add(_aiReview); toolbar.Controls.Add(_aiSettings); toolbar.Controls.Add(_export); toolbar.Controls.Add(_open); toolbar.Controls.Add(_openLog);
             toolbar.Controls.Add(new Label { Text = "    显示：", AutoSize = true, Margin = new Padding(8, 9, 0, 0), ForeColor = Color.FromArgb(75, 85, 99) });
             _filter.DropDownStyle = ComboBoxStyle.DropDownList; _filter.Width = 160; _filter.Margin = new Padding(4, 4, 0, 0);
             _filter.Items.AddRange(new object[] { "全部结果", "高置信已失效", "仍可访问", "待重试/复核" }); _filter.SelectedIndex = 0; _filter.SelectedIndexChanged += delegate { ApplyFilter(); };
@@ -6551,9 +6553,14 @@ namespace LinkDispositionChecker
             var checker = new Checker(_performanceProfile.BodyBytes);
             var completedKeys = new HashSet<string>(_allRows.Select(ResultKey), StringComparer.OrdinalIgnoreCase);
             var pendingJobs = jobs.Where(job => !completedKeys.Contains(job.Key)).ToList();
+            ExecutionLogContext executionLog = ExecutionLogContext.Start("快速核验",
+                resumeExisting ? "继续上次核验" : "开始核验",
+                Convert.ToString(_performance.SelectedItem), Convert.ToString(_networkMode.SelectedItem),
+                jobs.Count, _allRows.Count, pendingJobs.Count);
             var circuitBreaker = new NetworkRestrictionCircuitBreaker(8);
             var platformRestrictions = new PlatformRestrictionController(3);
             string circuitReason = "";
+            string executionError = "";
             bool cancelled = false;
             BatchPreflightSummary preflightSummary = new BatchPreflightSummary();
             bool continueDespitePreflight = false;
@@ -6561,7 +6568,7 @@ namespace LinkDispositionChecker
             {
                 if (pendingJobs.Count >= 20)
                 {
-                    preflightSummary = await RunBatchPreflightAsync(checker, pendingJobs, platformRestrictions);
+                    preflightSummary = await RunBatchPreflightAsync(checker, pendingJobs, platformRestrictions, executionLog);
                     var sampledKeys = new HashSet<string>(preflightSummary.SampledKeys, StringComparer.OrdinalIgnoreCase);
                     pendingJobs = pendingJobs.Where(job => !sampledKeys.Contains(job.Key)).ToList();
                     if (preflightSummary.RequiresDecision)
@@ -6597,6 +6604,7 @@ namespace LinkDispositionChecker
                             var item = await checker.CheckAsync(job.Url, job.Number, job.ExpectedTitle, job.ExpectedExcerpt, job.ExpectedAuthor, job.Platform, job.ContentType, false, _cancellation.Token);
                             item.SourceSheet = job.SourceSheet; item.SourceRow = job.SourceRow;
                             _uiResults.Enqueue(item);
+                            executionLog.Observe(item);
                             Interlocked.Increment(ref _runCompleted);
                             string pausedPlatform;
                             platformRestrictions.Observe(job, item, out pausedPlatform);
@@ -6614,12 +6622,17 @@ namespace LinkDispositionChecker
                 }
             }
             catch (OperationCanceledException) { cancelled = true; }
+            catch (Exception ex)
+            {
+                cancelled = true;
+                executionError = ExecutionLogWriter.Safe(ex.Message, 300);
+            }
             finally
             {
                 if (!String.IsNullOrWhiteSpace(circuitReason)) cancelled = true;
                 List<string> pausedPlatforms = platformRestrictions.PausedPlatforms;
                 bool partiallyPaused = pausedPlatforms.Count > 0 && String.IsNullOrWhiteSpace(circuitReason);
-                bool interrupted = cancelled || partiallyPaused;
+                bool interrupted = cancelled || partiallyPaused || !String.IsNullOrWhiteSpace(executionError);
                 _animationTimer.Stop();
                 FlushUiResults(Int32.MaxValue);
                 if (_runWatch != null) _runWatch.Stop();
@@ -6628,11 +6641,21 @@ namespace LinkDispositionChecker
                 _performance.Enabled = true;
                 _networkMode.Enabled = true;
                 RefreshResumeButton(); SaveSessionSafe();
+                string executionOutcome = !String.IsNullOrWhiteSpace(executionError) ? "失败" :
+                    !String.IsNullOrWhiteSpace(circuitReason) ? "暂停" :
+                    partiallyPaused ? "部分完成" : cancelled ? "用户停止" : "完成";
+                string executionReason = !String.IsNullOrWhiteSpace(executionError) ? executionError :
+                    !String.IsNullOrWhiteSpace(circuitReason) ? circuitReason :
+                    partiallyPaused ? "部分平台持续受限：" + String.Join("、", pausedPlatforms.Take(12)) :
+                    cancelled ? "使用者停止或取消" : "所有计划任务已处理";
+                CompleteExecutionLog(executionLog, executionOutcome, executionReason);
                 _activity.Text = interrupted ? "■" : "✓";
                 _activity.ForeColor = interrupted ? Color.FromArgb(180, 116, 20) : Color.FromArgb(22, 128, 85);
                 double seconds = Math.Max(0.1, _runWatch == null ? 0.1 : _runWatch.Elapsed.TotalSeconds);
                 double speed = Math.Max(0, (_runCompleted - _runStartCompleted) / seconds);
-                _progressText.Text = !String.IsNullOrWhiteSpace(circuitReason)
+                _progressText.Text = !String.IsNullOrWhiteSpace(executionError)
+                    ? "执行异常已停止  " + _runCompleted + " / " + jobs.Count + "，进度和日志已保存"
+                    : !String.IsNullOrWhiteSpace(circuitReason)
                     ? "网络风控已自动暂停  " + _runCompleted + " / " + jobs.Count + "，进度已保存"
                     : partiallyPaused
                     ? "受限平台已暂停，其他平台已继续  " + _runCompleted + " / " + jobs.Count + "，进度已保存"
@@ -6641,7 +6664,13 @@ namespace LinkDispositionChecker
                     : "核验完成  " + _runCompleted + " 条，用时 " + FormatDuration(_runWatch.Elapsed) + "，平均 " + speed.ToString("0.0") + " 条/秒";
                 _progressText.Text += "  ·  " + _performanceProfile.Name + "模式 / " + _performanceProfile.Workers + " 并发";
                 if (_allRows.Count > _performanceProfile.GridRows) _progressText.Text += "（" + _performanceProfile.Name + "模式仅显示前 " + _performanceProfile.GridRows.ToString("N0") + " 条，导出包含全部）";
-                if (!interrupted && _allRows.Count > 0)
+                if (!String.IsNullOrWhiteSpace(executionError))
+                {
+                    MessageBox.Show("核验执行发生异常，已经保存当前进度和执行日志：\n\n" + executionError +
+                        "\n\n请点击“查看执行日志”并把日志发送给维护者。",
+                        "执行异常", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+                else if (!interrupted && _allRows.Count > 0)
                 {
                     string completionMessage = String.IsNullOrEmpty(_excelPath)
                         ? "快速核验已结束，进度已自动保存。\n\n“待后台复核候选”不是要求你逐条手动核验的数量。需要进一步确认时，请手动点击“启动后台复核候选项”；启动后会自动后台处理，最后只保留确实无法确认的项目。"
@@ -6666,7 +6695,7 @@ namespace LinkDispositionChecker
         }
 
         private async Task<BatchPreflightSummary> RunBatchPreflightAsync(Checker checker, List<CheckJob> pendingJobs,
-            PlatformRestrictionController platformRestrictions)
+            PlatformRestrictionController platformRestrictions, ExecutionLogContext executionLog)
         {
             _preflightRunning = true;
             try
@@ -6682,6 +6711,7 @@ namespace LinkDispositionChecker
                     item.SourceSheet = job.SourceSheet;
                     item.SourceRow = job.SourceRow;
                     _uiResults.Enqueue(item);
+                    executionLog.Observe(item);
                     Interlocked.Increment(ref _runCompleted);
                     string pausedPlatform;
                     platformRestrictions.Observe(job, item, out pausedPlatform);
@@ -6824,12 +6854,19 @@ namespace LinkDispositionChecker
                 pending = reviewable;
             }
             int beforeResolved = pending.Count(item => item.Verdict == "已失效" || item.Verdict == "仍可访问");
+            ExecutionLogContext executionLog = ExecutionLogContext.Start("后台深度复核",
+                automatic ? "自动启动" : "手动启动", Convert.ToString(_performance.SelectedItem),
+                Convert.ToString(_networkMode.SelectedItem), _allRows.Count, _allRows.Count - pending.Count, pending.Count);
             using (var form = new DeepReviewForm(pending, SaveDeepReviewProgress)) form.ShowDialog(this);
+            foreach (CheckResult item in pending.Where(item => item.DeepReviewed)) executionLog.Observe(item);
             RecalculateCounters(); ApplyFilter(); UpdateStats();
             SaveSessionSafe();
             int newlyResolved = pending.Count(item => item.Verdict == "已失效" || item.Verdict == "仍可访问") - beforeResolved;
             int remaining = _allRows.Count(item => item.Verdict != "已失效" && item.Verdict != "仍可访问");
             _progressText.Text = "后台复核结束：新增自动确认 " + Math.Max(0, newlyResolved) + " 条，最终仍需人工查看 " + remaining + " 条";
+            CompleteExecutionLog(executionLog,
+                pending.All(item => item.DeepReviewed) ? "完成" : "部分完成",
+                "处理 " + executionLog.ObservedItems.Count + " / " + pending.Count + " 条，新增自动确认 " + Math.Max(0, newlyResolved) + " 条");
         }
 
         private void RunSelectedReview()
@@ -6883,6 +6920,11 @@ namespace LinkDispositionChecker
             _running = true;
             _cancellation = new CancellationTokenSource();
             SetAiReviewBusy(true);
+            ExecutionLogContext executionLog = ExecutionLogContext.Start("AI辅助复核", "手动启动",
+                Convert.ToString(_performance.SelectedItem), Convert.ToString(_networkMode.SelectedItem),
+                _allRows.Count, _allRows.Count - candidates.Count, candidates.Count);
+            string executionOutcome = "完成";
+            string executionReason = "";
             int processed = 0;
             int resolved = 0;
             try
@@ -6896,6 +6938,7 @@ namespace LinkDispositionChecker
                             "  ·  " + (String.IsNullOrWhiteSpace(item.Platform) ? "未知平台" : item.Platform);
                         AiReviewDecision decision = await client.ReviewAsync(settings, item, _cancellation.Token);
                         AiReviewApplication application = AiReviewPolicy.Apply(item, decision, settings.Model);
+                        executionLog.Observe(item);
                         if (application.Resolved) resolved++;
                         processed++;
                         SessionStore.Append(item);
@@ -6913,10 +6956,14 @@ namespace LinkDispositionChecker
             }
             catch (OperationCanceledException)
             {
+                executionOutcome = "用户停止";
+                executionReason = "使用者停止 AI 辅助复核";
                 _progressText.Text = "AI 辅助复核已停止，已处理 " + processed + " / " + candidates.Count + " 条，进度已保存";
             }
             catch (Exception ex)
             {
+                executionOutcome = "失败";
+                executionReason = ex.Message;
                 _progressText.Text = "AI 辅助复核失败，已处理结果仍已保存";
                 MessageBox.Show("AI 辅助复核失败：\n" + Regex.Replace(ex.Message ?? "", @"sk-[A-Za-z0-9_\-]+", "[Token已隐藏]"),
                     "AI API 错误", MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -6929,6 +6976,9 @@ namespace LinkDispositionChecker
                 RecalculateCounters();
                 ApplyFilter();
                 UpdateStats();
+                if (String.IsNullOrWhiteSpace(executionReason))
+                    executionReason = "处理 " + processed + " / " + candidates.Count + " 条，新增自动确认 " + resolved + " 条";
+                CompleteExecutionLog(executionLog, executionOutcome, executionReason);
             }
         }
 
@@ -6954,13 +7004,59 @@ namespace LinkDispositionChecker
                 (item.Verdict == "人工复核" || item.Verdict == "暂时异常" || item.Verdict == "疑似已处置"))
                 .OrderBy(item => item.Number).ToList();
             if (pending.Count == 0) { RunDeepReview(false); return; }
+            ExecutionLogContext executionLog = ExecutionLogContext.Start("浏览器快速复核", "手动启动",
+                Convert.ToString(_performance.SelectedItem), Convert.ToString(_networkMode.SelectedItem),
+                _allRows.Count, _allRows.Count - pending.Count, pending.Count);
             using (var form = new DeepReviewForm(pending, SaveDeepReviewProgress, true)) form.ShowDialog(this);
+            foreach (CheckResult item in pending.Where(item => item.EdgeFastReviewed)) executionLog.Observe(item);
             RecalculateCounters(); ApplyFilter(); UpdateStats(); SaveSessionSafe();
             int remaining = _allRows.Count(item => item.Verdict != "已失效" && item.Verdict != "仍可访问");
             int notFastReviewed = _allRows.Count(item => item.Verdict != "已失效" && item.Verdict != "仍可访问" &&
                 !item.EdgeFastReviewed && DeepReviewForm.ShouldFastRenderPlatform(item));
             _deepReview.Text = notFastReviewed > 0 ? "继续 Edge 快速核验" : "启动后台复核剩余项";
             _progressText.Text = "Edge 快速核验结束：已处理 " + (pending.Count - notFastReviewed) + " 条，仍需后台复核 " + remaining + " 条";
+            CompleteExecutionLog(executionLog,
+                pending.All(item => item.EdgeFastReviewed) ? "完成" : "部分完成",
+                "处理 " + executionLog.ObservedItems.Count + " / " + pending.Count + " 条，仍需复核 " + remaining + " 条");
+        }
+
+        private string CompleteExecutionLog(ExecutionLogContext context, string outcome, string reason)
+        {
+            if (context == null) return "";
+            try
+            {
+                context.EndedAt = DateTime.Now;
+                context.Outcome = outcome ?? "";
+                context.StopReason = reason ?? "";
+                string path = ExecutionLogWriter.Write(context, _allRows);
+                _openLog.Enabled = File.Exists(path);
+                return path;
+            }
+            catch (Exception ex)
+            {
+                _progressText.Text = "执行已结束，但诊断日志生成失败：" + ex.Message;
+                return "";
+            }
+        }
+
+        private void OpenLatestExecutionLog()
+        {
+            string path = ExecutionLogWriter.LatestLogPath;
+            if (!File.Exists(path))
+            {
+                MessageBox.Show("还没有执行日志。完成一次快速核验、后台复核或 AI 复核后会自动生成。",
+                    "暂无执行日志", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            try
+            {
+                Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true });
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("无法打开执行日志：\n" + ex.Message + "\n\n日志位置：\n" + path,
+                    "打开日志失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
 
         private void SaveSessionSafe()
@@ -7219,6 +7315,7 @@ namespace LinkDispositionChecker
             _reviewCount.Text = _reviewTotal.ToString();
             _aiSettings.Enabled = !_running;
             _aiReview.Enabled = !_running && _allRows.Any(AiReviewPolicy.IsEligible);
+            _openLog.Enabled = File.Exists(ExecutionLogWriter.LatestLogPath);
         }
 
         private void ImportClick(object sender, EventArgs e)

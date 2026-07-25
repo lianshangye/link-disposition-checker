@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 using LinkDispositionChecker;
@@ -144,6 +145,50 @@ internal static class RegressionTests
             aiAlive.Verdict == "仍可访问" && !aiRemovedApplied.Resolved && aiRemoved.Verdict == "疑似已处置";
         Console.WriteLine((aiPolicyPassed ? "PASS " : "FAIL ") + "Yunwu 兼容接口、AI候选过滤和本地安全门");
         if (!aiPolicyPassed) _failures++;
+
+        var logContext = ExecutionLogContext.Start("快速核验", "回归测试", "标准模式", "自动网络", 10, 2, 8);
+        logContext.EndedAt = DateTime.Now;
+        logContext.Outcome = "部分完成";
+        logContext.StopReason = "回归测试";
+        string privateUrl = "https://example.com/private/path?case=123456";
+        string fakeCredential = "sk-" + new string('x', 32);
+        var loggedFailure = new CheckResult
+        {
+            Number = 3,
+            OriginalUrl = privateUrl,
+            Platform = "测试平台",
+            StatusCode = "502",
+            Verdict = "暂时异常",
+            Duration = "18.0s",
+            Evidence = "访问 " + privateUrl + " 时失败，测试凭据 " + fakeCredential
+        };
+        logContext.Observe(loggedFailure);
+        string diagnosticLog = String.Join("\n", ExecutionLogWriter.BuildLines(logContext, new[] { loggedFailure }));
+        string logTestDirectory = Path.Combine(Path.GetTempPath(), "LinkCheckerLogTest-" + Guid.NewGuid().ToString("N"));
+        string writtenLog = "";
+        bool fileLogPassed = false;
+        try
+        {
+            writtenLog = ExecutionLogWriter.WriteToDirectory(logContext, new[] { loggedFailure }, logTestDirectory);
+            string latestLog = Path.Combine(logTestDirectory, "最近一次执行日志.txt");
+            fileLogPassed = File.Exists(writtenLog) && File.Exists(latestLog) &&
+                File.ReadAllText(latestLog).Contains(logContext.RunId);
+        }
+        finally
+        {
+            if (Directory.Exists(logTestDirectory)) Directory.Delete(logTestDirectory, true);
+        }
+        bool logPassed = fileLogPassed &&
+            diagnosticLog.Contains("example.com") &&
+            diagnosticLog.Contains("HTTP 5xx") &&
+            diagnosticLog.Contains("RUN-") &&
+            diagnosticLog.Contains("本次尚未处理：7") &&
+            diagnosticLog.Contains("[链接]") &&
+            diagnosticLog.Contains("[凭据已隐藏]") &&
+            !diagnosticLog.Contains(privateUrl) &&
+            !diagnosticLog.Contains(fakeCredential);
+        Console.WriteLine((logPassed ? "PASS " : "FAIL ") + "执行日志统计、匿名样本和凭据脱敏");
+        if (!logPassed) _failures++;
 
         bool baijiaIdPassed = Checker.ExtractBaiduArticleId(new Uri("https://baijiahao.baidu.com/s?id=1870762825559558263&wfr=spider&for=pc")) == "1870762825559558263";
         bool dtNidPassed = Checker.ExtractBaiduArticleNid(new Uri("https://mbd.baidu.com/newspage/data/dtlandingwise?nid=dt_5277434666597158759")) == "dt_5277434666597158759";

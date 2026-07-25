@@ -150,6 +150,8 @@ internal static class RegressionTests
         logContext.EndedAt = DateTime.Now;
         logContext.Outcome = "部分完成";
         logContext.StopReason = "回归测试";
+        logContext.RecordAiFailure(2, "第 3 条 AI 调用失败：测试错误");
+        logContext.RecordAiSuccess(1);
         string privateUrl = "https://example.com/private/path?case=123456";
         string fakeCredential = "sk-" + new string('x', 32);
         var loggedFailure = new CheckResult
@@ -169,10 +171,18 @@ internal static class RegressionTests
         bool fileLogPassed = false;
         try
         {
+            Directory.CreateDirectory(logTestDirectory);
+            for (int index = 0; index < 105; index++)
+            {
+                string oldLog = Path.Combine(logTestDirectory, "执行日志_旧记录_" + index.ToString("D3") + ".txt");
+                File.WriteAllText(oldLog, "test");
+                File.SetLastWriteTimeUtc(oldLog, DateTime.UtcNow.AddDays(-2).AddMinutes(-index));
+            }
             writtenLog = ExecutionLogWriter.WriteToDirectory(logContext, new[] { loggedFailure }, logTestDirectory);
             string latestLog = Path.Combine(logTestDirectory, "最近一次执行日志.txt");
             fileLogPassed = File.Exists(writtenLog) && File.Exists(latestLog) &&
-                File.ReadAllText(latestLog).Contains(logContext.RunId);
+                File.ReadAllText(latestLog).Contains(logContext.RunId) &&
+                Directory.GetFiles(logTestDirectory, "执行日志_*.txt").Length == 100;
         }
         finally
         {
@@ -183,12 +193,34 @@ internal static class RegressionTests
             diagnosticLog.Contains("HTTP 5xx") &&
             diagnosticLog.Contains("RUN-") &&
             diagnosticLog.Contains("本次尚未处理：7") &&
+            diagnosticLog.Contains("本次 AI 请求次数：3") &&
+            diagnosticLog.Contains("本次 AI 失败条数：1") &&
+            diagnosticLog.Contains("关键执行事件") &&
             diagnosticLog.Contains("[链接]") &&
             diagnosticLog.Contains("[凭据已隐藏]") &&
             !diagnosticLog.Contains(privateUrl) &&
             !diagnosticLog.Contains(fakeCredential);
         Console.WriteLine((logPassed ? "PASS " : "FAIL ") + "执行日志统计、匿名样本和凭据脱敏");
         if (!logPassed) _failures++;
+
+        var fatalAiError = new AiServiceException("配置失败", true, false);
+        var retryableAiError = new AiServiceException("临时限流", false, true, 4000);
+        bool aiBatchPolicyPassed = AiBatchPolicy.IsFatal(fatalAiError) &&
+            !AiBatchPolicy.CanRetry(fatalAiError, 1) &&
+            AiBatchPolicy.CanRetry(retryableAiError, 1) &&
+            !AiBatchPolicy.CanRetry(retryableAiError, AiBatchPolicy.MaximumAttemptsPerItem) &&
+            !AiBatchPolicy.ShouldPauseBatch(AiBatchPolicy.ConsecutiveFailuresBeforePause - 1) &&
+            AiBatchPolicy.ShouldPauseBatch(AiBatchPolicy.ConsecutiveFailuresBeforePause);
+        Console.WriteLine((aiBatchPolicyPassed ? "PASS " : "FAIL ") + "AI 单条重试、致命错误和连续失败暂停策略");
+        if (!aiBatchPolicyPassed) _failures++;
+
+        bool reviewRoutingPassed =
+            !MainForm.IsEvidenceReviewCandidate(new CheckResult { Verdict = "暂时异常" }) &&
+            MainForm.IsEvidenceReviewCandidate(new CheckResult { Verdict = "人工复核" }) &&
+            MainForm.IsEvidenceReviewCandidate(new CheckResult { Verdict = "疑似已处置" }) &&
+            !MainForm.IsEvidenceReviewCandidate(new CheckResult { Verdict = "人工复核", SkipDeepReview = true });
+        Console.WriteLine((reviewRoutingPassed ? "PASS " : "FAIL ") + "网络待重试与证据复核候选严格分流");
+        if (!reviewRoutingPassed) _failures++;
 
         bool baijiaIdPassed = Checker.ExtractBaiduArticleId(new Uri("https://baijiahao.baidu.com/s?id=1870762825559558263&wfr=spider&for=pc")) == "1870762825559558263";
         bool dtNidPassed = Checker.ExtractBaiduArticleNid(new Uri("https://mbd.baidu.com/newspage/data/dtlandingwise?nid=dt_5277434666597158759")) == "dt_5277434666597158759";
@@ -290,7 +322,7 @@ internal static class RegressionTests
             SourceSheet = "测试表",
             SourceRow = 8
         });
-        bool edgePendingPassed = edgePending.Verdict == "人工复核" && edgePending.StatusCode == "Edge待核验" &&
+        bool edgePendingPassed = edgePending.Verdict == "人工复核" && edgePending.StatusCode == "浏览器待核验" &&
             !edgePending.DeepReviewed && !edgePending.EdgeFastReviewed && edgePending.ExpectedTitle == "表格采集的第一句话" &&
             edgePending.ExpectedExcerpt == "正文摘要" && edgePending.SourceRow == 8;
         edgePendingPassed = edgePendingPassed && edgePending.ExpectedAuthor == "投资之道在于懒";

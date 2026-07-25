@@ -25,8 +25,8 @@ using Microsoft.Web.WebView2.WinForms;
 
 [assembly: AssemblyTitle("侵权链接处置核验工具")]
 [assembly: AssemblyProduct("侵权链接处置核验工具")]
-[assembly: AssemblyVersion("3.13.0.0")]
-[assembly: AssemblyFileVersion("3.13.0.0")]
+[assembly: AssemblyVersion("3.14.0.0")]
+[assembly: AssemblyFileVersion("3.14.0.0")]
 
 namespace LinkDispositionChecker
 {
@@ -57,6 +57,8 @@ namespace LinkDispositionChecker
         public string AiDecision { get; set; }
         public double AiConfidence { get; set; }
         public string AiModel { get; set; }
+        public int AiAttemptCount { get; set; }
+        public string AiLastError { get; set; }
     }
 
     internal sealed class RenderedPageData
@@ -490,7 +492,7 @@ namespace LinkDispositionChecker
 
     internal static class SessionStore
     {
-        public const string CurrentEngineVersion = "3.13.0";
+        public const string CurrentEngineVersion = "3.14.0";
         private static readonly object SyncRoot = new object();
         private static readonly JavaScriptSerializer Serializer = new JavaScriptSerializer { MaxJsonLength = Int32.MaxValue };
         public static readonly string SessionPath = Path.Combine(StoragePaths.UserDataDirectory, "last-session.json");
@@ -3995,7 +3997,7 @@ namespace LinkDispositionChecker
             if (snapshot == null || String.IsNullOrWhiteSpace(snapshot.Html))
             {
                 result.Verdict = "人工复核";
-                if (String.IsNullOrEmpty(BrowserPath)) result.Evidence = "普通请求未找到原内容，且未检测到 Edge/Chrome 可用于深度核验";
+                if (String.IsNullOrEmpty(BrowserPath)) result.Evidence = "普通请求未找到原内容，且未检测到受支持的 Chromium 浏览器（Edge/Chrome）用于补充核验";
                 else if (snapshot != null && snapshot.TimedOut) result.Evidence = "浏览器深度核验超时，请稍后复核";
                 else result.Evidence = "普通请求未找到原内容，浏览器深度核验未取得有效页面";
                 return;
@@ -4023,8 +4025,8 @@ namespace LinkDispositionChecker
             {
                 result.Verdict = "仍可访问";
                 result.Evidence = !String.IsNullOrEmpty(signal)
-                    ? "Edge 确认目标正文仍存在；“" + signal + "”来自页面其他区域，不作为下架证据"
-                    : "Edge 确认目标摘要、内容编号及正文结构仍存在（HTTP " + httpCode + "）";
+                    ? "浏览器补充核验确认目标正文仍存在；“" + signal + "”来自页面其他区域，不作为下架证据"
+                    : "浏览器补充核验确认目标摘要、内容编号及正文结构仍存在（HTTP " + httpCode + "）";
                 if (String.IsNullOrEmpty(result.Title) && !String.IsNullOrEmpty(browserTitle)) result.Title = browserTitle;
             }
             else if (!String.IsNullOrEmpty(signal) || LooksLikeErrorPage(result.FinalUrl, browserTitle, browserVisible))
@@ -4036,18 +4038,18 @@ namespace LinkDispositionChecker
                     browserMainText, browserMainHtml);
                 result.Verdict = explicitError || explicitRemoval ? "已失效" : "疑似已处置";
                 result.Evidence = explicitError
-                    ? "Edge 深度核验后进入已验证的错误页"
+                    ? "浏览器补充核验后进入已验证的错误页"
                     : explicitRemoval
-                        ? "Edge 页面主体明确提示目标内容“" + signal + "”"
-                        : "Edge 页面出现“" + signal + "”，但缺少目标正文身份依据，已保留待复核";
+                        ? "浏览器页面主体明确提示目标内容“" + signal + "”"
+                        : "浏览器页面出现“" + signal + "”，但缺少目标正文身份依据，已保留待复核";
             }
             else if (!String.IsNullOrEmpty(restriction) || LooksLikeLogin(result.FinalUrl))
             {
                 result.Verdict = NetworkRestrictionCircuitBreaker.IsSecurityOrRateLimitText(restriction)
                     ? "暂时异常" : "人工复核";
                 result.Evidence = !String.IsNullOrEmpty(restriction)
-                    ? "Edge 深度核验遇到验证/风控提示“" + restriction + "”"
-                    : "Edge 深度核验跳转到登录页";
+                    ? "浏览器补充核验遇到验证/风控提示“" + restriction + "”"
+                    : "浏览器补充核验跳转到登录页";
             }
             else if (IsStrongPlatformEmptyState(result.OriginalUrl, result.FinalUrl, expectedTitle, browserTitle, browserVisible, snapshot.Html))
             {
@@ -4057,12 +4059,12 @@ namespace LinkDispositionChecker
             else if (CanInferRemovalFromRenderedPage(result.FinalUrl, browserVisible))
             {
                 result.Verdict = "疑似已处置";
-                result.Evidence = "Edge 只看到平台推荐流，未确认目标正文；页面改版或加载异常也可能造成此现象";
+                result.Evidence = "浏览器只看到平台推荐流，未确认目标正文；页面改版或加载异常也可能造成此现象";
             }
             else
             {
                 result.Verdict = "人工复核";
-                result.Evidence = "Edge 深度核验后仍未找到 Excel 中的原标题，不做“未失效”猜测";
+                result.Evidence = "浏览器补充核验后仍未找到 Excel 中的原标题，不做“未失效”猜测";
             }
         }
 
@@ -5120,7 +5122,7 @@ namespace LinkDispositionChecker
                 .ThenBy(item => item.Number)
                 .ToList();
             _onProgress = onProgress;
-            Text = fastMode ? "Edge 快速核验" : "浏览器深度核验";
+            Text = fastMode ? "内置浏览器快速复核" : "内置浏览器深度复核";
             StartPosition = FormStartPosition.CenterParent;
             MinimumSize = new Size(980, 680);
             Size = new Size(1180, 820);
@@ -5128,7 +5130,7 @@ namespace LinkDispositionChecker
             BackColor = Color.FromArgb(244, 247, 251);
 
             var header = new Panel { Dock = DockStyle.Top, Height = 78, BackColor = Color.FromArgb(27, 62, 111), Padding = new Padding(18, 10, 18, 10) };
-            var title = new Label { Text = fastMode ? "Edge 快速核验" : "浏览器深度核验", ForeColor = Color.White, Font = new Font("微软雅黑", 16, FontStyle.Bold), AutoSize = true, Location = new Point(18, 8) };
+            var title = new Label { Text = fastMode ? "内置浏览器快速复核" : "内置浏览器深度复核", ForeColor = Color.White, Font = new Font("微软雅黑", 16, FontStyle.Bold), AutoSize = true, Location = new Point(18, 8) };
             _counter.ForeColor = Color.FromArgb(206, 220, 239); _counter.AutoSize = true; _counter.Location = new Point(20, 46);
             header.Controls.Add(title); header.Controls.Add(_counter);
 
@@ -5172,7 +5174,7 @@ namespace LinkDispositionChecker
 
         private async Task InitializeAndStartAsync()
         {
-            if (_items.Count == 0) { _status.Text = _fastMode ? "没有需要 Edge 快速核验的链接。" : "没有需要深度复核的链接。"; return; }
+            if (_items.Count == 0) { _status.Text = _fastMode ? "没有需要内置浏览器快速复核的链接。" : "没有需要深度复核的链接。"; return; }
             try
             {
                 string userData = Environment.GetEnvironmentVariable("LINK_CHECKER_WEBVIEW_PROFILE");
@@ -5187,12 +5189,12 @@ namespace LinkDispositionChecker
                 _browser.CoreWebView2.Settings.AreDefaultContextMenusEnabled = true;
                 _browser.CoreWebView2.Settings.AreDefaultScriptDialogsEnabled = false;
                 PrepareLoginTargets();
-                _continue.Text = _fastMode ? "开始 Edge 快速核验（登录可选）" : "开始后台复核（登录可选）";
+                _continue.Text = _fastMode ? "开始内置浏览器复核（登录可选）" : "开始后台复核（登录可选）";
                 _continue.Width = _fastMode ? 270 : 220;
                 _continue.Enabled = true;
                 _counter.Text = "准备开始，共 " + _items.Count + (_fastMode ? " 条待快速核验" : " 条待后台复核候选");
                 _status.Text = _loginTargets.Count == 0
-                    ? (_fastMode ? "可直接开始 Edge 快速核验。" : "可直接点击“开始后台复核（登录可选）”。")
+                    ? (_fastMode ? "可直接开始内置浏览器快速复核。" : "可直接点击“开始后台复核（登录可选）”。")
                     : (_fastMode ? "登录是可选项；也可直接开始，工具会先检查各平台公开页面状态。" : BuildReviewBatchSummary() + "。这些是后台复核候选，不是要求你逐条手动查看的数量；登录是可选项，开始后会自动继续下一条。");
                 if (_loginPlatforms.Items.Count > 0) _loginPlatforms.SelectedIndex = 0;
             }
@@ -5236,7 +5238,8 @@ namespace LinkDispositionChecker
             {
                 if (navigate) await NavigateAsync(item.OriginalUrl, profile.NavigationTimeoutMilliseconds);
                 RenderedPageData page = await ReadStablePageAsync(item);
-                if (String.Equals(item.StatusCode, "Edge待核验", StringComparison.OrdinalIgnoreCase)) item.StatusCode = "Edge";
+                if (String.Equals(item.StatusCode, "Edge待核验", StringComparison.OrdinalIgnoreCase) ||
+                    String.Equals(item.StatusCode, "浏览器待核验", StringComparison.OrdinalIgnoreCase)) item.StatusCode = "浏览器";
                 DeepDecision decision = Checker.ClassifyRenderedPage(item, page);
 
                 string alternateUrl;
@@ -5293,7 +5296,8 @@ namespace LinkDispositionChecker
             catch (Exception ex)
             {
                 item.Verdict = "人工复核";
-                if (String.Equals(item.StatusCode, "Edge待核验", StringComparison.OrdinalIgnoreCase)) item.StatusCode = "Edge失败";
+                if (String.Equals(item.StatusCode, "Edge待核验", StringComparison.OrdinalIgnoreCase) ||
+                    String.Equals(item.StatusCode, "浏览器待核验", StringComparison.OrdinalIgnoreCase)) item.StatusCode = "浏览器失败";
                 item.Evidence = "持久浏览器复核失败：" + ex.Message;
                 item.DeepReviewed = true;
                 _alternateAttemptedForCurrent = false;
@@ -5359,13 +5363,13 @@ namespace LinkDispositionChecker
             if (_loginPreparation)
             {
                 _loginPreparation = false;
-                _continue.Text = _fastMode ? "Edge 快速核验进行中" : "后台复核进行中";
+                _continue.Text = _fastMode ? "内置浏览器复核进行中" : "后台复核进行中";
                 _continue.Width = 150;
                 _continue.Enabled = false;
                 _openLoginPlatform.Enabled = false;
                 _loginPlatforms.Enabled = false;
                 _status.Text = _fastMode
-                    ? "正在通过 Edge 内核并发获取页面；动态页面将保留给后续深度复核。"
+                    ? "正在通过内置 WebView2 浏览器获取页面；动态页面将保留给后续深度复核。"
                     : "正在按平台分批后台复核；先检查公开正文和作品状态，受限项会写明原因并自动继续。";
                 WindowState = FormWindowState.Minimized;
                 if (_fastMode) await ProcessFastItemsAsync();
@@ -5404,8 +5408,8 @@ namespace LinkDispositionChecker
                         {
                             if (_cancellation.IsCancellationRequested) break;
                             item.Verdict = "人工复核";
-                            item.StatusCode = "Edge失败";
-                            item.Evidence = "Edge 快速核验失败，已保留给深度复核：" + ex.Message;
+                            item.StatusCode = "浏览器失败";
+                            item.Evidence = "内置浏览器快速复核失败，已保留给深度复核：" + ex.Message;
                             item.EdgeFastReviewed = true;
                             item.DeepReviewed = false;
                             item.CheckedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
@@ -5414,7 +5418,7 @@ namespace LinkDispositionChecker
                         int done = Interlocked.Increment(ref completed);
                         if (!_cancellation.IsCancellationRequested && !IsDisposed)
                         {
-                            _counter.Text = "Edge 快速核验 " + done + " / " + _items.Count + "    已确认 " + ResolvedCount + " 条";
+                            _counter.Text = "内置浏览器快速复核 " + done + " / " + _items.Count + "    已确认 " + ResolvedCount + " 条";
                             _status.Text = "并发 " + workers + " 路，动态页面和证据不足项将留给深度复核";
                         }
                     }
@@ -5429,7 +5433,7 @@ namespace LinkDispositionChecker
                     {
                         if (await TryApplyEdgePlatformProbeAsync(_browser.CoreWebView2, pendingItem, _cancellation.Token)) ResolvedCount++;
                         else if (ShouldFastRenderPlatform(pendingItem)) renderQueue.Enqueue(pendingItem);
-                        else pendingItem.Evidence = "Edge 快速网络与平台接口未取得足够证据；该平台不适合短渲染，保留给按需深度复核";
+                        else pendingItem.Evidence = "内置浏览器网络与平台接口未取得足够证据；该平台不适合短渲染，保留给按需深度复核";
                     }
                     catch (OperationCanceledException) { break; }
                     catch
@@ -5469,12 +5473,12 @@ namespace LinkDispositionChecker
                     catch (Exception ex)
                     {
                         pendingItem.Verdict = "人工复核";
-                        pendingItem.StatusCode = "Edge失败";
-                        pendingItem.Evidence = "Edge 快速短渲染失败，保留人工复核：" + ex.Message;
+                        pendingItem.StatusCode = "浏览器失败";
+                        pendingItem.Evidence = "内置浏览器短渲染失败，保留人工复核：" + ex.Message;
                     }
                     NotifyProgress(pendingItem);
                 }
-                _counter.Text = "Edge 快速核验完成 " + completed + " / " + _items.Count;
+                _counter.Text = "内置浏览器快速复核完成 " + completed + " / " + _items.Count;
                 string completion = "分平台快速复核完成，新增自动确认 " + ResolvedCount + " 条。" + BuildUnresolvedSummary();
                 _status.Text = completion;
                 _stop.Text = "关闭";
@@ -5578,13 +5582,13 @@ namespace LinkDispositionChecker
             if (decision.Resolved && IsResolvedVerdict(decision.Verdict))
             {
                 item.Verdict = decision.Verdict;
-                item.Evidence = "Edge 快速短渲染：" + decision.Evidence;
+                item.Evidence = "内置浏览器短渲染：" + decision.Evidence;
                 return true;
             }
             else
             {
                 item.Verdict = "人工复核";
-                item.Evidence = "Edge 快速抓取和短渲染均未取得足够目标身份证据，保留人工复核" +
+                item.Evidence = "内置浏览器抓取和短渲染均未取得足够目标身份证据，保留人工复核" +
                     (String.IsNullOrWhiteSpace(decision.Evidence) ? "" : "；具体原因：" + decision.Evidence);
                 return false;
             }
@@ -5600,8 +5604,8 @@ namespace LinkDispositionChecker
             if (response == null || response.StatusCode <= 0)
             {
                 item.Verdict = "人工复核";
-                item.StatusCode = "Edge失败";
-                item.Evidence = "Edge 快速网络请求失败，已保留给深度复核" +
+                item.StatusCode = "浏览器失败";
+                item.Evidence = "内置浏览器网络请求失败，已保留给深度复核" +
                     (response == null || String.IsNullOrWhiteSpace(response.Error) ? "" : "：" + response.Error);
                 return false;
             }
@@ -5611,31 +5615,31 @@ namespace LinkDispositionChecker
             if (code == 404 || code == 410)
             {
                 item.Verdict = "已失效";
-                item.Evidence = "Edge 快速核验确认服务器返回 HTTP " + code;
+                item.Evidence = "内置浏览器复核确认服务器返回 HTTP " + code;
                 return true;
             }
             if (code == 429 || code == 444)
             {
                 item.Verdict = "暂时异常";
-                item.Evidence = "Edge 快速请求受到站点限流（HTTP " + code + "），已保留稍后重试";
+                item.Evidence = "内置浏览器请求受到站点限流（HTTP " + code + "），已保留稍后重试";
                 return false;
             }
             if (code == 401 || code == 403 || code == 407)
             {
                 item.Verdict = "人工复核";
-                item.Evidence = "Edge 快速请求受到访问限制（HTTP " + code + "），不能据此判定失效";
+                item.Evidence = "内置浏览器请求受到访问限制（HTTP " + code + "），不能据此判定失效";
                 return false;
             }
             if (code >= 500 || code == 408)
             {
                 item.Verdict = "暂时异常";
-                item.Evidence = "Edge 快速请求返回 HTTP " + code + "，建议稍后重试";
+                item.Evidence = "内置浏览器请求返回 HTTP " + code + "，建议稍后重试";
                 return false;
             }
             if (code >= 400)
             {
                 item.Verdict = "人工复核";
-                item.Evidence = "Edge 快速请求返回 HTTP " + code + "，证据不足";
+                item.Evidence = "内置浏览器请求返回 HTTP " + code + "，证据不足";
                 return false;
             }
             string mediaType = response.ContentType ?? "";
@@ -5644,7 +5648,7 @@ namespace LinkDispositionChecker
                 mediaType.IndexOf("text", StringComparison.OrdinalIgnoreCase) < 0)
             {
                 item.Verdict = "仍可访问";
-                item.Evidence = "Edge 快速核验确认资源可正常获取（HTTP " + code + "，" + mediaType + "）";
+                item.Evidence = "内置浏览器复核确认资源可正常获取（HTTP " + code + "，" + mediaType + "）";
                 return true;
             }
 
@@ -5655,27 +5659,27 @@ namespace LinkDispositionChecker
             if (decision.Resolved && (decision.Verdict == "已失效" || decision.Verdict == "仍可访问"))
             {
                 item.Verdict = decision.Verdict;
-                item.Evidence = "Edge 快速核验：" + decision.Evidence;
+                item.Evidence = "内置浏览器复核：" + decision.Evidence;
                 return true;
             }
             else
             {
                 item.Verdict = "人工复核";
-                item.Evidence = "Edge 快速核验已取得响应，但页面需要渲染或证据不足，保留给深度复核";
+                item.Evidence = "内置浏览器复核已取得响应，但页面需要渲染或证据不足，保留给深度复核";
                 return false;
             }
         }
 
         internal static async Task<EdgeFetchedResponse> LoadEdgeResourceAsync(CoreWebView2 core, string url, int maxBytes, CancellationToken token)
         {
-            if (core == null) return new EdgeFetchedResponse { Error = "Edge 内核尚未初始化" };
+            if (core == null) return new EdgeFetchedResponse { Error = "内置浏览器内核尚未初始化" };
             Uri pacingUri;
             if (Uri.TryCreate(url, UriKind.Absolute, out pacingUri)) await Checker.WaitForRequestSlotAsync(pacingUri, token);
             var serializer = new JavaScriptSerializer { MaxJsonLength = 2000000 };
             string frameJson = await AwaitCdpAsync(core.CallDevToolsProtocolMethodAsync("Page.getFrameTree", "{}"), 8000, token);
             var frameRoot = serializer.DeserializeObject(frameJson) as Dictionary<string, object>;
             string frameId = DictionaryPathString(frameRoot, "frameTree", "frame", "id");
-            if (String.IsNullOrWhiteSpace(frameId)) return new EdgeFetchedResponse { Error = "无法取得 Edge 页面上下文" };
+            if (String.IsNullOrWhiteSpace(frameId)) return new EdgeFetchedResponse { Error = "无法取得内置浏览器页面上下文" };
 
             string parameters = serializer.Serialize(new Dictionary<string, object>
             {
@@ -5687,7 +5691,7 @@ namespace LinkDispositionChecker
             string loadedJson = await AwaitCdpAsync(core.CallDevToolsProtocolMethodAsync("Network.loadNetworkResource", parameters), 18000, token);
             var loaded = serializer.DeserializeObject(loadedJson) as Dictionary<string, object>;
             var resource = DictionaryPath(loaded, "resource");
-            if (resource == null) return new EdgeFetchedResponse { Error = "Edge 未返回网络结果" };
+            if (resource == null) return new EdgeFetchedResponse { Error = "内置浏览器未返回网络结果" };
             int status = DictionaryInt(resource, "httpStatusCode");
             string error = DictionaryString(resource, "netErrorName");
             string stream = DictionaryString(resource, "stream");
@@ -5730,7 +5734,7 @@ namespace LinkDispositionChecker
             Task finished = await Task.WhenAny(operation, Task.Delay(timeoutMilliseconds, token));
             if (finished == operation) return await operation;
             token.ThrowIfCancellationRequested();
-            throw new TimeoutException("Edge 快速网络请求超时");
+            throw new TimeoutException("内置浏览器网络请求超时");
         }
 
         internal static async Task<bool> TryApplyEdgePlatformProbeAsync(CoreWebView2 core, CheckResult item, CancellationToken token)
@@ -5762,7 +5766,7 @@ namespace LinkDispositionChecker
                         item.StatusCode = "200";
                         item.FinalUrl = probeUrl;
                         item.Title = probe.Title;
-                        item.Evidence = "Edge 抖音官方分享页返回目标作品描述和非空作品数据";
+                        item.Evidence = "内置浏览器的抖音官方分享页返回目标作品描述和非空作品数据";
                         return true;
                     }
                     if (probe != null && targetItem && itemListEmpty && filter.Success &&
@@ -5771,7 +5775,7 @@ namespace LinkDispositionChecker
                         item.Verdict = "已失效";
                         item.StatusCode = "200";
                         item.FinalUrl = probeUrl;
-                        item.Evidence = "Edge 抖音官方分享页确认目标作品不可见（" + filter.Groups[1].Value + "）";
+                        item.Evidence = "内置浏览器的抖音官方分享页确认目标作品不可见（" + filter.Groups[1].Value + "）";
                         return true;
                     }
                     item.Evidence = "抖音分享页补证未解析：标题“" + (probe == null ? "" : probe.Title) + "”，字节 " + body.Length +
@@ -5790,7 +5794,7 @@ namespace LinkDispositionChecker
                 if (probe != null && probe.StatusCode == 200 && Regex.IsMatch(body,
                     "\\\"(?:gid|group_id)\\\"\\s*:\\s*\\\"?" + Regex.Escape(id) + "\\\"?", RegexOptions.IgnoreCase))
                 {
-                    item.Evidence = "Edge 公开内容接口仍有今日头条目标编号记录，仅作辅助证据，继续核验当前网页";
+                    item.Evidence = "内置浏览器公开内容接口仍有今日头条目标编号记录，仅作辅助证据，继续核验当前网页";
                     return false;
                 }
                 if (probe != null && probe.StatusCode == 200 && Regex.IsMatch(body, "\\\"data\\\"\\s*:\\s*null") &&
@@ -5799,7 +5803,7 @@ namespace LinkDispositionChecker
                     item.Verdict = "已失效";
                     item.StatusCode = "200";
                     item.FinalUrl = probeUrl;
-                    item.Evidence = "Edge 公开内容接口确认今日头条目标内容不存在";
+                    item.Evidence = "内置浏览器公开内容接口确认今日头条目标内容不存在";
                     return true;
                 }
                 return false;
@@ -5823,13 +5827,13 @@ namespace LinkDispositionChecker
                     item.Verdict = "已失效";
                     item.StatusCode = "200";
                     item.FinalUrl = probeUrl;
-                    item.Evidence = "Edge 百度系共享视频页确认目标视频编号已进入专用错误页";
+                    item.Evidence = "内置浏览器的百度系共享视频页确认目标视频编号已进入专用错误页";
                     return true;
                 }
                 if (probe != null && probe.StatusCode == 200 &&
                     Checker.HasBaiduVideoIdentity(body, videoId, item.ExpectedTitle))
                 {
-                    item.Evidence = "Edge 百度系共享页仍有目标视频编号记录，仅作辅助证据，继续核验当前网页";
+                    item.Evidence = "内置浏览器的百度系共享页仍有目标视频编号记录，仅作辅助证据，继续核验当前网页";
                     return false;
                 }
             }
@@ -5850,13 +5854,13 @@ namespace LinkDispositionChecker
                         item.Verdict = "已失效";
                         item.StatusCode = "200";
                         item.FinalUrl = probeUrl;
-                        item.Evidence = "Edge 百度系共享图文页确认目标内容编号已进入专用错误页";
+                        item.Evidence = "内置浏览器的百度系共享图文页确认目标内容编号已进入专用错误页";
                         return true;
                     }
                     if (body.IndexOf(articleId, StringComparison.OrdinalIgnoreCase) >= 0 && !Checker.LooksGenericTitle(title) &&
                         (Checker.MatchesExpectedTitle(item.ExpectedTitle, title) || String.IsNullOrWhiteSpace(item.ExpectedTitle)))
                     {
-                        item.Evidence = "Edge 百度系共享页仍有目标图文编号记录，仅作辅助证据，继续核验当前网页";
+                        item.Evidence = "内置浏览器的百度系共享页仍有目标图文编号记录，仅作辅助证据，继续核验当前网页";
                         return false;
                     }
                 }
@@ -6369,7 +6373,8 @@ namespace LinkDispositionChecker
         private readonly Label _allCount = MakeStat("0", "总链接");
         private readonly Label _removedCount = MakeStat("0", "高置信已失效");
         private readonly Label _aliveCount = MakeStat("0", "仍可访问");
-        private readonly Label _reviewCount = MakeStat("0", "待重试/复核");
+        private readonly Label _temporaryCount = MakeStat("0", "网络待重试");
+        private readonly Label _reviewCount = MakeStat("0", "证据待复核");
         private readonly BindingList<CheckResult> _rows = new BindingList<CheckResult>();
         private readonly List<CheckResult> _allRows = new List<CheckResult>();
         private List<ExcelSheetPlan> _excelPlans = new List<ExcelSheetPlan>();
@@ -6385,6 +6390,7 @@ namespace LinkDispositionChecker
         private int _runStartCompleted;
         private int _removedTotal;
         private int _aliveTotal;
+        private int _temporaryTotal;
         private int _reviewTotal;
         private readonly ConcurrentQueue<CheckResult> _uiResults = new ConcurrentQueue<CheckResult>();
         private PerformanceProfile _performanceProfile;
@@ -6441,10 +6447,11 @@ namespace LinkDispositionChecker
             Controls.Add(main);
             Controls.Add(header);
 
-            var stats = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, Padding = new Padding(0, 0, 0, 10) };
-            for (int i = 0; i < 4; i++) stats.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+            var stats = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 5, Padding = new Padding(0, 0, 0, 10) };
+            for (int i = 0; i < 5; i++) stats.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20));
             stats.Controls.Add(StatCard(_allCount), 0, 0); stats.Controls.Add(StatCard(_removedCount), 1, 0);
-            stats.Controls.Add(StatCard(_aliveCount), 2, 0); stats.Controls.Add(StatCard(_reviewCount), 3, 0);
+            stats.Controls.Add(StatCard(_aliveCount), 2, 0); stats.Controls.Add(StatCard(_temporaryCount), 3, 0);
+            stats.Controls.Add(StatCard(_reviewCount), 4, 0);
             main.Controls.Add(stats, 0, 0);
 
             var inputPanel = new Panel { Dock = DockStyle.Fill, BackColor = Color.White, Padding = new Padding(14, 10, 14, 10) };
@@ -6481,7 +6488,7 @@ namespace LinkDispositionChecker
             toolbar.Controls.Add(_start); toolbar.Controls.Add(_stop); toolbar.Controls.Add(_deepReview); toolbar.Controls.Add(_aiReview); toolbar.Controls.Add(_aiSettings); toolbar.Controls.Add(_export); toolbar.Controls.Add(_open); toolbar.Controls.Add(_openLog);
             toolbar.Controls.Add(new Label { Text = "    显示：", AutoSize = true, Margin = new Padding(8, 9, 0, 0), ForeColor = Color.FromArgb(75, 85, 99) });
             _filter.DropDownStyle = ComboBoxStyle.DropDownList; _filter.Width = 160; _filter.Margin = new Padding(4, 4, 0, 0);
-            _filter.Items.AddRange(new object[] { "全部结果", "高置信已失效", "仍可访问", "待重试/复核" }); _filter.SelectedIndex = 0; _filter.SelectedIndexChanged += delegate { ApplyFilter(); };
+            _filter.Items.AddRange(new object[] { "全部结果", "高置信已失效", "仍可访问", "网络待重试", "证据待复核" }); _filter.SelectedIndex = 0; _filter.SelectedIndexChanged += delegate { ApplyFilter(); };
             toolbar.Controls.Add(_filter); main.Controls.Add(toolbar, 0, 2);
             toolbar.Controls.Add(new Label { Text = "    性能：", AutoSize = true, Margin = new Padding(8, 9, 0, 0), ForeColor = Color.FromArgb(75, 85, 99) });
             _performance.DropDownStyle = ComboBoxStyle.DropDownList; _performance.Width = 115; _performance.Margin = new Padding(4, 4, 0, 0);
@@ -6569,6 +6576,7 @@ namespace LinkDispositionChecker
                 if (pendingJobs.Count >= 20)
                 {
                     preflightSummary = await RunBatchPreflightAsync(checker, pendingJobs, platformRestrictions, executionLog);
+                    executionLog.RecordEvent("网络预检完成：" + preflightSummary.Description);
                     var sampledKeys = new HashSet<string>(preflightSummary.SampledKeys, StringComparer.OrdinalIgnoreCase);
                     pendingJobs = pendingJobs.Where(job => !sampledKeys.Contains(job.Key)).ToList();
                     if (preflightSummary.RequiresDecision)
@@ -6581,6 +6589,9 @@ namespace LinkDispositionChecker
                             "网络预检发现异常，是否仍然继续？",
                             MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button1);
                         continueDespitePreflight = decision == DialogResult.Yes;
+                        executionLog.RecordEvent(continueDespitePreflight
+                            ? "使用者选择在预检异常后继续，仍保留平台级暂停"
+                            : "使用者选择在预检异常后暂停");
                         if (BatchRunSafetyPolicy.ShouldPauseAfterPreflight(preflightSummary, continueDespitePreflight))
                         {
                             circuitReason = "使用者根据网络预检选择暂停（" + preflightSummary.Description + "）";
@@ -6637,7 +6648,7 @@ namespace LinkDispositionChecker
                 FlushUiResults(Int32.MaxValue);
                 if (_runWatch != null) _runWatch.Stop();
                 _allRows.Sort((a, b) => a.Number.CompareTo(b.Number));
-                _running = false; ApplyFilter(); UpdateStats(); _start.Enabled = true; _stop.Enabled = false; _deepReview.Enabled = _allRows.Count > 0; _import.Enabled = true; _clear.Enabled = true; _input.ReadOnly = false;
+                _running = false; ApplyFilter(); UpdateStats(); _start.Enabled = true; _stop.Enabled = false; _deepReview.Enabled = _allRows.Any(IsEvidenceReviewCandidate); _import.Enabled = true; _clear.Enabled = true; _input.ReadOnly = false;
                 _performance.Enabled = true;
                 _networkMode.Enabled = true;
                 RefreshResumeButton(); SaveSessionSafe();
@@ -6734,11 +6745,11 @@ namespace LinkDispositionChecker
             _allRows.Sort((left, right) => left.Number.CompareTo(right.Number));
             RecalculateCounters(); ApplyFilter(); UpdateStats();
             _progress.Minimum = 0; _progress.Maximum = Math.Max(1, jobs.Count); _progress.Value = Math.Min(jobs.Count, _allRows.Count);
-            _deepReview.Enabled = _allRows.Any(item => !item.DeepReviewed && item.Verdict == "人工复核");
+            _deepReview.Enabled = _allRows.Any(IsEvidenceReviewCandidate);
             _activity.Text = "✓"; _activity.ForeColor = Color.FromArgb(22, 128, 85);
             _progressText.Text = "浏览器兼容任务已建立：" + _allRows.Count + " / " + jobs.Count + " 条，进度已保存";
             SaveSessionSafe(); RefreshResumeButton();
-            MessageBox.Show("浏览器兼容任务已经建立并保存，尚未自动开始浏览器核验。\n\n请点击“开始 Edge 快速核验”，再点击右下角“开始 Edge 快速核验（登录可选）”。登录不是前提，工具会先检查公开页面状态。",
+            MessageBox.Show("浏览器兼容任务已经建立并保存，尚未自动开始浏览器核验。\n\n请点击“开始内置浏览器快速复核”，再点击右下角“开始内置浏览器复核（登录可选）”。登录不是前提，工具会先检查公开页面状态。",
                 "等待手动开始", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
@@ -6749,11 +6760,11 @@ namespace LinkDispositionChecker
             {
                 Number = job.Number,
                 Verdict = "人工复核",
-                StatusCode = "Edge待核验",
+                StatusCode = "浏览器待核验",
                 Title = "",
                 OriginalUrl = job.Url,
                 FinalUrl = "",
-                Evidence = "浏览器兼容模式已跳过普通网络请求，等待手动启动 Edge 快速核验",
+                Evidence = "浏览器兼容模式已跳过普通网络请求，等待手动启动内置浏览器快速复核",
                 CheckedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
                 Duration = "0.0s",
                 ExpectedTitle = job.ExpectedTitle ?? "",
@@ -6800,6 +6811,7 @@ namespace LinkDispositionChecker
                 if (_rows.Count < _performanceProfile.GridRows && ShouldDisplay(item)) _rows.Add(item);
                 if (item.Verdict == "已失效") _removedTotal++;
                 else if (item.Verdict == "仍可访问") _aliveTotal++;
+                else if (item.Verdict == "暂时异常") _temporaryTotal++;
                 else _reviewTotal++;
                 batch.Add(item);
                 added++;
@@ -6817,7 +6829,8 @@ namespace LinkDispositionChecker
         {
             _removedTotal = _allRows.Count(item => item.Verdict == "已失效");
             _aliveTotal = _allRows.Count(item => item.Verdict == "仍可访问");
-            _reviewTotal = _allRows.Count - _removedTotal - _aliveTotal;
+            _temporaryTotal = _allRows.Count(item => item.Verdict == "暂时异常");
+            _reviewTotal = _allRows.Count - _removedTotal - _aliveTotal - _temporaryTotal;
         }
 
         private bool ShouldDisplay(CheckResult item)
@@ -6826,7 +6839,8 @@ namespace LinkDispositionChecker
             return selected == 0 ||
                 (selected == 1 && item.Verdict == "已失效") ||
                 (selected == 2 && item.Verdict == "仍可访问") ||
-                (selected == 3 && item.Verdict != "已失效" && item.Verdict != "仍可访问");
+                (selected == 3 && item.Verdict == "暂时异常") ||
+                (selected == 4 && item.Verdict != "已失效" && item.Verdict != "仍可访问" && item.Verdict != "暂时异常");
         }
 
         private static string FormatDuration(TimeSpan value)
@@ -6836,9 +6850,15 @@ namespace LinkDispositionChecker
             return Math.Max(0, (int)value.TotalSeconds) + "秒";
         }
 
+        internal static bool IsEvidenceReviewCandidate(CheckResult item)
+        {
+            return item != null && !item.SkipDeepReview &&
+                (item.Verdict == "人工复核" || item.Verdict == "疑似已处置");
+        }
+
         private void RunDeepReview(bool automatic)
         {
-            var reviewable = _allRows.Where(item => !item.SkipDeepReview && (item.Verdict == "人工复核" || item.Verdict == "暂时异常" || item.Verdict == "疑似已处置")).OrderBy(item => item.Number).ToList();
+            var reviewable = _allRows.Where(IsEvidenceReviewCandidate).OrderBy(item => item.Number).ToList();
             var pending = reviewable.Where(item => !item.DeepReviewed).ToList();
             if (pending.Count == 0)
             {
@@ -6862,8 +6882,8 @@ namespace LinkDispositionChecker
             RecalculateCounters(); ApplyFilter(); UpdateStats();
             SaveSessionSafe();
             int newlyResolved = pending.Count(item => item.Verdict == "已失效" || item.Verdict == "仍可访问") - beforeResolved;
-            int remaining = _allRows.Count(item => item.Verdict != "已失效" && item.Verdict != "仍可访问");
-            _progressText.Text = "后台复核结束：新增自动确认 " + Math.Max(0, newlyResolved) + " 条，最终仍需人工查看 " + remaining + " 条";
+            int remaining = _allRows.Count(item => item.Verdict == "人工复核" || item.Verdict == "疑似已处置");
+            _progressText.Text = "后台复核结束：新增自动确认 " + Math.Max(0, newlyResolved) + " 条，证据仍待复核 " + remaining + " 条";
             CompleteExecutionLog(executionLog,
                 pending.All(item => item.DeepReviewed) ? "完成" : "部分完成",
                 "处理 " + executionLog.ObservedItems.Count + " / " + pending.Count + " 条，新增自动确认 " + Math.Max(0, newlyResolved) + " 条");
@@ -6872,8 +6892,7 @@ namespace LinkDispositionChecker
         private void RunSelectedReview()
         {
             bool hasFastPending = _allRows.Any(item =>
-                !item.SkipDeepReview && !item.EdgeFastReviewed && DeepReviewForm.ShouldFastRenderPlatform(item) &&
-                (item.Verdict == "人工复核" || item.Verdict == "暂时异常" || item.Verdict == "疑似已处置"));
+                IsEvidenceReviewCandidate(item) && !item.EdgeFastReviewed && DeepReviewForm.ShouldFastRenderPlatform(item));
             if (hasFastPending) RunEdgeFastReview();
             else RunDeepReview(false);
         }
@@ -6927,6 +6946,9 @@ namespace LinkDispositionChecker
             string executionReason = "";
             int processed = 0;
             int resolved = 0;
+            int failed = 0;
+            int consecutiveFailures = 0;
+            bool batchPaused = false;
             try
             {
                 using (var client = new YunwuAiClient(settings.Token))
@@ -6936,11 +6958,74 @@ namespace LinkDispositionChecker
                         _cancellation.Token.ThrowIfCancellationRequested();
                         _progressText.Text = "AI 辅助复核  " + (processed + 1) + " / " + candidates.Count +
                             "  ·  " + (String.IsNullOrWhiteSpace(item.Platform) ? "未知平台" : item.Platform);
-                        AiReviewDecision decision = await client.ReviewAsync(settings, item, _cancellation.Token);
+                        AiReviewDecision decision = null;
+                        Exception lastError = null;
+                        int attempts = 0;
+                        while (attempts < AiBatchPolicy.MaximumAttemptsPerItem && decision == null)
+                        {
+                            attempts++;
+                            try
+                            {
+                                decision = await client.ReviewAsync(settings, item, _cancellation.Token);
+                            }
+                            catch (OperationCanceledException ex)
+                            {
+                                if (_cancellation.IsCancellationRequested) throw;
+                                lastError = ex;
+                            }
+                            catch (Exception ex)
+                            {
+                                lastError = ex;
+                            }
+
+                            if (decision != null || lastError == null || AiBatchPolicy.IsFatal(lastError) ||
+                                !AiBatchPolicy.CanRetry(lastError, attempts)) break;
+                            int delay = AiBatchPolicy.RetryDelayMilliseconds(lastError, attempts);
+                            _progressText.Text = "AI 第 " + (processed + 1) + " 条暂时失败，" +
+                                (delay / 1000.0).ToString("0.0") + " 秒后重试（" + attempts + " / " +
+                                AiBatchPolicy.MaximumAttemptsPerItem + "）";
+                            await Task.Delay(delay, _cancellation.Token);
+                        }
+
+                        item.AiAttemptCount += attempts;
+                        if (decision == null)
+                        {
+                            string safeError = ExecutionLogWriter.Safe(lastError == null ? "未知 AI 错误" : lastError.Message, 300);
+                            item.AiLastError = safeError;
+                            failed++;
+                            processed++;
+                            consecutiveFailures++;
+                            executionLog.Observe(item);
+                            executionLog.RecordAiFailure(attempts,
+                                "第 " + item.Number + " 条 AI 调用失败（连续 " + consecutiveFailures + " 条）：" + safeError);
+                            SessionStore.Append(item);
+                            RecalculateCounters();
+                            UpdateStats();
+
+                            if (lastError != null && AiBatchPolicy.IsFatal(lastError))
+                            {
+                                executionOutcome = "失败";
+                                executionReason = "AI 配置或账户错误，已停止批次：" + safeError;
+                                batchPaused = true;
+                                break;
+                            }
+                            if (AiBatchPolicy.ShouldPauseBatch(consecutiveFailures))
+                            {
+                                executionOutcome = "暂停";
+                                executionReason = "AI 连续 " + consecutiveFailures + " 条调用失败，已暂停避免继续消耗额度；最后错误：" + safeError;
+                                batchPaused = true;
+                                break;
+                            }
+                            continue;
+                        }
+
+                        item.AiLastError = "";
                         AiReviewApplication application = AiReviewPolicy.Apply(item, decision, settings.Model);
+                        executionLog.RecordAiSuccess(attempts);
                         executionLog.Observe(item);
                         if (application.Resolved) resolved++;
                         processed++;
+                        consecutiveFailures = 0;
                         SessionStore.Append(item);
                         RecalculateCounters();
                         ApplyFilter();
@@ -6948,11 +7033,20 @@ namespace LinkDispositionChecker
                         await Task.Delay(450, _cancellation.Token);
                     }
                 }
-                _progressText.Text = "AI 辅助复核完成：处理 " + processed + " 条，新增自动确认 " + resolved +
-                    " 条，其余已记录 AI 建议";
-                MessageBox.Show("AI 辅助复核完成。\n\n处理：" + processed + " 条\n新增自动确认：" + resolved +
-                    " 条\n保留建议或疑似项：" + Math.Max(0, processed - resolved) + " 条",
-                    "AI 复核完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                int remainingEligible = _allRows.Count(AiReviewPolicy.IsEligible);
+                if (String.IsNullOrWhiteSpace(executionReason))
+                    executionReason = "尝试 " + processed + " / " + candidates.Count + " 条，成功 " +
+                        Math.Max(0, processed - failed) + " 条，失败 " + failed + " 条，新增自动确认 " + resolved + " 条";
+                _progressText.Text = (batchPaused ? "AI 辅助复核已暂停：" : "AI 辅助复核完成：") +
+                    "尝试 " + processed + " 条，成功 " + Math.Max(0, processed - failed) +
+                    " 条，失败 " + failed + " 条，仍可稍后处理 " + remainingEligible + " 条";
+                MessageBox.Show((batchPaused ? "AI 辅助复核已安全暂停。" : "AI 辅助复核完成。") +
+                    "\n\n尝试：" + processed + " 条\n成功：" + Math.Max(0, processed - failed) +
+                    " 条\n失败：" + failed + " 条\n新增自动确认：" + resolved +
+                    " 条\n仍可稍后处理：" + remainingEligible + " 条" +
+                    (batchPaused ? "\n\n原因：" + executionReason : ""),
+                    batchPaused ? "AI 复核已暂停" : "AI 复核完成", MessageBoxButtons.OK,
+                    batchPaused ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
             }
             catch (OperationCanceledException)
             {
@@ -6977,7 +7071,8 @@ namespace LinkDispositionChecker
                 ApplyFilter();
                 UpdateStats();
                 if (String.IsNullOrWhiteSpace(executionReason))
-                    executionReason = "处理 " + processed + " / " + candidates.Count + " 条，新增自动确认 " + resolved + " 条";
+                    executionReason = "尝试 " + processed + " / " + candidates.Count + " 条，成功 " +
+                        Math.Max(0, processed - failed) + " 条，失败 " + failed + " 条，新增自动确认 " + resolved + " 条";
                 CompleteExecutionLog(executionLog, executionOutcome, executionReason);
             }
         }
@@ -6989,7 +7084,7 @@ namespace LinkDispositionChecker
             _import.Enabled = !busy;
             _resume.Enabled = !busy && SessionStore.Exists;
             _clear.Enabled = !busy;
-            _deepReview.Enabled = !busy && _allRows.Count > 0;
+            _deepReview.Enabled = !busy && _allRows.Any(IsEvidenceReviewCandidate);
             _aiSettings.Enabled = !busy;
             _aiReview.Enabled = !busy && _allRows.Any(AiReviewPolicy.IsEligible);
             _export.Enabled = !busy;
@@ -7000,8 +7095,8 @@ namespace LinkDispositionChecker
 
         private void RunEdgeFastReview()
         {
-            var pending = _allRows.Where(item => !item.SkipDeepReview && !item.EdgeFastReviewed && DeepReviewForm.ShouldFastRenderPlatform(item) &&
-                (item.Verdict == "人工复核" || item.Verdict == "暂时异常" || item.Verdict == "疑似已处置"))
+            var pending = _allRows.Where(item => IsEvidenceReviewCandidate(item) && !item.EdgeFastReviewed &&
+                DeepReviewForm.ShouldFastRenderPlatform(item))
                 .OrderBy(item => item.Number).ToList();
             if (pending.Count == 0) { RunDeepReview(false); return; }
             ExecutionLogContext executionLog = ExecutionLogContext.Start("浏览器快速复核", "手动启动",
@@ -7010,11 +7105,13 @@ namespace LinkDispositionChecker
             using (var form = new DeepReviewForm(pending, SaveDeepReviewProgress, true)) form.ShowDialog(this);
             foreach (CheckResult item in pending.Where(item => item.EdgeFastReviewed)) executionLog.Observe(item);
             RecalculateCounters(); ApplyFilter(); UpdateStats(); SaveSessionSafe();
-            int remaining = _allRows.Count(item => item.Verdict != "已失效" && item.Verdict != "仍可访问");
-            int notFastReviewed = _allRows.Count(item => item.Verdict != "已失效" && item.Verdict != "仍可访问" &&
+            int remaining = _allRows.Count(item => item.Verdict == "人工复核" || item.Verdict == "疑似已处置");
+            int notFastReviewed = _allRows.Count(item =>
+                IsEvidenceReviewCandidate(item) &&
                 !item.EdgeFastReviewed && DeepReviewForm.ShouldFastRenderPlatform(item));
-            _deepReview.Text = notFastReviewed > 0 ? "继续 Edge 快速核验" : "启动后台复核剩余项";
-            _progressText.Text = "Edge 快速核验结束：已处理 " + (pending.Count - notFastReviewed) + " 条，仍需后台复核 " + remaining + " 条";
+            _deepReview.Text = notFastReviewed > 0 ? "继续内置浏览器复核" : "启动后台复核剩余项";
+            _progressText.Text = "内置浏览器快速复核结束：已处理 " + executionLog.ObservedItems.Count +
+                " 条，证据仍待复核 " + remaining + " 条";
             CompleteExecutionLog(executionLog,
                 pending.All(item => item.EdgeFastReviewed) ? "完成" : "部分完成",
                 "处理 " + executionLog.ObservedItems.Count + " / " + pending.Count + " 条，仍需复核 " + remaining + " 条");
@@ -7028,6 +7125,7 @@ namespace LinkDispositionChecker
                 context.EndedAt = DateTime.Now;
                 context.Outcome = outcome ?? "";
                 context.StopReason = reason ?? "";
+                context.RecordEvent("任务结束：" + context.Outcome + "；" + context.StopReason);
                 string path = ExecutionLogWriter.Write(context, _allRows);
                 _openLog.Enabled = File.Exists(path);
                 return path;
@@ -7119,7 +7217,7 @@ namespace LinkDispositionChecker
                 else
                     transientRetries = _allRows.RemoveAll(item => ShouldDiscardForResume(item, false));
                 ApplyFilter(); UpdateStats();
-                _deepReview.Enabled = _allRows.Count > 0;
+                _deepReview.Enabled = _allRows.Any(IsEvidenceReviewCandidate);
                 int total = restoredJobs.Count;
                 _progressText.Text = "已恢复上次进度：" + _allRows.Count + " / " + total + " 条" +
                     (engineChanged ? "；规则已升级，将自动重跑旧版待复核项" :
@@ -7312,6 +7410,7 @@ namespace LinkDispositionChecker
             _allCount.Text = _allRows.Count.ToString();
             _removedCount.Text = _removedTotal.ToString();
             _aliveCount.Text = _aliveTotal.ToString();
+            _temporaryCount.Text = _temporaryTotal.ToString();
             _reviewCount.Text = _reviewTotal.ToString();
             _aiSettings.Enabled = !_running;
             _aiReview.Enabled = !_running && _allRows.Any(AiReviewPolicy.IsEligible);

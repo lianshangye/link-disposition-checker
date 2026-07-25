@@ -6,12 +6,18 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 
 namespace LinkDispositionChecker
 {
     internal sealed class ExecutionLogContext
     {
         private readonly ConcurrentQueue<CheckResult> _items = new ConcurrentQueue<CheckResult>();
+        private readonly ConcurrentQueue<string> _events = new ConcurrentQueue<string>();
+        private int _aiRequests;
+        private int _aiSucceeded;
+        private int _aiFailed;
+        private int _aiRetries;
 
         internal string RunId { get; private set; }
         internal string Operation { get; private set; }
@@ -30,7 +36,7 @@ namespace LinkDispositionChecker
             string networkMode, int totalJobs, int completedBefore, int plannedItems)
         {
             DateTime now = DateTime.Now;
-            return new ExecutionLogContext
+            var context = new ExecutionLogContext
             {
                 RunId = "RUN-" + now.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N").Substring(0, 6).ToUpperInvariant(),
                 Operation = operation ?? "未知操作",
@@ -45,6 +51,8 @@ namespace LinkDispositionChecker
                 CompletedBefore = Math.Max(0, completedBefore),
                 PlannedItems = Math.Max(0, plannedItems)
             };
+            context.RecordEvent("任务开始，计划处理 " + context.PlannedItems + " 条");
+            return context;
         }
 
         internal void Observe(CheckResult item)
@@ -52,10 +60,37 @@ namespace LinkDispositionChecker
             if (item != null) _items.Enqueue(item);
         }
 
+        internal void RecordEvent(string message)
+        {
+            if (!String.IsNullOrWhiteSpace(message))
+                _events.Enqueue(DateTime.Now.ToString("HH:mm:ss") + " " + message.Trim());
+        }
+
+        internal void RecordAiSuccess(int requests)
+        {
+            Interlocked.Add(ref _aiRequests, Math.Max(1, requests));
+            Interlocked.Increment(ref _aiSucceeded);
+            Interlocked.Add(ref _aiRetries, Math.Max(0, requests - 1));
+        }
+
+        internal void RecordAiFailure(int requests, string message)
+        {
+            Interlocked.Add(ref _aiRequests, Math.Max(1, requests));
+            Interlocked.Increment(ref _aiFailed);
+            Interlocked.Add(ref _aiRetries, Math.Max(0, requests - 1));
+            RecordEvent(message);
+        }
+
         internal List<CheckResult> ObservedItems
         {
             get { return _items.Where(item => item != null).ToList(); }
         }
+
+        internal List<string> Events { get { return _events.ToList(); } }
+        internal int AiRequests { get { return _aiRequests; } }
+        internal int AiSucceeded { get { return _aiSucceeded; } }
+        internal int AiFailed { get { return _aiFailed; } }
+        internal int AiRetries { get { return _aiRetries; } }
     }
 
     internal static class ExecutionLogWriter
@@ -87,7 +122,19 @@ namespace LinkDispositionChecker
                 File.WriteAllLines(temporary, lines, new UTF8Encoding(true));
                 File.Move(temporary, path);
                 File.Copy(path, Path.Combine(logDirectory, "最近一次执行日志.txt"), true);
+                PruneHistoricalLogs(logDirectory, 100);
                 return path;
+            }
+        }
+
+        internal static void PruneHistoricalLogs(string logDirectory, int maximum)
+        {
+            if (String.IsNullOrWhiteSpace(logDirectory) || !Directory.Exists(logDirectory)) return;
+            FileInfo[] historical = new DirectoryInfo(logDirectory).GetFiles("执行日志_*.txt")
+                .OrderByDescending(file => file.LastWriteTimeUtc).ToArray();
+            foreach (FileInfo file in historical.Skip(Math.Max(1, maximum)))
+            {
+                try { file.Delete(); } catch { }
             }
         }
 
@@ -102,7 +149,7 @@ namespace LinkDispositionChecker
             lines.Add("");
             lines.Add("运行编号：" + Safe(context == null ? "" : context.RunId, 100));
             lines.Add("工具版本：" + SessionStore.CurrentEngineVersion);
-            lines.Add("日志格式：1");
+            lines.Add("日志格式：2");
             lines.Add("执行类型：" + Safe(context == null ? "" : context.Operation, 80));
             lines.Add("启动方式：" + Safe(context == null ? "" : context.Trigger, 80));
             lines.Add("开始时间：" + (context == null ? "" : context.StartedAt.ToString("yyyy-MM-dd HH:mm:ss zzz")));
@@ -157,6 +204,10 @@ namespace LinkDispositionChecker
             lines.Add("");
             lines.Add("六、AI 使用");
             lines.Add("----------");
+            lines.Add("本次 AI 请求次数：" + (context == null ? 0 : context.AiRequests));
+            lines.Add("本次 AI 成功条数：" + (context == null ? 0 : context.AiSucceeded));
+            lines.Add("本次 AI 失败条数：" + (context == null ? 0 : context.AiFailed));
+            lines.Add("本次 AI 重试次数：" + (context == null ? 0 : context.AiRetries));
             lines.Add("本次 AI 已复核：" + runItems.Count(item => item.AiReviewed));
             lines.Add("本次 AI 自动确认：" + runItems.Count(item => item.AiReviewed &&
                 (item.Verdict == "已失效" || item.Verdict == "仍可访问")));
@@ -166,7 +217,13 @@ namespace LinkDispositionChecker
                 .OrderByDescending(group => group.Count()))
                 lines.Add("- 模型 " + Safe(group.Key, 100) + "：" + group.Count() + " 条");
             lines.Add("");
-            lines.Add("七、匿名问题样本（最多 30 条）");
+            lines.Add("七、关键执行事件（最多 50 条）");
+            lines.Add("--------------------------");
+            List<string> events = context == null ? new List<string>() : context.Events.Take(50).ToList();
+            foreach (string item in events) lines.Add("- " + Safe(item, 300));
+            if (events.Count == 0) lines.Add("- 无异常事件");
+            lines.Add("");
+            lines.Add("八、匿名问题样本（最多 30 条）");
             lines.Add("----------------------------");
             List<CheckResult> issues = runItems.Where(item =>
                 item.Verdict != "已失效" && item.Verdict != "仍可访问").Take(30).ToList();
@@ -183,7 +240,7 @@ namespace LinkDispositionChecker
             }
             if (issues.Count == 0) lines.Add("- 无");
             lines.Add("");
-            lines.Add("八、自动诊断提示");
+            lines.Add("九、自动诊断提示");
             lines.Add("----------------");
             foreach (string suggestion in Suggestions(runItems)) lines.Add("- " + suggestion);
             lines.Add("");
@@ -216,6 +273,7 @@ namespace LinkDispositionChecker
         internal static string FailureCategory(CheckResult item)
         {
             if (item == null) return "未知";
+            if (!String.IsNullOrWhiteSpace(item.AiLastError)) return "AI 调用失败";
             int code;
             if (Int32.TryParse(item.StatusCode ?? "", out code))
             {

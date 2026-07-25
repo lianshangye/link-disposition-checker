@@ -9,8 +9,8 @@ using System.Windows.Forms;
 using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("链接失效核验工具启动检查")]
-[assembly: System.Reflection.AssemblyVersion("3.13.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("3.13.0.0")]
+[assembly: System.Reflection.AssemblyVersion("3.14.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("3.14.0.0")]
 
 internal static class PortableLauncher
 {
@@ -48,7 +48,7 @@ internal static class PortableLauncher
         {
             ReportLines.Add("链接失效核验工具 - 启动检查报告");
             ReportLines.Add("生成时间：" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss zzz"));
-            ReportLines.Add("启动检查版本：3.13.0");
+            ReportLines.Add("启动检查版本：3.14.0");
             ReportLines.Add("");
 
             if (LooksLikeArchiveTemporaryFolder(root))

@@ -80,7 +80,7 @@ internal sealed class EdgeFastAuditForm : Form
                     catch (Exception ex)
                     {
                         result.Verdict = "人工复核";
-                        result.StatusCode = "Edge失败";
+                        result.StatusCode = "浏览器失败";
                         result.Evidence = ex.ToString();
                     }
                     results[index] = result;
@@ -122,7 +122,7 @@ internal sealed class EdgeFastAuditForm : Form
                 catch (Exception ex)
                 {
                     result.Verdict = "人工复核";
-                    result.StatusCode = "Edge失败";
+                    result.StatusCode = "浏览器失败";
                     result.Evidence = ex.ToString();
                 }
                 renderedCount++;

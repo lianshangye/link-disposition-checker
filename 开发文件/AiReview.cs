@@ -96,6 +96,54 @@ namespace LinkDispositionChecker
         public string Message { get; set; }
     }
 
+    internal sealed class AiServiceException : Exception
+    {
+        internal bool IsFatal { get; private set; }
+        internal bool IsRetryable { get; private set; }
+        internal int RetryDelayMilliseconds { get; private set; }
+
+        internal AiServiceException(string message, bool isFatal, bool isRetryable, int retryDelayMilliseconds = 0)
+            : base(message)
+        {
+            IsFatal = isFatal;
+            IsRetryable = isRetryable;
+            RetryDelayMilliseconds = Math.Max(0, retryDelayMilliseconds);
+        }
+    }
+
+    internal static class AiBatchPolicy
+    {
+        internal const int MaximumAttemptsPerItem = 2;
+        internal const int ConsecutiveFailuresBeforePause = 3;
+
+        internal static bool IsFatal(Exception error)
+        {
+            AiServiceException service = error as AiServiceException;
+            return service != null && service.IsFatal;
+        }
+
+        internal static bool CanRetry(Exception error, int attempts)
+        {
+            if (attempts >= MaximumAttemptsPerItem) return false;
+            AiServiceException service = error as AiServiceException;
+            if (service != null) return service.IsRetryable;
+            return error is HttpRequestException || error is TaskCanceledException ||
+                error is InvalidOperationException;
+        }
+
+        internal static int RetryDelayMilliseconds(Exception error, int attempts)
+        {
+            AiServiceException service = error as AiServiceException;
+            if (service != null && service.RetryDelayMilliseconds > 0) return service.RetryDelayMilliseconds;
+            return Math.Min(5000, 1200 * Math.Max(1, attempts));
+        }
+
+        internal static bool ShouldPauseBatch(int consecutiveFailures)
+        {
+            return consecutiveFailures >= ConsecutiveFailuresBeforePause;
+        }
+    }
+
     internal sealed class YunwuAiClient : IDisposable
     {
         private readonly HttpClient _client;
@@ -246,10 +294,19 @@ namespace LinkDispositionChecker
         {
             if (response.IsSuccessStatusCode) return;
             int code = (int)response.StatusCode;
-            if (code == 401 || code == 403) throw new InvalidOperationException("API Token 无效、已过期或没有模型权限");
-            if (code == 402) throw new InvalidOperationException("API 账户余额或额度不足");
-            if (code == 429) throw new InvalidOperationException("API 当前限流，请稍后再试");
-            throw new InvalidOperationException("AI API 返回 HTTP " + code);
+            if (code == 401 || code == 403)
+                throw new AiServiceException("API Token 无效、已过期或没有模型权限", true, false);
+            if (code == 402)
+                throw new AiServiceException("API 账户余额或额度不足", true, false);
+            if (code == 408)
+                throw new AiServiceException("AI API 请求超时（HTTP 408）", false, true, 2000);
+            if (code == 429)
+                throw new AiServiceException("API 当前限流，请稍后再试", false, true, 4000);
+            if (code >= 500)
+                throw new AiServiceException("AI API 暂时异常（HTTP " + code + "）", false, true, 2500);
+            if (code >= 400)
+                throw new AiServiceException("AI API 请求不被接受（HTTP " + code + "），请检查 API 地址和模型", true, false);
+            throw new AiServiceException("AI API 返回 HTTP " + code, false, false);
         }
 
         public void Dispose()

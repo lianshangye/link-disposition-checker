@@ -79,14 +79,26 @@ internal static class RegressionTests
             !platformController.Observe(preflightJobs[0], blockedObservations[0].Value, out pausedPlatform) &&
             !platformController.Observe(preflightJobs[0], blockedObservations[0].Value, out pausedPlatform) &&
             platformController.Observe(preflightJobs[0], blockedObservations[0].Value, out pausedPlatform) &&
+            pausedPlatform == "知乎（zhihu.com）" &&
             platformController.IsPaused(preflightJobs[0]) &&
             !platformController.IsPaused(preflightJobs[1]);
+        var genericController = new PlatformRestrictionController(3);
+        var genericA = new CheckJob { Url = "https://news-a.example.com/article/1", Platform = "网媒" };
+        var genericB = new CheckJob { Url = "https://news-b.example.com/article/2", Platform = "网媒" };
+        bool genericSitePausePassed =
+            !genericController.Observe(genericA, blockedObservations[0].Value, out pausedPlatform) &&
+            !genericController.Observe(genericA, blockedObservations[0].Value, out pausedPlatform) &&
+            genericController.Observe(genericA, blockedObservations[0].Value, out pausedPlatform) &&
+            pausedPlatform == "news-a.example.com" &&
+            genericController.IsPaused(genericA) &&
+            !genericController.IsPaused(genericB) &&
+            genericController.PausedPlatforms.SequenceEqual(new[] { "news-a.example.com" });
         bool preflightPassed = preflightSelectionPassed && blockedSummary.RequiresDecision &&
             BatchRunSafetyPolicy.ShouldPauseAfterPreflight(blockedSummary, false) &&
             !BatchRunSafetyPolicy.ShouldPauseAfterPreflight(blockedSummary, true) &&
             !BatchRunSafetyPolicy.ShouldUseGlobalCircuitBreaker(true) &&
             BatchRunSafetyPolicy.ShouldUseGlobalCircuitBreaker(false) &&
-            blockedSummary.TransientRestrictions == 4 && platformPausePassed;
+            blockedSummary.TransientRestrictions == 4 && platformPausePassed && genericSitePausePassed;
         preflightPassed = preflightPassed &&
             MainForm.ShouldDiscardForResume(new CheckResult { Verdict = "暂时异常" }, false) &&
             !MainForm.ShouldDiscardForResume(new CheckResult { Verdict = "人工复核" }, false) &&
@@ -228,6 +240,17 @@ internal static class RegressionTests
         bool yoojiaIdPassed = Checker.ExtractBaiduArticleId(new Uri("https://www.yoojia.com/article/9455543928563677004.html")) == "9455543928563677004";
         Console.WriteLine(((baijiaIdPassed && dtNidPassed && baiduPublicUrlPassed && yoojiaIdPassed) ? "PASS " : "FAIL ") + "百度百家号 s?id、dt_ 编号及公开页识别");
         if (!baijiaIdPassed || !dtNidPassed || !baiduPublicUrlPassed || !yoojiaIdPassed) _failures++;
+
+        Uri toutiaoShort = new Uri("https://m.toutiao.com/is/yx4jYZTtpy0/");
+        Uri toutiaoRedirected = Checker.SelectPlatformProbeUri(toutiaoShort,
+            "https://www.toutiao.com/article/7639324771377512969/?utm_source=copy_link");
+        Uri crossPlatformRedirect = Checker.SelectPlatformProbeUri(toutiaoShort,
+            "https://example.com/article/7639324771377512969/");
+        bool redirectedProbePassed =
+            toutiaoRedirected != null && toutiaoRedirected.AbsolutePath.Contains("/article/7639324771377512969/") &&
+            Object.ReferenceEquals(crossPlatformRedirect, toutiaoShort);
+        Console.WriteLine((redirectedProbePassed ? "PASS " : "FAIL ") + "同平台短链按最终内容页核验且拒绝跨站跟随");
+        if (!redirectedProbePassed) _failures++;
 
         string yicheForum;
         string yicheThreadId;

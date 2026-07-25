@@ -25,8 +25,8 @@ using Microsoft.Web.WebView2.WinForms;
 
 [assembly: AssemblyTitle("侵权链接处置核验工具")]
 [assembly: AssemblyProduct("侵权链接处置核验工具")]
-[assembly: AssemblyVersion("3.14.0.0")]
-[assembly: AssemblyFileVersion("3.14.0.0")]
+[assembly: AssemblyVersion("3.15.0.0")]
+[assembly: AssemblyFileVersion("3.15.0.0")]
 
 namespace LinkDispositionChecker
 {
@@ -492,7 +492,7 @@ namespace LinkDispositionChecker
 
     internal static class SessionStore
     {
-        public const string CurrentEngineVersion = "3.14.0";
+        public const string CurrentEngineVersion = "3.15.0";
         private static readonly object SyncRoot = new object();
         private static readonly JavaScriptSerializer Serializer = new JavaScriptSerializer { MaxJsonLength = Int32.MaxValue };
         public static readonly string SessionPath = Path.Combine(StoragePaths.UserDataDirectory, "last-session.json");
@@ -1821,7 +1821,16 @@ namespace LinkDispositionChecker
                     result.AnalysisContext = AiReviewPolicy.BuildObservedContext(title,
                         ExtractProbableMainContentText(body), visibleForAi);
 
-                    PlatformProbeOutcome platformProbe = await ProbePlatformContentAsync(uri, expectedTitle, expectedExcerpt, expectedAuthor, token);
+                    Uri platformProbeUri = SelectPlatformProbeUri(uri, result.FinalUrl);
+                    PlatformProbeOutcome platformProbe = await ProbePlatformContentAsync(platformProbeUri, expectedTitle, expectedExcerpt, expectedAuthor, token);
+                    if ((platformProbe == null || !platformProbe.Resolved) &&
+                        platformProbeUri != null && uri != null &&
+                        !String.Equals(platformProbeUri.AbsoluteUri, uri.AbsoluteUri, StringComparison.OrdinalIgnoreCase))
+                    {
+                        PlatformProbeOutcome originalProbe = await ProbePlatformContentAsync(uri, expectedTitle, expectedExcerpt, expectedAuthor, token);
+                        if (originalProbe != null && (platformProbe == null || originalProbe.Resolved))
+                            platformProbe = originalProbe;
+                    }
                     if (platformProbe != null && platformProbe.Evidences != null)
                         result.EvidenceTrail = platformProbe.Evidences;
                     if (platformProbe != null && platformProbe.Resolved)
@@ -4528,6 +4537,15 @@ namespace LinkDispositionChecker
             return false;
         }
 
+        internal static Uri SelectPlatformProbeUri(Uri original, string finalUrl)
+        {
+            Uri redirected;
+            if (original == null || !Uri.TryCreate(finalUrl, UriKind.Absolute, out redirected)) return original;
+            if (redirected.Scheme != Uri.UriSchemeHttp && redirected.Scheme != Uri.UriSchemeHttps) return original;
+            if (!SamePlatformHost(original.Host, redirected.Host)) return original;
+            return redirected;
+        }
+
         private static bool SamePlatformHost(string firstHost, string secondHost)
         {
             string first = NormalizePlatformHost(firstHost);
@@ -6273,11 +6291,22 @@ namespace LinkDispositionChecker
                 count++;
                 _consecutive[key] = count;
                 if (count < _threshold) return false;
-                pausedPlatform = !String.IsNullOrWhiteSpace(job == null ? "" : job.Platform)
-                    ? job.Platform.Trim() : key;
+                pausedPlatform = DisplayLabel(job, key);
                 _paused[key] = pausedPlatform;
                 return true;
             }
+        }
+
+        internal static string DisplayLabel(CheckJob job, string key)
+        {
+            string platform = job == null ? "" : (job.Platform ?? "").Trim();
+            string siteKey = (key ?? "").Trim();
+            if (String.IsNullOrWhiteSpace(siteKey)) siteKey = "未知站点";
+            if (String.IsNullOrWhiteSpace(platform) ||
+                platform == "网媒" || platform == "未知" || platform == "未知平台")
+                return siteKey;
+            if (String.Equals(platform, siteKey, StringComparison.OrdinalIgnoreCase)) return platform;
+            return platform + "（" + siteKey + "）";
         }
 
         internal List<string> PausedPlatforms
@@ -6569,6 +6598,7 @@ namespace LinkDispositionChecker
             string circuitReason = "";
             string executionError = "";
             bool cancelled = false;
+            int deferredJobs = 0;
             BatchPreflightSummary preflightSummary = new BatchPreflightSummary();
             bool continueDespitePreflight = false;
             try
@@ -6611,7 +6641,11 @@ namespace LinkDispositionChecker
                             int index = Interlocked.Increment(ref nextJob);
                             if (index >= pendingJobs.Count) break;
                             CheckJob job = pendingJobs[index];
-                            if (platformRestrictions.IsPaused(job)) continue;
+                            if (platformRestrictions.IsPaused(job))
+                            {
+                                Interlocked.Increment(ref deferredJobs);
+                                continue;
+                            }
                             var item = await checker.CheckAsync(job.Url, job.Number, job.ExpectedTitle, job.ExpectedExcerpt, job.ExpectedAuthor, job.Platform, job.ContentType, false, _cancellation.Token);
                             item.SourceSheet = job.SourceSheet; item.SourceRow = job.SourceRow;
                             _uiResults.Enqueue(item);
@@ -6642,8 +6676,10 @@ namespace LinkDispositionChecker
             {
                 if (!String.IsNullOrWhiteSpace(circuitReason)) cancelled = true;
                 List<string> pausedPlatforms = platformRestrictions.PausedPlatforms;
-                bool partiallyPaused = pausedPlatforms.Count > 0 && String.IsNullOrWhiteSpace(circuitReason);
-                bool interrupted = cancelled || partiallyPaused || !String.IsNullOrWhiteSpace(executionError);
+                bool hasDeferredJobs = deferredJobs > 0 && !cancelled && String.IsNullOrWhiteSpace(circuitReason);
+                bool interrupted = cancelled || !String.IsNullOrWhiteSpace(executionError);
+                if (hasDeferredJobs)
+                    executionLog.RecordEvent("本轮未中断其他站点；连续受限站点保留待重试 " + deferredJobs + " 条");
                 _animationTimer.Stop();
                 FlushUiResults(Int32.MaxValue);
                 if (_runWatch != null) _runWatch.Stop();
@@ -6654,22 +6690,22 @@ namespace LinkDispositionChecker
                 RefreshResumeButton(); SaveSessionSafe();
                 string executionOutcome = !String.IsNullOrWhiteSpace(executionError) ? "失败" :
                     !String.IsNullOrWhiteSpace(circuitReason) ? "暂停" :
-                    partiallyPaused ? "部分完成" : cancelled ? "用户停止" : "完成";
+                    hasDeferredJobs ? "完成并保留待重试" : cancelled ? "用户停止" : "完成";
                 string executionReason = !String.IsNullOrWhiteSpace(executionError) ? executionError :
                     !String.IsNullOrWhiteSpace(circuitReason) ? circuitReason :
-                    partiallyPaused ? "部分平台持续受限：" + String.Join("、", pausedPlatforms.Take(12)) :
+                    hasDeferredJobs ? "已处理可继续任务，另有 " + deferredJobs + " 条因站点持续受限保留待重试：" + String.Join("、", pausedPlatforms.Take(12)) :
                     cancelled ? "使用者停止或取消" : "所有计划任务已处理";
                 CompleteExecutionLog(executionLog, executionOutcome, executionReason);
                 _activity.Text = interrupted ? "■" : "✓";
-                _activity.ForeColor = interrupted ? Color.FromArgb(180, 116, 20) : Color.FromArgb(22, 128, 85);
+                _activity.ForeColor = interrupted || hasDeferredJobs ? Color.FromArgb(180, 116, 20) : Color.FromArgb(22, 128, 85);
                 double seconds = Math.Max(0.1, _runWatch == null ? 0.1 : _runWatch.Elapsed.TotalSeconds);
                 double speed = Math.Max(0, (_runCompleted - _runStartCompleted) / seconds);
                 _progressText.Text = !String.IsNullOrWhiteSpace(executionError)
                     ? "执行异常已停止  " + _runCompleted + " / " + jobs.Count + "，进度和日志已保存"
                     : !String.IsNullOrWhiteSpace(circuitReason)
                     ? "网络风控已自动暂停  " + _runCompleted + " / " + jobs.Count + "，进度已保存"
-                    : partiallyPaused
-                    ? "受限平台已暂停，其他平台已继续  " + _runCompleted + " / " + jobs.Count + "，进度已保存"
+                    : hasDeferredJobs
+                    ? "本轮已结束：已处理 " + _runCompleted + " / " + jobs.Count + "，另有 " + deferredJobs + " 条站点受限待重试（未中断其他站点）"
                     : cancelled
                     ? "已停止  " + _runCompleted + " / " + jobs.Count + "，进度已保存"
                     : "核验完成  " + _runCompleted + " 条，用时 " + FormatDuration(_runWatch.Elapsed) + "，平均 " + speed.ToString("0.0") + " 条/秒";
@@ -6681,7 +6717,7 @@ namespace LinkDispositionChecker
                         "\n\n请点击“查看执行日志”并把日志发送给维护者。",
                         "执行异常", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
-                else if (!interrupted && _allRows.Count > 0)
+                else if (!interrupted && !hasDeferredJobs && _allRows.Count > 0)
                 {
                     string completionMessage = String.IsNullOrEmpty(_excelPath)
                         ? "快速核验已结束，进度已自动保存。\n\n“待后台复核候选”不是要求你逐条手动核验的数量。需要进一步确认时，请手动点击“启动后台复核候选项”；启动后会自动后台处理，最后只保留确实无法确认的项目。"
@@ -6694,13 +6730,14 @@ namespace LinkDispositionChecker
                         "这些记录会显示为“暂时异常”，不是要求人工逐条复核。请先暂停一段时间或切换到获准使用的正常网络出口，再点击“继续上次核验”。",
                         "网络风控已自动暂停", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
-                else if (partiallyPaused)
+                else if (hasDeferredJobs)
                 {
-                    MessageBox.Show("以下平台连续出现网络限制，已单独暂停：\n\n" +
+                    MessageBox.Show("本轮已完成所有能够继续处理的任务，没有中断其他站点。\n\n" +
+                        "另有 " + deferredJobs + " 条链接因以下站点连续出现网络限制，已保留为“网络待重试”：\n\n" +
                         String.Join("、", pausedPlatforms.Take(12)) +
-                        (pausedPlatforms.Count > 12 ? " 等 " + pausedPlatforms.Count + " 个平台" : "") +
-                        "\n\n其他平台已经继续处理。受限平台的未处理链接已保留在断点中，稍后点击“继续上次核验”即可重新预检。",
-                        "部分平台已暂停", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        (pausedPlatforms.Count > 12 ? " 等 " + pausedPlatforms.Count + " 个站点" : "") +
+                        "\n\n稍后点击“继续上次核验”即可只重试这些未处理链接；它们不会被计入人工复核。",
+                        "本轮完成，部分链接待重试", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
             }
         }

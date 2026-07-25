@@ -25,8 +25,8 @@ using Microsoft.Web.WebView2.WinForms;
 
 [assembly: AssemblyTitle("侵权链接处置核验工具")]
 [assembly: AssemblyProduct("侵权链接处置核验工具")]
-[assembly: AssemblyVersion("3.15.0.0")]
-[assembly: AssemblyFileVersion("3.15.0.0")]
+[assembly: AssemblyVersion("3.16.0.0")]
+[assembly: AssemblyFileVersion("3.16.0.0")]
 
 namespace LinkDispositionChecker
 {
@@ -492,7 +492,7 @@ namespace LinkDispositionChecker
 
     internal static class SessionStore
     {
-        public const string CurrentEngineVersion = "3.15.0";
+        public const string CurrentEngineVersion = "3.16.0";
         private static readonly object SyncRoot = new object();
         private static readonly JavaScriptSerializer Serializer = new JavaScriptSerializer { MaxJsonLength = Int32.MaxValue };
         public static readonly string SessionPath = Path.Combine(StoragePaths.UserDataDirectory, "last-session.json");
@@ -1858,7 +1858,7 @@ namespace LinkDispositionChecker
                     else if (code >= 500)
                     {
                         result.Verdict = "暂时异常";
-                        result.Evidence = "站点服务异常（HTTP " + code + "），建议稍后重试";
+                        result.Evidence = "当前访问线路或目标站点返回 HTTP " + code + "，未取得正常内容页，建议稍后重试";
                     }
                     else if (code == 451)
                     {
@@ -4096,6 +4096,19 @@ namespace LinkDispositionChecker
             string signal = FirstNonEmpty(FindSignal(combined, RemovedSignals), PlatformRules.FindRemovedSignal(combined, currentRuleUri));
             string restriction = FirstNonEmpty(FindSignal(combined, RestrictedSignals), PlatformRules.FindRestrictedSignal(combined, currentRuleUri));
 
+            int transportStatus;
+            if (TryRecognizeRenderedTransportError(title, visible, html, out transportStatus))
+            {
+                return new DeepDecision
+                {
+                    Resolved = true,
+                    NeedsVerification = false,
+                    Verdict = "暂时异常",
+                    Evidence = "浏览器显示 HTTP " + transportStatus +
+                        " 错误页，未取得目标内容；可能来自本机代理、访问线路或目标服务器，不等同于内容已失效或触发风控"
+                };
+            }
+
             // Zhihu's "no knowledge exists" page is a target-specific empty state,
             // not the generic security/403 page. Keep this check before the generic
             // login/restriction branch so the known removal page is still resolved.
@@ -4224,6 +4237,25 @@ namespace LinkDispositionChecker
 
             decision.Evidence = "持久浏览器已加载页面，但仍没有足够证据判定是否失效";
             return decision;
+        }
+
+        internal static bool TryRecognizeRenderedTransportError(string title, string visible, string html, out int statusCode)
+        {
+            statusCode = 0;
+            string text = ((title ?? "") + " " + (visible ?? "") + " " +
+                ((html ?? "").Length > 3000 ? (html ?? "").Substring(0, 3000) : (html ?? ""))).ToLowerInvariant();
+            Match status = Regex.Match(text, @"(?:http\s*(?:error\s*)?|status(?:\s+code)?\s*[:：]?\s*)(408|500|501|502|503|504|505|520|521|522|523|524)\b",
+                RegexOptions.IgnoreCase);
+            Match browserCode = Regex.Match(text, @"err_(?:connection_[a-z_]+|timed_out|name_not_resolved|address_unreachable|proxy_connection_failed|tunnel_connection_failed|bad_gateway)",
+                RegexOptions.IgnoreCase);
+            bool errorShell = Regex.IsMatch(text,
+                @"当前无法使用此页面|当前无法处理此请求|无法访问此网站|无法连接到此页面|this page isn.?t working|this site can.?t be reached|bad gateway|gateway timeout|proxy error",
+                RegexOptions.IgnoreCase);
+            if (!status.Success && !browserCode.Success) return false;
+            if (!errorShell && browserCode.Success == false) return false;
+            if (status.Success) Int32.TryParse(status.Groups[1].Value, out statusCode);
+            if (statusCode == 0) statusCode = 502;
+            return true;
         }
 
         internal static RenderedPageData BuildRenderedPageData(string html, string url)
@@ -5597,6 +5629,13 @@ namespace LinkDispositionChecker
             DeepDecision decision = Checker.ClassifyRenderedPage(item, page);
             if (!String.IsNullOrWhiteSpace(page.Title)) item.Title = page.Title;
             if (!String.IsNullOrWhiteSpace(page.Url)) item.FinalUrl = page.Url;
+            if (decision.Resolved && decision.Verdict == "暂时异常")
+            {
+                item.Verdict = "暂时异常";
+                item.StatusCode = "浏览器错误页";
+                item.Evidence = "内置浏览器短渲染：" + decision.Evidence;
+                return false;
+            }
             if (decision.Resolved && IsResolvedVerdict(decision.Verdict))
             {
                 item.Verdict = decision.Verdict;
@@ -5674,6 +5713,13 @@ namespace LinkDispositionChecker
             item.AnalysisContext = AiReviewPolicy.BuildObservedContext(page.Title, page.MainText, page.Text);
             if (!String.IsNullOrWhiteSpace(page.Title)) item.Title = page.Title;
             DeepDecision decision = Checker.ClassifyRenderedPage(item, page);
+            if (decision.Resolved && decision.Verdict == "暂时异常")
+            {
+                item.Verdict = "暂时异常";
+                item.StatusCode = "浏览器错误页";
+                item.Evidence = "内置浏览器复核：" + decision.Evidence;
+                return false;
+            }
             if (decision.Resolved && (decision.Verdict == "已失效" || decision.Verdict == "仍可访问"))
             {
                 item.Verdict = decision.Verdict;
@@ -6384,6 +6430,7 @@ namespace LinkDispositionChecker
         private readonly Button _stop = new Button();
         private readonly Button _import = new Button();
         private readonly Button _resume = new Button();
+        private readonly Button _retryNetwork = new Button();
         private readonly Button _clear = new Button();
         private readonly Button _export = new Button();
         private readonly Button _deepReview = new Button();
@@ -6402,7 +6449,7 @@ namespace LinkDispositionChecker
         private readonly Label _allCount = MakeStat("0", "总链接");
         private readonly Label _removedCount = MakeStat("0", "高置信已失效");
         private readonly Label _aliveCount = MakeStat("0", "仍可访问");
-        private readonly Label _temporaryCount = MakeStat("0", "网络待重试");
+        private readonly Label _temporaryCount = MakeStat("0", "访问异常待重试");
         private readonly Label _reviewCount = MakeStat("0", "证据待复核");
         private readonly BindingList<CheckResult> _rows = new BindingList<CheckResult>();
         private readonly List<CheckResult> _allRows = new List<CheckResult>();
@@ -6490,7 +6537,7 @@ namespace LinkDispositionChecker
             _input.Size = new Size(inputPanel.Width - 190, 88);
             _input.PlaceholderTextCompat("例如：https://example.com/article/123");
             var side = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, WrapContents = false, Width = 150, Dock = DockStyle.Right, Padding = new Padding(8, 9, 0, 0) };
-            StyleButton(_import, "选择 Excel / CSV", false); StyleButton(_resume, "继续上次核验", false); StyleButton(_clear, "清空输入", false);
+            StyleButton(_import, "选择 Excel / CSV", false); StyleButton(_resume, "恢复上次进度", false); StyleButton(_clear, "清空输入", false);
             _import.Click += ImportClick; _resume.Click += async delegate { await ResumeLastSessionAsync(); };
             _clear.Click += delegate
             {
@@ -6505,19 +6552,21 @@ namespace LinkDispositionChecker
             main.Controls.Add(inputPanel, 0, 1);
 
             var toolbar = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = true, AutoScroll = true, Padding = new Padding(0, 6, 0, 4) };
-            StyleButton(_start, "开始核验", true); StyleButton(_stop, "停止", false); StyleButton(_deepReview, "启动后台复核候选项", false);
+            StyleButton(_start, "开始核验", true); StyleButton(_retryNetwork, "重试访问异常", false);
+            StyleButton(_stop, "停止", false); StyleButton(_deepReview, "启动后台复核候选项", false);
             StyleButton(_aiReview, "AI 辅助复核", false); StyleButton(_aiSettings, "AI 设置", false);
             StyleButton(_export, "导出结果", false); StyleButton(_open, "打开选中链接", false); StyleButton(_openLog, "查看执行日志", false);
-            _stop.Enabled = false; _deepReview.Enabled = false; _aiReview.Enabled = false;
+            _stop.Enabled = false; _retryNetwork.Enabled = false; _deepReview.Enabled = false; _aiReview.Enabled = false;
             _start.Click += async delegate { await StartChecksAsync(false); }; _stop.Click += delegate { if (_cancellation != null) _cancellation.Cancel(); };
+            _retryNetwork.Click += async delegate { await ResumeLastSessionAsync(true); };
             _deepReview.Click += delegate { RunSelectedReview(); }; _export.Click += ExportClick; _open.Click += OpenSelectedClick;
             _aiReview.Click += async delegate { await RunAiReviewAsync(); };
             _aiSettings.Click += delegate { ShowAiSettings(); };
             _openLog.Click += delegate { OpenLatestExecutionLog(); };
-            toolbar.Controls.Add(_start); toolbar.Controls.Add(_stop); toolbar.Controls.Add(_deepReview); toolbar.Controls.Add(_aiReview); toolbar.Controls.Add(_aiSettings); toolbar.Controls.Add(_export); toolbar.Controls.Add(_open); toolbar.Controls.Add(_openLog);
+            toolbar.Controls.Add(_start); toolbar.Controls.Add(_retryNetwork); toolbar.Controls.Add(_stop); toolbar.Controls.Add(_deepReview); toolbar.Controls.Add(_aiReview); toolbar.Controls.Add(_aiSettings); toolbar.Controls.Add(_export); toolbar.Controls.Add(_open); toolbar.Controls.Add(_openLog);
             toolbar.Controls.Add(new Label { Text = "    显示：", AutoSize = true, Margin = new Padding(8, 9, 0, 0), ForeColor = Color.FromArgb(75, 85, 99) });
             _filter.DropDownStyle = ComboBoxStyle.DropDownList; _filter.Width = 160; _filter.Margin = new Padding(4, 4, 0, 0);
-            _filter.Items.AddRange(new object[] { "全部结果", "高置信已失效", "仍可访问", "网络待重试", "证据待复核" }); _filter.SelectedIndex = 0; _filter.SelectedIndexChanged += delegate { ApplyFilter(); };
+            _filter.Items.AddRange(new object[] { "全部结果", "高置信已失效", "仍可访问", "访问异常待重试", "证据待复核" }); _filter.SelectedIndex = 0; _filter.SelectedIndexChanged += delegate { ApplyFilter(); };
             toolbar.Controls.Add(_filter); main.Controls.Add(toolbar, 0, 2);
             toolbar.Controls.Add(new Label { Text = "    性能：", AutoSize = true, Margin = new Padding(8, 9, 0, 0), ForeColor = Color.FromArgb(75, 85, 99) });
             _performance.DropDownStyle = ComboBoxStyle.DropDownList; _performance.Width = 115; _performance.Margin = new Padding(4, 4, 0, 0);
@@ -6560,7 +6609,7 @@ namespace LinkDispositionChecker
             _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = property, HeaderText = header, Width = width, SortMode = DataGridViewColumnSortMode.Automatic });
         }
 
-        private async Task StartChecksAsync(bool resumeExisting)
+        private async Task StartChecksAsync(bool resumeExisting, string launchMode = null)
         {
             List<CheckJob> jobs = BuildJobs();
             if (jobs.Count == 0) { MessageBox.Show("未找到有效链接。\n\n请粘贴以 http:// 或 https:// 开头的地址。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
@@ -6571,7 +6620,7 @@ namespace LinkDispositionChecker
                 return;
             }
 
-            _running = true; _start.Enabled = false; _stop.Enabled = true; _deepReview.Enabled = false; _import.Enabled = false; _clear.Enabled = false; _input.ReadOnly = true;
+            _running = true; _start.Enabled = false; _retryNetwork.Enabled = false; _stop.Enabled = true; _deepReview.Enabled = false; _import.Enabled = false; _clear.Enabled = false; _input.ReadOnly = true;
             _performance.Enabled = false;
             _networkMode.Enabled = false;
             _resume.Enabled = false;
@@ -6590,7 +6639,7 @@ namespace LinkDispositionChecker
             var completedKeys = new HashSet<string>(_allRows.Select(ResultKey), StringComparer.OrdinalIgnoreCase);
             var pendingJobs = jobs.Where(job => !completedKeys.Contains(job.Key)).ToList();
             ExecutionLogContext executionLog = ExecutionLogContext.Start("快速核验",
-                resumeExisting ? "继续上次核验" : "开始核验",
+                !String.IsNullOrWhiteSpace(launchMode) ? launchMode : resumeExisting ? "继续上次核验" : "开始核验",
                 Convert.ToString(_performance.SelectedItem), Convert.ToString(_networkMode.SelectedItem),
                 jobs.Count, _allRows.Count, pendingJobs.Count);
             var circuitBreaker = new NetworkRestrictionCircuitBreaker(8);
@@ -6600,7 +6649,8 @@ namespace LinkDispositionChecker
             bool cancelled = false;
             int deferredJobs = 0;
             BatchPreflightSummary preflightSummary = new BatchPreflightSummary();
-            bool continueDespitePreflight = false;
+            bool explicitNetworkRetry = String.Equals(launchMode, "重试访问异常", StringComparison.Ordinal);
+            bool continueDespitePreflight = explicitNetworkRetry;
             try
             {
                 if (pendingJobs.Count >= 20)
@@ -6611,17 +6661,24 @@ namespace LinkDispositionChecker
                     pendingJobs = pendingJobs.Where(job => !sampledKeys.Contains(job.Key)).ToList();
                     if (preflightSummary.RequiresDecision)
                     {
-                        DialogResult decision = MessageBox.Show(
-                            "网络预检发现较多临时异常：\n\n" + preflightSummary.Description +
-                            "\n\n这只说明当前部分网站或网络线路不稳定，不代表剩余链接都无法核验。" +
-                            "\n\n点击“是”：仍然继续，本轮不再因全局连续异常自动停止；连续受限的平台仍会单独暂停。" +
-                            "\n点击“否”：保存当前进度并暂停。",
-                            "网络预检发现异常，是否仍然继续？",
-                            MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button1);
-                        continueDespitePreflight = decision == DialogResult.Yes;
-                        executionLog.RecordEvent(continueDespitePreflight
-                            ? "使用者选择在预检异常后继续，仍保留平台级暂停"
-                            : "使用者选择在预检异常后暂停");
+                        if (explicitNetworkRetry)
+                        {
+                            executionLog.RecordEvent("使用者已通过“重试访问异常”明确启动重试；预检异常后继续处理其他站点");
+                        }
+                        else
+                        {
+                            DialogResult decision = MessageBox.Show(
+                                "访问预检发现较多临时异常：\n\n" + preflightSummary.Description +
+                                "\n\n这只说明当前部分网站、代理线路或目标服务器没有返回正常页面，不代表全部链接都无法核验，也不等同于触发风控。" +
+                                "\n\n点击“是”：仍然继续，本轮不再因全局连续异常自动停止；连续异常的站点仍会单独保留待重试。" +
+                                "\n点击“否”：保存当前进度并暂停。",
+                                "访问预检发现异常，是否仍然继续？",
+                                MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button1);
+                            continueDespitePreflight = decision == DialogResult.Yes;
+                            executionLog.RecordEvent(continueDespitePreflight
+                                ? "使用者选择在预检异常后继续，仍保留站点级暂停"
+                                : "使用者选择在预检异常后暂停");
+                        }
                         if (BatchRunSafetyPolicy.ShouldPauseAfterPreflight(preflightSummary, continueDespitePreflight))
                         {
                             circuitReason = "使用者根据网络预检选择暂停（" + preflightSummary.Description + "）";
@@ -6703,7 +6760,7 @@ namespace LinkDispositionChecker
                 _progressText.Text = !String.IsNullOrWhiteSpace(executionError)
                     ? "执行异常已停止  " + _runCompleted + " / " + jobs.Count + "，进度和日志已保存"
                     : !String.IsNullOrWhiteSpace(circuitReason)
-                    ? "网络风控已自动暂停  " + _runCompleted + " / " + jobs.Count + "，进度已保存"
+                    ? "访问异常已暂停  " + _runCompleted + " / " + jobs.Count + "，进度已保存"
                     : hasDeferredJobs
                     ? "本轮已结束：已处理 " + _runCompleted + " / " + jobs.Count + "，另有 " + deferredJobs + " 条站点受限待重试（未中断其他站点）"
                     : cancelled
@@ -6727,16 +6784,16 @@ namespace LinkDispositionChecker
                 else if (!String.IsNullOrWhiteSpace(circuitReason))
                 {
                     MessageBox.Show("检测到" + circuitReason + "，工具已自动停止继续请求并保存进度。\n\n" +
-                        "这些记录会显示为“暂时异常”，不是要求人工逐条复核。请先暂停一段时间或切换到获准使用的正常网络出口，再点击“继续上次核验”。",
-                        "网络风控已自动暂停", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        "这些记录会显示为“访问异常待重试”，不是要求人工逐条复核。请先暂停一段时间或确认代理/目标站点恢复后，再点击“重试访问异常”。",
+                        "访问异常已暂停", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
                 else if (hasDeferredJobs)
                 {
                     MessageBox.Show("本轮已完成所有能够继续处理的任务，没有中断其他站点。\n\n" +
-                        "另有 " + deferredJobs + " 条链接因以下站点连续出现网络限制，已保留为“网络待重试”：\n\n" +
+                        "另有 " + deferredJobs + " 条链接因以下站点连续没有返回正常页面，已保留为“访问异常待重试”：\n\n" +
                         String.Join("、", pausedPlatforms.Take(12)) +
                         (pausedPlatforms.Count > 12 ? " 等 " + pausedPlatforms.Count + " 个站点" : "") +
-                        "\n\n稍后点击“继续上次核验”即可只重试这些未处理链接；它们不会被计入人工复核。",
+                        "\n\n稍后点击“重试访问异常”即可只重试异常和未处理链接；它们不会被计入人工复核。",
                         "本轮完成，部分链接待重试", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
             }
@@ -7120,6 +7177,7 @@ namespace LinkDispositionChecker
             _stop.Enabled = busy;
             _import.Enabled = !busy;
             _resume.Enabled = !busy && SessionStore.Exists;
+            _retryNetwork.Enabled = !busy && GetSavedRetryCount() > 0;
             _clear.Enabled = !busy;
             _deepReview.Enabled = !busy && _allRows.Any(IsEvidenceReviewCandidate);
             _aiSettings.Enabled = !busy;
@@ -7213,12 +7271,33 @@ namespace LinkDispositionChecker
         private void RefreshResumeButton()
         {
             _resume.Enabled = !_running && SessionStore.Exists;
-            _resume.Text = SessionStore.Exists ? "继续上次核验" : "暂无上次进度";
+            _resume.Text = SessionStore.Exists ? "恢复上次进度" : "暂无上次进度";
             string description = SessionStore.Describe();
             _resume.Tag = description;
+            int retryCount = GetSavedRetryCount();
+            _retryNetwork.Text = retryCount > 0 ? "重试访问异常（" + retryCount + "）" : "重试访问异常";
+            _retryNetwork.Enabled = !_running && retryCount > 0;
+            _retryNetwork.Tag = retryCount > 0
+                ? "只重新执行访问异常和上次未处理的链接，共 " + retryCount + " 条"
+                : "当前没有访问异常或未处理链接";
         }
 
-        private async Task ResumeLastSessionAsync()
+        private int GetSavedRetryCount()
+        {
+            if (!SessionStore.Exists) return 0;
+            try
+            {
+                CheckSession session = SessionStore.Load();
+                if (session == null) return 0;
+                int temporary = (session.Results ?? new List<CheckResult>()).Count(item => item != null && item.Verdict == "暂时异常");
+                int missing = Math.Max(0, (session.Jobs ?? new List<CheckJob>()).Count -
+                    (session.Results ?? new List<CheckResult>()).Count);
+                return temporary + missing;
+            }
+            catch { return 0; }
+        }
+
+        private async Task ResumeLastSessionAsync(bool retryNetworkOnly = false)
         {
             if (_running || !SessionStore.Exists) return;
             try
@@ -7248,18 +7327,44 @@ namespace LinkDispositionChecker
                 List<CheckJob> restoredJobs = BuildJobs();
                 var validKeys = new HashSet<string>(restoredJobs.Select(job => job.Key), StringComparer.OrdinalIgnoreCase);
                 _allRows.RemoveAll(item => !validKeys.Contains(ResultKey(item)));
+                int savedTemporary = _allRows.Count(item => item != null && item.Verdict == "暂时异常");
+                int savedMissing = Math.Max(0, restoredJobs.Count - _allRows.Count);
+                if (retryNetworkOnly)
+                {
+                    int retryTotal = savedTemporary + savedMissing;
+                    if (retryTotal <= 0)
+                    {
+                        ApplyFilter(); UpdateStats(); RefreshResumeButton();
+                        MessageBox.Show("当前没有访问异常或未处理链接。", "无需重试",
+                            MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        return;
+                    }
+                    DialogResult retryDecision = MessageBox.Show(
+                        "将重新执行 " + retryTotal + " 条链接：\n\n" +
+                        "访问异常 " + savedTemporary + " 条；上次因站点连续异常而未处理 " + savedMissing + " 条。\n\n" +
+                        "502 可能来自本机代理、访问线路或目标服务器。重试会重新发起网络请求，但不会把 502 猜成“已失效”，也不会把错误页送给 AI。\n\n是否现在开始重试？",
+                        "重试访问异常", MessageBoxButtons.YesNo, MessageBoxIcon.Question,
+                        MessageBoxDefaultButton.Button1);
+                    if (retryDecision != DialogResult.Yes)
+                    {
+                        ApplyFilter(); UpdateStats(); RefreshResumeButton();
+                        return;
+                    }
+                    _allRows.RemoveAll(item => ShouldDiscardForResume(item, false));
+                }
                 int transientRetries = 0;
-                if (engineChanged)
+                if (!retryNetworkOnly && engineChanged)
                     _allRows.RemoveAll(item => ShouldDiscardForResume(item, true));
-                else
+                else if (!retryNetworkOnly)
                     transientRetries = _allRows.RemoveAll(item => ShouldDiscardForResume(item, false));
                 ApplyFilter(); UpdateStats();
                 _deepReview.Enabled = _allRows.Any(IsEvidenceReviewCandidate);
                 int total = restoredJobs.Count;
                 _progressText.Text = "已恢复上次进度：" + _allRows.Count + " / " + total + " 条" +
-                    (engineChanged ? "；规则已升级，将自动重跑旧版待复核项" :
+                    (retryNetworkOnly ? "；将重试 " + (savedTemporary + savedMissing) + " 条访问异常/未处理链接" :
+                    engineChanged ? "；规则已升级，将自动重跑旧版待复核项" :
                     transientRetries > 0 ? "；将重新核验 " + transientRetries + " 条暂时异常" : "");
-                if (_allRows.Count < total) await StartChecksAsync(true);
+                if (_allRows.Count < total) await StartChecksAsync(true, retryNetworkOnly ? "重试访问异常" : "继续上次核验");
                 else MessageBox.Show("上次快速核验已全部完成。\n\n可手动开始深度复核，或直接查看和导出结果。", "进度已恢复", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception ex)

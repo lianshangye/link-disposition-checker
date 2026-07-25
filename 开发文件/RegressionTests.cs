@@ -682,6 +682,21 @@ internal static class RegressionTests
                 Html = "<div id='app'>推荐流</div>"
             }));
 
+        Expect("浏览器 HTTP 502 错误页进入访问异常待重试", "暂时异常", Checker.ClassifyRenderedPage(
+            new CheckResult
+            {
+                OriginalUrl = "https://muyinghaow.dianjinghuw.com/article/1",
+                FinalUrl = "https://muyinghaow.dianjinghuw.com/article/1",
+                ExpectedTitle = "目标网媒文章"
+            },
+            new RenderedPageData
+            {
+                Url = "https://muyinghaow.dianjinghuw.com/article/1",
+                Title = "当前无法使用此页面",
+                Text = "muyinghaow.dianjinghuw.com 当前无法处理此请求。 HTTP ERROR 502 刷新",
+                Html = "<main><h1>当前无法使用此页面</h1><p>HTTP ERROR 502</p></main>"
+            }));
+
         return _failures == 0 ? 0 : 1;
     }
 }

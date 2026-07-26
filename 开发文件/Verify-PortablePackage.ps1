@@ -45,7 +45,7 @@ try {
 
     $x64 = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $root 'x64\LinkChecker.exe'))
     $x86 = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $root 'x86\LinkChecker.exe'))
-    if ($x64.FileVersion -ne '4.4.0.0' -or $x86.FileVersion -ne '4.4.0.0') {
+    if ($x64.FileVersion -ne '4.4.1.0' -or $x86.FileVersion -ne '4.4.1.0') {
         throw "Unexpected executable versions: x64=$($x64.FileVersion), x86=$($x86.FileVersion)"
     }
     $sourceRules = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $projectRoot 'platform-rules.json')).Hash
@@ -63,8 +63,8 @@ try {
     $readme = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $root $readmeName)
     $logic = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $root $logicName)
     if (
-        $readme -notmatch '4\.4\.0' -or
-        $logic -notmatch '4\.4\.0' -or
+        $readme -notmatch '4\.4\.1' -or
+        $logic -notmatch '4\.4\.1' -or
         $readme -notmatch 'Globalping' -or
         $logic -notmatch 'HTTP 404' -or
         $readme.Length -lt 500 -or

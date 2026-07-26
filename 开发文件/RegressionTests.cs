@@ -269,7 +269,7 @@ internal static class RegressionTests
                 },
                 new RemoteEvidenceResponse { TargetUnreachable = true });
         bool evidenceEscalationRoutingPassed =
-            SessionStore.CurrentEngineVersion == "4.4.0" &&
+            SessionStore.CurrentEngineVersion == "4.4.1" &&
             infrastructureDeferred.Number == 88 &&
             infrastructureDeferred.Verdict == "暂时异常" &&
             infrastructureDeferred.SkipDeepReview &&

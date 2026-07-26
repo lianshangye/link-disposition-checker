@@ -320,7 +320,7 @@ namespace LinkDispositionChecker
             {
                 request.Content = new StringContent(GlobalpingJson.Serialize(payload), Encoding.UTF8, "application/json");
                 AddGlobalpingAuthorization(request);
-                using (HttpResponseMessage response = await _remoteEvidenceClient.SendAsync(request, token))
+                using (HttpResponseMessage response = await _globalpingClient.SendAsync(request, token))
                 {
                     string body = await ReadLimitedBodyAsync(response.Content, 200000, token);
                     if ((int)response.StatusCode == 429)
@@ -351,7 +351,7 @@ namespace LinkDispositionChecker
                     GlobalpingMeasurementsEndpoint + "/" + Uri.EscapeDataString(measurementId)))
                 {
                     AddGlobalpingAuthorization(request);
-                    using (HttpResponseMessage response = await _remoteEvidenceClient.SendAsync(request, token))
+                    using (HttpResponseMessage response = await _globalpingClient.SendAsync(request, token))
                     {
                         string body = await ReadLimitedBodyAsync(response.Content, 1200000, token);
                         if (!response.IsSuccessStatusCode)

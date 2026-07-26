@@ -25,8 +25,8 @@ using Microsoft.Web.WebView2.WinForms;
 
 [assembly: AssemblyTitle("链接失效检测工具")]
 [assembly: AssemblyProduct("链接失效检测工具")]
-[assembly: AssemblyVersion("4.4.0.0")]
-[assembly: AssemblyFileVersion("4.4.0.0")]
+[assembly: AssemblyVersion("4.4.1.0")]
+[assembly: AssemblyFileVersion("4.4.1.0")]
 
 namespace LinkDispositionChecker
 {
@@ -592,7 +592,7 @@ namespace LinkDispositionChecker
 
     internal static class SessionStore
     {
-        public const string CurrentEngineVersion = "4.4.0";
+        public const string CurrentEngineVersion = "4.4.1";
         private static readonly object SyncRoot = new object();
         private static readonly JavaScriptSerializer Serializer = new JavaScriptSerializer { MaxJsonLength = Int32.MaxValue };
         public static readonly string SessionPath = Path.Combine(StoragePaths.UserDataDirectory, "last-session.json");
@@ -1649,6 +1649,7 @@ namespace LinkDispositionChecker
         private readonly HttpClient _directClient;
         private readonly HttpClient _zhihuClient;
         private readonly HttpClient _remoteEvidenceClient;
+        private readonly HttpClient _globalpingClient;
         private readonly int _bodyBytes;
         private static readonly SemaphoreSlim ZhihuProbeGate = new SemaphoreSlim(1, 1);
         private static readonly SemaphoreSlim BaiduPublicProbeGate = new SemaphoreSlim(1, 1);
@@ -1861,6 +1862,11 @@ namespace LinkDispositionChecker
             _zhihuClient = CreateClient(true);
             _remoteEvidenceClient = CreateClient(true);
             _remoteEvidenceClient.Timeout = TimeSpan.FromSeconds(25);
+            // Globalping's anonymous hourly allowance is counted by the API caller's
+            // public IP. Keep the control API off the target-page/system proxy route
+            // so a saturated shared proxy does not block otherwise available evidence.
+            _globalpingClient = CreateClient(false);
+            _globalpingClient.Timeout = TimeSpan.FromSeconds(30);
             _bodyBytes = Math.Max(180000, bodyBytes);
         }
 

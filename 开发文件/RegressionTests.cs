@@ -89,11 +89,11 @@ internal static class RegressionTests
         bool genericSitePausePassed =
             !genericController.Observe(genericA, blockedObservations[0].Value, out pausedPlatform) &&
             !genericController.Observe(genericA, blockedObservations[0].Value, out pausedPlatform) &&
-            genericController.Observe(genericA, blockedObservations[0].Value, out pausedPlatform) &&
-            pausedPlatform == "news-a.example.com" &&
-            genericController.IsPaused(genericA) &&
+            !genericController.Observe(genericA, blockedObservations[0].Value, out pausedPlatform) &&
+            String.IsNullOrWhiteSpace(pausedPlatform) &&
+            !genericController.IsPaused(genericA) &&
             !genericController.IsPaused(genericB) &&
-            genericController.PausedPlatforms.SequenceEqual(new[] { "news-a.example.com" });
+            genericController.PausedPlatforms.Count == 0;
         bool preflightPassed = preflightSelectionPassed && blockedSummary.RequiresDecision &&
             BatchRunSafetyPolicy.ShouldPauseAfterPreflight(blockedSummary, false) &&
             !BatchRunSafetyPolicy.ShouldPauseAfterPreflight(blockedSummary, true) &&
@@ -102,10 +102,10 @@ internal static class RegressionTests
             blockedSummary.TransientRestrictions == 4 && platformPausePassed && genericSitePausePassed;
         preflightPassed = preflightPassed &&
             MainForm.ShouldDiscardForResume(new CheckResult { Verdict = "暂时异常" }, false) &&
-            !MainForm.ShouldDiscardForResume(new CheckResult { Verdict = "人工复核" }, false) &&
+            MainForm.ShouldDiscardForResume(new CheckResult { Verdict = "人工复核" }, false) &&
             MainForm.ShouldDiscardForResume(new CheckResult { Verdict = "人工复核" }, true) &&
             !MainForm.ShouldDiscardForResume(new CheckResult { Verdict = "仍可访问" }, true);
-        Console.WriteLine((preflightPassed ? "PASS " : "FAIL ") + "跨平台小样本预检和平台独立熔断");
+        Console.WriteLine((preflightPassed ? "PASS " : "FAIL ") + "跨平台小样本预检和 502 不提前跳过");
         if (!preflightPassed) _failures++;
 
         bool aiUrlPassed =
@@ -269,7 +269,7 @@ internal static class RegressionTests
                 },
                 new RemoteEvidenceResponse { TargetUnreachable = true });
         bool evidenceEscalationRoutingPassed =
-            SessionStore.CurrentEngineVersion == "4.3.0" &&
+            SessionStore.CurrentEngineVersion == "4.4.0" &&
             infrastructureDeferred.Number == 88 &&
             infrastructureDeferred.Verdict == "暂时异常" &&
             infrastructureDeferred.SkipDeepReview &&
@@ -281,7 +281,7 @@ internal static class RegressionTests
             publicUnavailableDeferred.EvidenceStage.Contains("自动多线路不可访问") &&
             publicUnavailableGatePassed;
         Console.WriteLine((evidenceEscalationRoutingPassed ? "PASS " : "FAIL ") +
-            "4.3 多线路不可访问、共享基础设施复用和自动追证字段");
+            "4.4 未完成状态、共享基础设施兼容和自动追证字段");
         if (!evidenceEscalationRoutingPassed) _failures++;
 
         var chinaEyeballCandidate = new CheckResult
@@ -298,21 +298,57 @@ internal static class RegressionTests
             Checker.IsChinaEyeballChallenge(403,
                 "<title>网站防火墙</title><script>window.location.href='/xinwen/123.html';</script>",
                 "challenge=abc; server_name_session=def") &&
+            Checker.MergeCookieHeaders("challenge=old; session=abc", "challenge=new; path_token=xyz")
+                .Contains("challenge=new") &&
+            Checker.MergeCookieHeaders("challenge=old; session=abc", "challenge=new; path_token=xyz")
+                .Contains("path_token=xyz") &&
             Checker.ExtractMetaDescription(
                 "<html><head><meta content=\"这是一段来自当前文章正文的有效摘要，长度足以证明目标页面仍在公开返回文章内容。\" name=\"description\"></head></html>")
-                .Contains("当前文章正文");
+                .Contains("当前文章正文") &&
+            Checker.IsChinaProbeCapacityFailure(
+                "Globalping 返回 HTTP 429: rate_limit_exceeded");
         Console.WriteLine((chinaEyeballRulePassed ? "PASS " : "FAIL ") +
             "中国普通宽带防火墙挑战、Cookie 重试和正文摘要识别");
         if (!chinaEyeballRulePassed) _failures++;
 
         bool excelVerdictPassed =
-            OpenXmlExcelBridge.ToExcelVerdict("已失效") == "是" &&
-            OpenXmlExcelBridge.ToExcelVerdict("仍可访问") == "否" &&
-            OpenXmlExcelBridge.ToExcelVerdict("公网不可访问") == "待独立复核" &&
-            OpenXmlExcelBridge.ToExcelVerdict("人工复核") == "待复核";
+            OpenXmlExcelBridge.ToExcelVerdict("已失效") == "失效" &&
+            OpenXmlExcelBridge.ToExcelVerdict("仍可访问") == "有效" &&
+            OpenXmlExcelBridge.ToExcelVerdict("公网不可访问") == "未完成" &&
+            OpenXmlExcelBridge.ToExcelVerdict("人工复核") == "未完成";
         Console.WriteLine((excelVerdictPassed ? "PASS " : "FAIL ") +
-            "Excel 写回不把多线路不可访问伪装成明确失效");
+            "Excel 只写入有效、失效和未完成");
         if (!excelVerdictPassed) _failures++;
+
+        bool unfinishedRetryPassed =
+            MainForm.ShouldDiscardForResume(new CheckResult { Verdict = "公网不可访问" }, false) &&
+            MainForm.ShouldDiscardForResume(new CheckResult { Verdict = "暂时异常" }, false) &&
+            MainForm.ShouldDiscardForResume(new CheckResult { Verdict = "人工复核" }, false) &&
+            !MainForm.ShouldDiscardForResume(new CheckResult { Verdict = "已失效" }, false) &&
+            !MainForm.ShouldDiscardForResume(new CheckResult { Verdict = "仍可访问" }, false) &&
+            new CheckResult { Verdict = "公网不可访问" }.DisplayVerdict == "未完成" &&
+            new CheckResult { Verdict = "仍可访问" }.DisplayVerdict == "有效" &&
+            !PlatformRestrictionController.ShouldPauseAfterResult(new CheckResult
+            {
+                Verdict = "暂时异常",
+                StatusCode = "502",
+                Evidence = "目标站点返回 HTTP 502"
+            }) &&
+            !PlatformRestrictionController.ShouldPauseAfterResult(new CheckResult
+            {
+                Verdict = "暂时异常",
+                StatusCode = "502",
+                Evidence = "检测未完成：外部中国宽带探针达到本小时额度"
+            }) &&
+            PlatformRestrictionController.ShouldPauseAfterResult(new CheckResult
+            {
+                Verdict = "暂时异常",
+                StatusCode = "403",
+                Evidence = "目标站点安全验证"
+            });
+        Console.WriteLine((unfinishedRetryPassed ? "PASS " : "FAIL ") +
+            "601 条未完成续检、502 不提前跳过和目标风控保护");
+        if (!unfinishedRetryPassed) _failures++;
 
         var unavailableForAcceptance = new CheckResult
         {

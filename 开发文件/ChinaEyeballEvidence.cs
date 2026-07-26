@@ -22,6 +22,7 @@ namespace LinkDispositionChecker
             new JavaScriptSerializer { MaxJsonLength = 1200000 };
         private static readonly object GlobalpingAvailabilitySync = new object();
         private static DateTime _globalpingUnavailableUntilUtc = DateTime.MinValue;
+        private static string _globalpingUnavailableCredentialMode = "";
 
         private sealed class ChinaEyeballSession
         {
@@ -130,14 +131,71 @@ namespace LinkDispositionChecker
                     return new RemoteEvidenceResponse { Error = "中国普通宽带正文测量没有返回结果", Source = source };
                 if (proof.StatusCode > 0 && proof.StatusCode != 403 && proof.StatusCode != 444)
                     return ToRemoteEvidence(proof, target, source);
+                if (proof.StatusCode <= 0)
+                    return ToRemoteEvidence(proof, target, source);
 
-                // The challenge session can expire or a probe may rotate. Evict it so a
-                // later retry creates a fresh session instead of reusing stale cookies.
+                // Some firewalls rotate the challenge cookie after the first retry.
+                // Apply the newest cookie immediately and keep using the same probe.
+                string refreshedCookie = MergeCookieHeaders(session.CookieHeader, proof.CookieHeader);
+                if (!String.IsNullOrWhiteSpace(refreshedCookie) &&
+                    !String.Equals(refreshedCookie, session.CookieHeader, StringComparison.Ordinal))
+                {
+                    GlobalpingHttpResult refreshedProof = await RunGlobalpingHttpAsync(target,
+                        proof.MeasurementId, refreshedCookie, token);
+                    string refreshedIds = proof.MeasurementId +
+                        (refreshedProof == null || String.IsNullOrWhiteSpace(refreshedProof.MeasurementId)
+                            ? "" : "/" + refreshedProof.MeasurementId);
+                    source = BuildGlobalpingSource(session.ProbeLabel,
+                        session.SeedMeasurementId, refreshedIds);
+                    if (refreshedProof == null)
+                        return new RemoteEvidenceResponse
+                        {
+                            Error = "更新防火墙 Cookie 后未返回测量结果",
+                            Source = source
+                        };
+                    proof = refreshedProof;
+                    session.CookieHeader = refreshedCookie;
+                    if (proof.StatusCode > 0 && proof.StatusCode != 403 && proof.StatusCode != 444)
+                        return ToRemoteEvidence(proof, target, source);
+                    if (proof.StatusCode <= 0)
+                        return ToRemoteEvidence(proof, target, source);
+                }
+
+                // The cached session may belong to another path. Do not make the user
+                // start a second run: establish a fresh challenge on this exact URL now.
+                ChinaEyeballSessions.TryRemove(target.Host, out existing);
+                ChinaEyeballSession freshSession = await CreateChinaEyeballSessionAsync(target, token);
+                if (freshSession != null && freshSession.InitialResult != null &&
+                    String.Equals(freshSession.InitialTarget, target.AbsoluteUri,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return ToRemoteEvidence(freshSession.InitialResult, target,
+                        BuildGlobalpingSource(freshSession.ProbeLabel,
+                            freshSession.SeedMeasurementId, ""));
+                }
+                if (freshSession != null && !String.IsNullOrWhiteSpace(freshSession.CookieHeader))
+                {
+                    GlobalpingHttpResult freshProof = await RunGlobalpingHttpAsync(target,
+                        freshSession.SeedMeasurementId, freshSession.CookieHeader, token);
+                    string freshSource = BuildGlobalpingSource(freshSession.ProbeLabel,
+                        freshSession.SeedMeasurementId,
+                        freshProof == null ? "" : freshProof.MeasurementId);
+                    if (freshProof != null &&
+                        (freshProof.StatusCode <= 0 ||
+                         (freshProof.StatusCode != 403 && freshProof.StatusCode != 444)))
+                    {
+                        if (freshProof.StatusCode >= 200 && freshProof.StatusCode < 400)
+                            ChinaEyeballSessions[target.Host] = Task.FromResult(freshSession);
+                        return ToRemoteEvidence(freshProof, target, freshSource);
+                    }
+                    proof = freshProof ?? proof;
+                    source = freshSource;
+                }
                 ChinaEyeballSessions.TryRemove(target.Host, out existing);
                 return new RemoteEvidenceResponse
                 {
                     Error = !String.IsNullOrWhiteSpace(proof.Error) ? proof.Error :
-                        "防火墙会话重试后仍返回 HTTP " + proof.StatusCode,
+                        "刷新 Cookie 并为当前链接重建会话后仍返回 HTTP " + proof.StatusCode,
                     Source = source,
                     TargetUnreachable = false
                 };
@@ -246,11 +304,17 @@ namespace LinkDispositionChecker
         private async Task<string> CreateGlobalpingMeasurementAsync(
             Dictionary<string, object> payload, CancellationToken token)
         {
+            string credentialMode = String.IsNullOrWhiteSpace(GetGlobalpingToken()) ? "anonymous" : "token";
             lock (GlobalpingAvailabilitySync)
             {
-                if (_globalpingUnavailableUntilUtc > DateTime.UtcNow)
+                if (_globalpingUnavailableUntilUtc > DateTime.UtcNow &&
+                    String.Equals(_globalpingUnavailableCredentialMode, credentialMode,
+                        StringComparison.OrdinalIgnoreCase))
                     throw new InvalidOperationException("Globalping 当前达到服务额度或被限流，本次运行暂不再请求；" +
-                        "可配置 GLOBALPING_API_TOKEN 后重新启动工具继续");
+                        "可配置 GLOBALPING_API_TOKEN 后点击“继续未完成”");
+                if (!String.Equals(_globalpingUnavailableCredentialMode, credentialMode,
+                    StringComparison.OrdinalIgnoreCase))
+                    _globalpingUnavailableUntilUtc = DateTime.MinValue;
             }
             using (var request = new HttpRequestMessage(HttpMethod.Post, GlobalpingMeasurementsEndpoint))
             {
@@ -262,7 +326,10 @@ namespace LinkDispositionChecker
                     if ((int)response.StatusCode == 429)
                     {
                         lock (GlobalpingAvailabilitySync)
+                        {
                             _globalpingUnavailableUntilUtc = DateTime.UtcNow.AddHours(1);
+                            _globalpingUnavailableCredentialMode = credentialMode;
+                        }
                     }
                     if (!response.IsSuccessStatusCode)
                         throw new HttpRequestException("Globalping 返回 HTTP " + (int)response.StatusCode +
@@ -351,9 +418,18 @@ namespace LinkDispositionChecker
 
         private static void AddGlobalpingAuthorization(HttpRequestMessage request)
         {
-            string token = (Environment.GetEnvironmentVariable("GLOBALPING_API_TOKEN") ?? "").Trim();
+            string token = GetGlobalpingToken();
             if (!String.IsNullOrWhiteSpace(token))
                 request.Headers.TryAddWithoutValidation("Authorization", "Bearer " + token);
+        }
+
+        private static string GetGlobalpingToken()
+        {
+            string token = Environment.GetEnvironmentVariable("GLOBALPING_API_TOKEN") ?? "";
+            if (String.IsNullOrWhiteSpace(token))
+                token = Environment.GetEnvironmentVariable(
+                    "GLOBALPING_API_TOKEN", EnvironmentVariableTarget.User) ?? "";
+            return token.Trim();
         }
 
         private static string BuildCookieHeader(Dictionary<string, object> headers)
@@ -373,6 +449,24 @@ namespace LinkDispositionChecker
                 int separator = first.IndexOf('=');
                 if (separator <= 0) continue;
                 cookies[first.Substring(0, separator).Trim()] = first.Substring(separator + 1).Trim();
+            }
+            return String.Join("; ", cookies.Select(item => item.Key + "=" + item.Value));
+        }
+
+        internal static string MergeCookieHeaders(params string[] headers)
+        {
+            var cookies = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string header in headers ?? new string[0])
+            {
+                foreach (string part in (header ?? "").Split(';'))
+                {
+                    string value = part.Trim();
+                    int separator = value.IndexOf('=');
+                    if (separator <= 0) continue;
+                    string name = value.Substring(0, separator).Trim();
+                    if (name.Length == 0) continue;
+                    cookies[name] = value.Substring(separator + 1).Trim();
+                }
             }
             return String.Join("; ", cookies.Select(item => item.Key + "=" + item.Value));
         }

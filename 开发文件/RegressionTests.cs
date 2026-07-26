@@ -269,7 +269,7 @@ internal static class RegressionTests
                 },
                 new RemoteEvidenceResponse { TargetUnreachable = true });
         bool evidenceEscalationRoutingPassed =
-            SessionStore.CurrentEngineVersion == "4.2.0" &&
+            SessionStore.CurrentEngineVersion == "4.3.0" &&
             infrastructureDeferred.Number == 88 &&
             infrastructureDeferred.Verdict == "暂时异常" &&
             infrastructureDeferred.SkipDeepReview &&
@@ -281,8 +281,29 @@ internal static class RegressionTests
             publicUnavailableDeferred.EvidenceStage.Contains("自动多线路不可访问") &&
             publicUnavailableGatePassed;
         Console.WriteLine((evidenceEscalationRoutingPassed ? "PASS " : "FAIL ") +
-            "4.2 多线路不可访问、共享基础设施复用和自动追证字段");
+            "4.3 多线路不可访问、共享基础设施复用和自动追证字段");
         if (!evidenceEscalationRoutingPassed) _failures++;
+
+        var chinaEyeballCandidate = new CheckResult
+        {
+            Verdict = "暂时异常",
+            StatusCode = "502",
+            Platform = "网媒",
+            InfrastructureKey = "IP 119.28.42.49",
+            Evidence = "HTTP ERROR 502"
+        };
+        bool chinaEyeballRulePassed =
+            Checker.ShouldTryChinaEyeballEvidence(chinaEyeballCandidate,
+                new Uri("http://news.example.com/xinwen/123.html")) &&
+            Checker.IsChinaEyeballChallenge(403,
+                "<title>网站防火墙</title><script>window.location.href='/xinwen/123.html';</script>",
+                "challenge=abc; server_name_session=def") &&
+            Checker.ExtractMetaDescription(
+                "<html><head><meta content=\"这是一段来自当前文章正文的有效摘要，长度足以证明目标页面仍在公开返回文章内容。\" name=\"description\"></head></html>")
+                .Contains("当前文章正文");
+        Console.WriteLine((chinaEyeballRulePassed ? "PASS " : "FAIL ") +
+            "中国普通宽带防火墙挑战、Cookie 重试和正文摘要识别");
+        if (!chinaEyeballRulePassed) _failures++;
 
         bool excelVerdictPassed =
             OpenXmlExcelBridge.ToExcelVerdict("已失效") == "是" &&

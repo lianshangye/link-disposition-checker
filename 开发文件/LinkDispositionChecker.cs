@@ -25,8 +25,8 @@ using Microsoft.Web.WebView2.WinForms;
 
 [assembly: AssemblyTitle("侵权链接处置核验工具")]
 [assembly: AssemblyProduct("侵权链接处置核验工具")]
-[assembly: AssemblyVersion("4.2.0.0")]
-[assembly: AssemblyFileVersion("4.2.0.0")]
+[assembly: AssemblyVersion("4.3.0.0")]
+[assembly: AssemblyFileVersion("4.3.0.0")]
 
 namespace LinkDispositionChecker
 {
@@ -581,7 +581,7 @@ namespace LinkDispositionChecker
 
     internal static class SessionStore
     {
-        public const string CurrentEngineVersion = "4.2.0";
+        public const string CurrentEngineVersion = "4.3.0";
         private static readonly object SyncRoot = new object();
         private static readonly JavaScriptSerializer Serializer = new JavaScriptSerializer { MaxJsonLength = Int32.MaxValue };
         public static readonly string SessionPath = Path.Combine(StoragePaths.UserDataDirectory, "last-session.json");
@@ -1609,7 +1609,7 @@ namespace LinkDispositionChecker
         }
     }
 
-    internal sealed class Checker
+    internal sealed partial class Checker
     {
         private static readonly string[] RemovedSignals = new[]
         {
@@ -4574,6 +4574,52 @@ namespace LinkDispositionChecker
             }
             else result.SiteHealth = "同站首页未响应";
 
+            if (ShouldTryChinaEyeballEvidence(result, original))
+            {
+                attempts.Add("中国普通宽带两步取证");
+                RemoteEvidenceResponse chinaEyeball = await TryChinaEyeballEvidenceAsync(original, token);
+                string chinaSource = chinaEyeball == null || String.IsNullOrWhiteSpace(chinaEyeball.Source)
+                    ? "中国普通宽带公开探针" : chinaEyeball.Source;
+                if (ApplyRemoteEvidence(result, chinaEyeball, chinaSource, trail))
+                {
+                    result.AcquisitionAttempts = String.Join(" → ", attempts);
+                    result.EvidenceStage = "中国普通宽带两步取证已确认";
+                    return result;
+                }
+                if (chinaEyeball != null && !String.IsNullOrWhiteSpace(chinaEyeball.Error))
+                {
+                    trail.Add(new VerificationEvidence
+                    {
+                        Kind = EvidenceKind.TemporaryFailure,
+                        Strength = EvidenceStrength.Supporting,
+                        Source = "china-eyeball",
+                        Platform = result.Platform,
+                        Message = "中国普通宽带两步取证本次未取得结论：" +
+                            ExecutionLogWriter.Safe(chinaEyeball.Error, 260),
+                        FinalUrl = result.OriginalUrl,
+                        IsCurrentResponse = true
+                    });
+                }
+                else if (chinaEyeball != null)
+                {
+                    string chinaBody = chinaEyeball.Html ?? chinaEyeball.Text ?? "";
+                    RenderedPageData diagnosticPage = BuildRenderedPageData(chinaBody, result.OriginalUrl);
+                    trail.Add(new VerificationEvidence
+                    {
+                        Kind = EvidenceKind.IdentityOnly,
+                        Strength = EvidenceStrength.Supporting,
+                        Source = chinaSource,
+                        Platform = result.Platform,
+                        Message = "中国普通宽带探针返回 HTTP " + chinaEyeball.Status +
+                            "，但当前响应尚未通过正文身份规则（页面字节 " +
+                            chinaBody.Length + "，标题“" + ExecutionLogWriter.Safe(diagnosticPage.Title, 80) +
+                            "”，主内容字符 " + (diagnosticPage.MainText ?? "").Length + "）",
+                        FinalUrl = result.OriginalUrl,
+                        IsCurrentResponse = true
+                    });
+                }
+            }
+
             attempts.Add("公开云取证");
             RemoteEvidenceResponse publicCloud = await TryPublicCloudEvidenceAsync(original, token);
             if (ApplyRemoteEvidence(result, publicCloud, "public-cloud-reader", trail))
@@ -4689,6 +4735,29 @@ namespace LinkDispositionChecker
             if (probe.Status < 200 || probe.Status >= 400 || String.IsNullOrWhiteSpace(probe.Body)) return false;
             RenderedPageData page = BuildRenderedPageData(probe.Body,
                 String.IsNullOrWhiteSpace(probe.FinalUrl) ? requested.AbsoluteUri : probe.FinalUrl);
+            if (IsIndependentGenericArticleProof(result, page, source, requested))
+            {
+                result.Verdict = "仍可访问";
+                result.StatusCode = probe.Status.ToString();
+                result.FinalUrl = page.Url;
+                result.Title = page.Title;
+                string articleSummary = ExtractMetaDescription(page.Html);
+                result.AnalysisContext = AiReviewPolicy.BuildObservedContext(page.Title,
+                    !String.IsNullOrWhiteSpace(page.MainText) ? page.MainText : articleSummary, page.Text);
+                result.Evidence = source + "确认：完成站点防火墙会话后，目标原地址返回 HTTP " +
+                    probe.Status + "、有效文章标题和正文摘要/正文结构";
+                trail.Add(new VerificationEvidence
+                {
+                    Kind = EvidenceKind.TargetContentPresent,
+                    Strength = EvidenceStrength.Strong,
+                    Source = source,
+                    Platform = result.Platform,
+                    Message = result.Evidence,
+                    FinalUrl = result.FinalUrl,
+                    IsCurrentResponse = true
+                });
+                return true;
+            }
             DeepDecision decision = ClassifyRenderedPage(result, page);
             if (!decision.Resolved || (decision.Verdict != "已失效" && decision.Verdict != "仍可访问")) return false;
             result.Verdict = decision.Verdict;
@@ -4708,6 +4777,51 @@ namespace LinkDispositionChecker
                 IsCurrentResponse = true
             });
             return true;
+        }
+
+        private static bool IsIndependentGenericArticleProof(CheckResult result, RenderedPageData page,
+            string source, Uri requested)
+        {
+            if (result == null || page == null || requested == null ||
+                String.IsNullOrWhiteSpace(source) ||
+                source.IndexOf("Globalping 中国普通宽带", StringComparison.OrdinalIgnoreCase) < 0)
+                return false;
+            Uri current;
+            if (!Uri.TryCreate(page.Url, UriKind.Absolute, out current) ||
+                !String.Equals(current.Host, requested.Host, StringComparison.OrdinalIgnoreCase) ||
+                !String.Equals(current.AbsolutePath.TrimEnd('/'), requested.AbsolutePath.TrimEnd('/'),
+                    StringComparison.OrdinalIgnoreCase))
+                return false;
+            string title = CleanText(page.Title, 220);
+            string mainText = CleanText(!String.IsNullOrWhiteSpace(page.MainText) ? page.MainText : page.Text, 12000);
+            string description = ExtractMetaDescription(page.Html);
+            string html = page.Html ?? "";
+            if (title.Length < 4) return false;
+            if (Regex.IsMatch(title, @"网站防火墙|403|404|502|bad gateway|页面不存在|文章不存在|内容不存在|已删除|已下线",
+                RegexOptions.IgnoreCase))
+                return false;
+            int transportStatus;
+            if (TryRecognizeRenderedTransportError(title, page.Text, html, out transportStatus)) return false;
+            bool articleMarkup = Regex.IsMatch(html,
+                @"<(?:article|h1)\b|(?:class|id)\s*=\s*[""'][^""']*(?:article|content|news|detail|post)[^""']*[""']",
+                RegexOptions.IgnoreCase);
+            bool paragraphBody = Regex.Matches(html, @"<p(?:\s|>)", RegexOptions.IgnoreCase).Count >= 2;
+            bool visibleBody = mainText.Length >= 120 && articleMarkup && paragraphBody;
+            bool embeddedSummary = description.Length >= 40 &&
+                !Regex.IsMatch(description, @"网站防火墙|页面不存在|文章不存在|内容不存在|已删除|已下线",
+                    RegexOptions.IgnoreCase);
+            return visibleBody || embeddedSummary;
+        }
+
+        internal static string ExtractMetaDescription(string html)
+        {
+            string source = html ?? "";
+            Match match = Regex.Match(source,
+                @"<meta\b(?=[^>]*\bname\s*=\s*[""']description[""'])(?=[^>]*\bcontent\s*=\s*[""'](?<value>[^""']*)[""'])[^>]*>",
+                RegexOptions.IgnoreCase | RegexOptions.Singleline);
+            return match.Success
+                ? CleanText(WebUtility.HtmlDecode(match.Groups["value"].Value), 1200)
+                : "";
         }
 
         private async Task<RemoteEvidenceResponse> TryRemoteEvidenceAsync(string endpoint, Uri target,
@@ -6817,7 +6931,16 @@ namespace LinkDispositionChecker
             bool genericPlatform = String.IsNullOrWhiteSpace(platform) ||
                 platform == "网媒" || platform == "未知" || platform == "未知平台";
             if (genericPlatform && job != null && !String.IsNullOrWhiteSpace(job.InfrastructureKey))
-                return job.InfrastructureKey.Trim();
+            {
+                string infrastructure = job.InfrastructureKey.Trim();
+                if (String.Equals(infrastructure, "IP 119.28.42.49", StringComparison.OrdinalIgnoreCase))
+                {
+                    Uri sharedNewsUri;
+                    if (Uri.TryCreate(job.Url, UriKind.Absolute, out sharedNewsUri))
+                        return (sharedNewsUri.Host ?? infrastructure).Trim().ToLowerInvariant();
+                }
+                return infrastructure;
+            }
             Uri uri;
             if (job != null && Uri.TryCreate(job.Url, UriKind.Absolute, out uri))
             {

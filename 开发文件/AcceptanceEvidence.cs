@@ -331,7 +331,7 @@ namespace LinkDispositionChecker
             int other = rows.Count - removed - alive - unavailable - temporary;
             var lines = new List<string>
             {
-                "链接核验工具 4.2 - 合同验收环境与方法说明",
+                "链接核验工具 " + SessionStore.CurrentEngineVersion + " - 合同验收环境与方法说明",
                 "==========================================",
                 "",
                 "批次编号：" + batchId,

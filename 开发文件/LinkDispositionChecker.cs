@@ -4570,6 +4570,7 @@ namespace LinkDispositionChecker
             }
 
             result.AcquisitionAttempts = String.Join(" → ", attempts);
+            result.Verdict = "暂时异常";
             string comparison = String.IsNullOrWhiteSpace(result.SiteHealth) ? "" : "；" + result.SiteHealth;
             result.Evidence = "自动追证仍未取得目标正文或明确删除页" + comparison +
                 (remoteEndpoints.Count == 0 ? "；尚未配置独立远程取证节点" : "；已尝试 " + remoteEndpoints.Count + " 个远程节点");
@@ -6727,6 +6728,16 @@ namespace LinkDispositionChecker
             lock (_sync)
             {
                 if (_paused.ContainsKey(key)) return false;
+                // 百度、B站、微博等大型平台的不同内容页不能因为少量 200 空壳页而整组跳过。
+                // 只有明确共享 IP 的网媒站群才复用连续基础设施异常。
+                string platform = job == null ? "" : (job.Platform ?? "").Trim();
+                bool genericPlatform = String.IsNullOrWhiteSpace(platform) ||
+                    platform == "网媒" || platform == "未知" || platform == "未知平台";
+                if (!genericPlatform)
+                {
+                    _consecutive[key] = 0;
+                    return false;
+                }
                 if (!NetworkRestrictionCircuitBreaker.IsTransientRestriction(result))
                 {
                     _consecutive[key] = 0;
@@ -6802,7 +6813,8 @@ namespace LinkDispositionChecker
             if (item == null) return false;
             int statusCode;
             if (Int32.TryParse(item.StatusCode ?? "", out statusCode) &&
-                (statusCode == 408 || statusCode == 429 || statusCode == 444 || statusCode >= 500))
+                (statusCode == 403 || statusCode == 408 || statusCode == 429 ||
+                 statusCode == 444 || statusCode >= 500))
                 return true;
             if (String.Equals(item.Verdict, "暂时异常", StringComparison.OrdinalIgnoreCase)) return true;
             if (String.Equals(item.StatusCode, "超时", StringComparison.OrdinalIgnoreCase) ||
@@ -6817,7 +6829,8 @@ namespace LinkDispositionChecker
             return evidence.Contains("安全验证") || evidence.Contains("验证码") ||
                 evidence.Contains("滑动验证") || evidence.Contains("访问过于频繁") ||
                 evidence.Contains("操作频繁") || evidence.Contains("风控") ||
-                evidence.Contains("访问受限") || evidence.Contains("captcha") ||
+                evidence.Contains("访问受限") || evidence.Contains("访问被限制") ||
+                evidence.Contains("captcha") ||
                 evidence.Contains("verify you are human") || evidence.Contains("unusual traffic") ||
                 evidence.Contains("too many requests") || evidence.Contains("连接关闭") ||
                 evidence.Contains("无法建立连接") || evidence.Contains("代理和直连都失败");

@@ -78,9 +78,9 @@ internal static class RegressionTests
         bool platformPausePassed =
             !platformController.Observe(preflightJobs[0], blockedObservations[0].Value, out pausedPlatform) &&
             !platformController.Observe(preflightJobs[0], blockedObservations[0].Value, out pausedPlatform) &&
-            platformController.Observe(preflightJobs[0], blockedObservations[0].Value, out pausedPlatform) &&
-            pausedPlatform == "知乎（zhihu.com）" &&
-            platformController.IsPaused(preflightJobs[0]) &&
+            !platformController.Observe(preflightJobs[0], blockedObservations[0].Value, out pausedPlatform) &&
+            String.IsNullOrWhiteSpace(pausedPlatform) &&
+            !platformController.IsPaused(preflightJobs[0]) &&
             !platformController.IsPaused(preflightJobs[1]);
         var genericController = new PlatformRestrictionController(3);
         var genericA = new CheckJob { Url = "https://news-a.example.com/article/1", Platform = "网媒" };

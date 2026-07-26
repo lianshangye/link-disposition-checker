@@ -1,0 +1,78 @@
+name: Remote evidence smoke test
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - agent/portable-first-run
+    paths:
+      - .github/workflows/remote-evidence-smoke.yml
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Probe representative public URLs from an independent network
+        shell: python
+        run: |
+          import json
+          import re
+          import time
+          import urllib.error
+          import urllib.request
+
+          urls = [
+              "http://mmcdw.qhzszw.cn/xinwen/1254857.html",
+              "http://www.hhelsj.com.cn/xinwen/1254859.html",
+              "http://www.ztrends.cn/xinwen/1254858.html",
+              "http://www.gyolws.cn/xinwen/1254877.html",
+              "http://zhanlans.liuzhourex.cn/xinwen/1372414.html",
+              "http://muyinghaow.dianjinghuw.com/",
+              "https://www.toutiao.com/",
+              "https://www.baidu.com/",
+          ]
+          headers = {
+              "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) "
+                            "AppleWebKit/537.36 Chrome/126.0 Mobile Safari/537.36",
+              "Accept": "text/html,application/xhtml+xml",
+              "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
+          }
+          rows = []
+          for url in urls:
+              started = time.time()
+              row = {"url": url, "status": 0, "finalUrl": "", "title": "", "bytes": 0, "error": ""}
+              try:
+                  request = urllib.request.Request(url, headers=headers)
+                  with urllib.request.urlopen(request, timeout=25) as response:
+                      body = response.read(900000)
+                      row["status"] = response.status
+                      row["finalUrl"] = response.geturl()
+                      row["bytes"] = len(body)
+                      text = body.decode("utf-8", errors="replace")
+                      title = re.search(r"<title[^>]*>(.*?)</title>", text, re.I | re.S)
+                      if title:
+                          row["title"] = re.sub(r"\s+", " ", title.group(1)).strip()[:300]
+              except urllib.error.HTTPError as error:
+                  row["status"] = error.code
+                  row["finalUrl"] = error.geturl()
+                  row["error"] = str(error)
+                  try:
+                      body = error.read(200000)
+                      row["bytes"] = len(body)
+                  except Exception:
+                      pass
+              except Exception as error:
+                  row["error"] = f"{type(error).__name__}: {error}"
+              row["seconds"] = round(time.time() - started, 2)
+              rows.append(row)
+              print(json.dumps(row, ensure_ascii=False), flush=True)
+
+          with open("remote-evidence-smoke.json", "w", encoding="utf-8") as output:
+              json.dump(rows, output, ensure_ascii=False, indent=2)
+
+      - name: Upload probe evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: remote-evidence-smoke
+          path: remote-evidence-smoke.json

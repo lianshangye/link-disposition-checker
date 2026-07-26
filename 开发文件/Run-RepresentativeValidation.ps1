@@ -43,15 +43,23 @@ try {
     $rows = @(Import-Csv -LiteralPath $OutputCsv)
     $removedLabel = -join @([char]0x5DF2, [char]0x5931, [char]0x6548)
     $aliveLabel = -join @([char]0x4ECD, [char]0x53EF, [char]0x8BBF, [char]0x95EE)
+    $unavailableLabel = -join @([char]0x516C, [char]0x7F51, [char]0x4E0D, [char]0x53EF, [char]0x8BBF, [char]0x95EE)
+    $temporaryLabel = -join @([char]0x6682, [char]0x65F6, [char]0x5F02, [char]0x5E38)
     $removed = @($rows | Where-Object { [string]@($_.PSObject.Properties)[1].Value -eq $removedLabel }).Count
     $alive = @($rows | Where-Object { [string]@($_.PSObject.Properties)[1].Value -eq $aliveLabel }).Count
-    $review = $rows.Count - $removed - $alive
-    $rate = if ($rows.Count -eq 0) { 0 } else { 100.0 * $review / $rows.Count }
+    $unavailable = @($rows | Where-Object { [string]@($_.PSObject.Properties)[1].Value -eq $unavailableLabel }).Count
+    $temporary = @($rows | Where-Object { [string]@($_.PSObject.Properties)[1].Value -eq $temporaryLabel }).Count
+    $review = $rows.Count - $removed - $alive - $unavailable - $temporary
+    $unresolved = $review + $temporary
+    $rate = if ($rows.Count -eq 0) { 0 } else { 100.0 * $unresolved / $rows.Count }
     Write-Host "TOTAL=$($rows.Count)"
     Write-Host "REMOVED=$removed"
     Write-Host "ALIVE=$alive"
+    Write-Host "PUBLIC_UNAVAILABLE=$unavailable"
+    Write-Host "TEMPORARY=$temporary"
     Write-Host "REVIEW=$review"
-    Write-Host ("REVIEW_RATE={0:0.00}%" -f $rate)
+    Write-Host "UNRESOLVED=$unresolved"
+    Write-Host ("UNRESOLVED_RATE={0:0.00}%" -f $rate)
     Write-Host "OUTPUT=$OutputCsv"
 }
 finally {

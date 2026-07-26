@@ -31,7 +31,8 @@ internal static class FastAuditRunner
         {
             result = MainForm.CreateInfrastructureDeferredResult(
                 job,
-                PlatformRestrictionController.DisplayLabel(job, BatchPreflightPlanner.PlatformKey(job)));
+                PlatformRestrictionController.DisplayLabel(job, BatchPreflightPlanner.PlatformKey(job)),
+                restrictions.IsPubliclyUnavailable(job));
         }
         else
         {
@@ -165,12 +166,15 @@ internal static class FastAuditRunner
 
         int removed = ordered.Count(item => item.Verdict == "已失效");
         int alive = ordered.Count(item => item.Verdict == "仍可访问");
+        int unavailable = ordered.Count(item => item.Verdict == "公网不可访问");
         int temporary = ordered.Count(item => item.Verdict == "暂时异常");
-        int review = ordered.Count - removed - alive - temporary;
-        double explicitRate = ordered.Count == 0 ? 0 : 100.0 * (removed + alive) / ordered.Count;
+        int review = ordered.Count - removed - alive - unavailable - temporary;
+        double explicitRate = ordered.Count == 0 ? 0 :
+            100.0 * (removed + alive + unavailable) / ordered.Count;
         Console.WriteLine("TOTAL=" + ordered.Count);
         Console.WriteLine("REMOVED=" + removed);
         Console.WriteLine("ALIVE=" + alive);
+        Console.WriteLine("PUBLIC_UNAVAILABLE=" + unavailable);
         Console.WriteLine("TEMPORARY=" + temporary);
         Console.WriteLine("REVIEW=" + review);
         Console.WriteLine("EXPLICIT_RATE=" + explicitRate.ToString("0.00") + "%");

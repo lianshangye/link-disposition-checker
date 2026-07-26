@@ -25,8 +25,8 @@ using Microsoft.Web.WebView2.WinForms;
 
 [assembly: AssemblyTitle("侵权链接处置核验工具")]
 [assembly: AssemblyProduct("侵权链接处置核验工具")]
-[assembly: AssemblyVersion("4.0.0.0")]
-[assembly: AssemblyFileVersion("4.0.0.0")]
+[assembly: AssemblyVersion("4.1.0.0")]
+[assembly: AssemblyFileVersion("4.1.0.0")]
 
 namespace LinkDispositionChecker
 {
@@ -189,6 +189,7 @@ namespace LinkDispositionChecker
         public string Html { get; set; }
         public string Source { get; set; }
         public string Error { get; set; }
+        public bool TargetUnreachable { get; set; }
     }
 
     internal static class RemoteEvidenceStore
@@ -575,7 +576,7 @@ namespace LinkDispositionChecker
 
     internal static class SessionStore
     {
-        public const string CurrentEngineVersion = "4.0.0";
+        public const string CurrentEngineVersion = "4.1.0";
         private static readonly object SyncRoot = new object();
         private static readonly JavaScriptSerializer Serializer = new JavaScriptSerializer { MaxJsonLength = Int32.MaxValue };
         public static readonly string SessionPath = Path.Combine(StoragePaths.UserDataDirectory, "last-session.json");
@@ -1580,11 +1581,13 @@ namespace LinkDispositionChecker
             return match.Success ? match.Value.Trim().TrimEnd('.', ',', ';', ')', ']', '}', '。', '，', '；') : "";
         }
 
-        private static string ToExcelVerdict(string verdict)
+        internal static string ToExcelVerdict(string verdict)
         {
-            // “是”只用于高置信证据。疑似处置必须留给人工，不能混入可直接统计的数字。
+            // “是”只用于明确失效证据。公网不可访问是可执行的核验不通过结论，
+            // 但不伪称已经看到删除页，因此在 Excel 中保留独立文字。
             if (verdict == "已失效") return "是";
             if (verdict == "仍可访问") return "否";
+            if (verdict == "公网不可访问") return "公网不可访问";
             return "待复核";
         }
 
@@ -1633,6 +1636,9 @@ namespace LinkDispositionChecker
         private static readonly SemaphoreSlim KuaishouProbeGate = new SemaphoreSlim(1, 1);
         private static readonly SemaphoreSlim BilibiliProbeGate = new SemaphoreSlim(1, 1);
         private static readonly SemaphoreSlim RenderedSocialProbeGate = new SemaphoreSlim(1, 1);
+        private static readonly SemaphoreSlim PublicCloudProbeGate = new SemaphoreSlim(1, 1);
+        private static readonly object PublicCloudProbeTimingSync = new object();
+        private static DateTime _lastPublicCloudProbeStartedUtc = DateTime.MinValue;
         private static readonly object ZhihuProbeTimingSync = new object();
         private static DateTime _lastZhihuProbeStartedUtc = DateTime.MinValue;
         private static readonly ConcurrentDictionary<string, Task<PlatformProbeOutcome>> DouyinProbeCache =
@@ -4545,6 +4551,29 @@ namespace LinkDispositionChecker
             }
             else result.SiteHealth = "同站首页未响应";
 
+            attempts.Add("公开云取证");
+            RemoteEvidenceResponse publicCloud = await TryPublicCloudEvidenceAsync(original, token);
+            if (ApplyRemoteEvidence(result, publicCloud, "public-cloud-reader", trail))
+            {
+                result.AcquisitionAttempts = String.Join(" → ", attempts);
+                result.EvidenceStage = "公开云取证已确认";
+                return result;
+            }
+            if (publicCloud != null && publicCloud.TargetUnreachable)
+            {
+                trail.Add(new VerificationEvidence
+                {
+                    Kind = EvidenceKind.TemporaryFailure,
+                    Strength = EvidenceStrength.Strong,
+                    Source = "public-cloud-reader",
+                    Platform = result.Platform,
+                    Message = "独立公网云浏览器也无法连接目标地址：" +
+                        ExecutionLogWriter.Safe(publicCloud.Error, 260),
+                    FinalUrl = result.OriginalUrl,
+                    IsCurrentResponse = true
+                });
+            }
+
             List<string> remoteEndpoints = RemoteEvidenceStore.LoadEndpoints();
             if (remoteEndpoints.Count > 0)
             {
@@ -4570,10 +4599,20 @@ namespace LinkDispositionChecker
             }
 
             result.AcquisitionAttempts = String.Join(" → ", attempts);
-            result.Verdict = "暂时异常";
             string comparison = String.IsNullOrWhiteSpace(result.SiteHealth) ? "" : "；" + result.SiteHealth;
-            result.Evidence = "自动追证仍未取得目标正文或明确删除页" + comparison +
-                (remoteEndpoints.Count == 0 ? "；尚未配置独立远程取证节点" : "；已尝试 " + remoteEndpoints.Count + " 个远程节点");
+            if (ShouldMarkPubliclyUnavailable(result, publicCloud))
+            {
+                result.Verdict = "公网不可访问";
+                result.EvidenceStage = "多出口公网不可达已确认";
+                result.Evidence = "核验不通过—公网不可访问：本机系统代理、直连、同站健康对照和独立公网云浏览器均未取得目标正文或正常页面" +
+                    comparison + "；这能确认当前链接不具备公网可访问性，但不伪称看到了明确删除页";
+            }
+            else
+            {
+                result.Verdict = "暂时异常";
+                result.Evidence = "自动追证仍未取得目标正文或明确删除页" + comparison +
+                    (remoteEndpoints.Count == 0 ? "；已尝试公开云取证，未配置自有远程节点" : "；已尝试 " + remoteEndpoints.Count + " 个自有远程节点");
+            }
             return result;
         }
 
@@ -4685,6 +4724,83 @@ namespace LinkDispositionChecker
             {
                 return new RemoteEvidenceResponse { Error = FriendlyError(ex), Source = endpoint };
             }
+        }
+
+        private async Task<RemoteEvidenceResponse> TryPublicCloudEvidenceAsync(Uri target,
+            CancellationToken token)
+        {
+            await PublicCloudProbeGate.WaitAsync(token);
+            try
+            {
+                int delay;
+                lock (PublicCloudProbeTimingSync)
+                {
+                    delay = Math.Max(0,
+                        (int)(_lastPublicCloudProbeStartedUtc.AddMilliseconds(3200) - DateTime.UtcNow).TotalMilliseconds);
+                }
+                if (delay > 0) await Task.Delay(delay, token);
+                lock (PublicCloudProbeTimingSync) _lastPublicCloudProbeStartedUtc = DateTime.UtcNow;
+
+                Uri readerUrl = new Uri("https://r.jina.ai/" + target.AbsoluteUri);
+                using (var request = new HttpRequestMessage(HttpMethod.Get, readerUrl))
+                {
+                    request.Headers.TryAddWithoutValidation("x-no-cache", "true");
+                    request.Headers.TryAddWithoutValidation("x-engine", "browser");
+                    request.Headers.TryAddWithoutValidation("x-timeout", "18");
+                    request.Headers.TryAddWithoutValidation("x-max-tokens", "12000");
+                    using (HttpResponseMessage response = await _remoteEvidenceClient.SendAsync(request, token))
+                {
+                    string body = await ReadLimitedBodyAsync(response.Content,
+                        Math.Min(_bodyBytes, 1000000), token);
+                    if (response.IsSuccessStatusCode)
+                    {
+                        Match title = Regex.Match(body ?? "", @"(?im)^Title:\s*(.+?)\s*$");
+                        Match source = Regex.Match(body ?? "", @"(?im)^URL Source:\s*(.+?)\s*$");
+                        return new RemoteEvidenceResponse
+                        {
+                            Status = 200,
+                            FinalUrl = source.Success ? source.Groups[1].Value.Trim() : target.AbsoluteUri,
+                            Title = title.Success ? title.Groups[1].Value.Trim() : "",
+                            Text = body ?? "",
+                            Source = "Jina Reader 公开云取证"
+                        };
+                    }
+
+                    bool targetUnreachable = (int)response.StatusCode == 422 &&
+                        Regex.IsMatch(body ?? "",
+                            "ERR_(?:EMPTY_RESPONSE|CONNECTION|TIMED_OUT|CONNECTION_RESET)|Failed to goto|RemoteDisconnected|urlopen error timed out",
+                            RegexOptions.IgnoreCase);
+                    return new RemoteEvidenceResponse
+                    {
+                        Error = targetUnreachable
+                            ? "云浏览器连接目标失败（HTTP " + (int)response.StatusCode + "）：" +
+                                ExecutionLogWriter.Safe(body, 300)
+                            : "公开云取证服务返回 HTTP " + (int)response.StatusCode,
+                        Source = "Jina Reader 公开云取证",
+                        TargetUnreachable = targetUnreachable
+                    };
+                }
+                }
+            }
+            catch (Exception ex)
+            {
+                return new RemoteEvidenceResponse
+                {
+                    Error = "公开云取证服务调用失败：" + FriendlyError(ex),
+                    Source = "Jina Reader 公开云取证",
+                    TargetUnreachable = false
+                };
+            }
+            finally { PublicCloudProbeGate.Release(); }
+        }
+
+        internal static bool ShouldMarkPubliclyUnavailable(CheckResult result,
+            RemoteEvidenceResponse publicCloud)
+        {
+            if (result == null || publicCloud == null || !publicCloud.TargetUnreachable) return false;
+            if (!NetworkRestrictionCircuitBreaker.IsTransientRestriction(result)) return false;
+            return !String.IsNullOrWhiteSpace(result.SiteHealth) &&
+                !String.Equals(result.SiteHealth, "站点首页可访问", StringComparison.OrdinalIgnoreCase);
         }
 
         private static bool ApplyRemoteEvidence(CheckResult result, RemoteEvidenceResponse remote,
@@ -5102,7 +5218,7 @@ namespace LinkDispositionChecker
         internal static string NormalizeVisibleVerdict(string verdict)
         {
             return verdict == "已失效" || verdict == "仍可访问" || verdict == "人工复核" ||
-                verdict == "暂时异常" || verdict == "疑似已处置"
+                verdict == "暂时异常" || verdict == "疑似已处置" || verdict == "公网不可访问"
                 ? verdict : "人工复核";
         }
 
@@ -6663,7 +6779,8 @@ namespace LinkDispositionChecker
                 if (job != null) summary.SampledKeys.Add(job.Key);
                 if (result == null) continue;
                 summary.Checked++;
-                if (result.Verdict == "已失效" || result.Verdict == "仍可访问") summary.Resolved++;
+                if (result.Verdict == "已失效" || result.Verdict == "仍可访问" ||
+                    result.Verdict == "公网不可访问") summary.Resolved++;
                 else if (NetworkRestrictionCircuitBreaker.IsTransientRestriction(result)) summary.TransientRestrictions++;
                 else summary.EvidenceInsufficient++;
             }
@@ -6707,8 +6824,12 @@ namespace LinkDispositionChecker
         private readonly int _threshold;
         private readonly Dictionary<string, int> _consecutive =
             new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, int> _publicUnavailableCount =
+            new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, string> _paused =
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> _pausedAsPubliclyUnavailable =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         internal PlatformRestrictionController(int threshold)
         {
@@ -6719,6 +6840,12 @@ namespace LinkDispositionChecker
         {
             string key = BatchPreflightPlanner.PlatformKey(job);
             lock (_sync) { return _paused.ContainsKey(key); }
+        }
+
+        internal bool IsPubliclyUnavailable(CheckJob job)
+        {
+            string key = BatchPreflightPlanner.PlatformKey(job);
+            lock (_sync) { return _pausedAsPubliclyUnavailable.Contains(key); }
         }
 
         internal bool Observe(CheckJob job, CheckResult result, out string pausedPlatform)
@@ -6741,6 +6868,7 @@ namespace LinkDispositionChecker
                 if (!NetworkRestrictionCircuitBreaker.IsTransientRestriction(result))
                 {
                     _consecutive[key] = 0;
+                    _publicUnavailableCount[key] = 0;
                     return false;
                 }
 
@@ -6748,9 +6876,14 @@ namespace LinkDispositionChecker
                 _consecutive.TryGetValue(key, out count);
                 count++;
                 _consecutive[key] = count;
+                int publicCount;
+                _publicUnavailableCount.TryGetValue(key, out publicCount);
+                if (String.Equals(result.Verdict, "公网不可访问", StringComparison.OrdinalIgnoreCase))
+                    _publicUnavailableCount[key] = ++publicCount;
                 if (count < _threshold) return false;
                 pausedPlatform = DisplayLabel(job, key);
                 _paused[key] = pausedPlatform;
+                if (publicCount >= 2) _pausedAsPubliclyUnavailable.Add(key);
                 return true;
             }
         }
@@ -6817,6 +6950,7 @@ namespace LinkDispositionChecker
                  statusCode == 444 || statusCode >= 500))
                 return true;
             if (String.Equals(item.Verdict, "暂时异常", StringComparison.OrdinalIgnoreCase)) return true;
+            if (String.Equals(item.Verdict, "公网不可访问", StringComparison.OrdinalIgnoreCase)) return true;
             if (String.Equals(item.StatusCode, "超时", StringComparison.OrdinalIgnoreCase) ||
                 String.Equals(item.StatusCode, "连接失败", StringComparison.OrdinalIgnoreCase))
                 return true;
@@ -6859,9 +6993,9 @@ namespace LinkDispositionChecker
             };
             var help = new Label
             {
-                Text = "每行一个 HTTPS 节点，最多 4 个。节点用于从不同网络出口读取公开网页。\n" +
+                Text = "工具已内置无缓存公开云取证；这里用于追加你或单位自有的 HTTPS 节点（最多 4 个）。\n" +
                     "支持 GET 模板（地址中包含 {url}）或 POST JSON：{\"url\":\"目标地址\"}。\n" +
-                    "节点返回 JSON：status、finalUrl、title、text/html、source、error。未配置时只执行本地追证。",
+                    "节点返回 JSON：status、finalUrl、title、text/html、source、error。这里只发送单条公开目标链接。",
                 AutoSize = true,
                 ForeColor = Color.FromArgb(75, 85, 99),
                 Location = new Point(25, 62)
@@ -6931,6 +7065,7 @@ namespace LinkDispositionChecker
         private readonly Label _allCount = MakeStat("0", "总链接");
         private readonly Label _removedCount = MakeStat("0", "高置信已失效");
         private readonly Label _aliveCount = MakeStat("0", "仍可访问");
+        private readonly Label _unavailableCount = MakeStat("0", "公网不可访问");
         private readonly Label _temporaryCount = MakeStat("0", "访问异常待重试");
         private readonly Label _reviewCount = MakeStat("0", "证据待复核");
         private readonly BindingList<CheckResult> _rows = new BindingList<CheckResult>();
@@ -6948,6 +7083,7 @@ namespace LinkDispositionChecker
         private int _runStartCompleted;
         private int _removedTotal;
         private int _aliveTotal;
+        private int _unavailableTotal;
         private int _temporaryTotal;
         private int _reviewTotal;
         private readonly ConcurrentQueue<CheckResult> _uiResults = new ConcurrentQueue<CheckResult>();
@@ -6979,7 +7115,7 @@ namespace LinkDispositionChecker
         {
             var header = new Panel { Dock = DockStyle.Top, Height = 82, BackColor = Color.FromArgb(27, 62, 111) };
             var title = new Label { Text = "侵权链接处置核验", ForeColor = Color.White, Font = new Font("微软雅黑", 19, FontStyle.Bold), AutoSize = true, Location = new Point(24, 13) };
-            var sub = new Label { Text = "平台失效规则 + 延迟跳转监测 + Excel 原标题校验", ForeColor = Color.FromArgb(206, 220, 239), AutoSize = true, Location = new Point(27, 51) };
+            var sub = new Label { Text = "本机多线路 + 无缓存公开云取证 + 内置浏览器 + AI 收尾", ForeColor = Color.FromArgb(206, 220, 239), AutoSize = true, Location = new Point(27, 51) };
             var versionPanel = new Panel { Dock = DockStyle.Right, Width = 152, BackColor = Color.FromArgb(27, 62, 111) };
             var versionBadge = new Label
             {
@@ -7005,11 +7141,11 @@ namespace LinkDispositionChecker
             Controls.Add(main);
             Controls.Add(header);
 
-            var stats = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 5, Padding = new Padding(0, 0, 0, 10) };
-            for (int i = 0; i < 5; i++) stats.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20));
+            var stats = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 6, Padding = new Padding(0, 0, 0, 10) };
+            for (int i = 0; i < 6; i++) stats.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 16.6667f));
             stats.Controls.Add(StatCard(_allCount), 0, 0); stats.Controls.Add(StatCard(_removedCount), 1, 0);
-            stats.Controls.Add(StatCard(_aliveCount), 2, 0); stats.Controls.Add(StatCard(_temporaryCount), 3, 0);
-            stats.Controls.Add(StatCard(_reviewCount), 4, 0);
+            stats.Controls.Add(StatCard(_aliveCount), 2, 0); stats.Controls.Add(StatCard(_unavailableCount), 3, 0);
+            stats.Controls.Add(StatCard(_temporaryCount), 4, 0); stats.Controls.Add(StatCard(_reviewCount), 5, 0);
             main.Controls.Add(stats, 0, 0);
 
             var inputPanel = new Panel { Dock = DockStyle.Fill, BackColor = Color.White, Padding = new Padding(14, 10, 14, 10) };
@@ -7054,7 +7190,7 @@ namespace LinkDispositionChecker
             toolbar.Controls.Add(_start); toolbar.Controls.Add(_retryNetwork); toolbar.Controls.Add(_stop); toolbar.Controls.Add(_deepReview); toolbar.Controls.Add(_aiReview); toolbar.Controls.Add(_aiSettings); toolbar.Controls.Add(_remoteSettings); toolbar.Controls.Add(_export); toolbar.Controls.Add(_open); toolbar.Controls.Add(_openLog);
             toolbar.Controls.Add(new Label { Text = "    显示：", AutoSize = true, Margin = new Padding(8, 9, 0, 0), ForeColor = Color.FromArgb(75, 85, 99) });
             _filter.DropDownStyle = ComboBoxStyle.DropDownList; _filter.Width = 160; _filter.Margin = new Padding(4, 4, 0, 0);
-            _filter.Items.AddRange(new object[] { "全部结果", "高置信已失效", "仍可访问", "访问异常待重试", "证据待复核" }); _filter.SelectedIndex = 0; _filter.SelectedIndexChanged += delegate { ApplyFilter(); };
+            _filter.Items.AddRange(new object[] { "全部结果", "高置信已失效", "仍可访问", "公网不可访问", "访问异常待重试", "证据待复核" }); _filter.SelectedIndex = 0; _filter.SelectedIndexChanged += delegate { ApplyFilter(); };
             toolbar.Controls.Add(_filter); main.Controls.Add(toolbar, 0, 2);
             toolbar.Controls.Add(new Label { Text = "    性能：", AutoSize = true, Margin = new Padding(8, 9, 0, 0), ForeColor = Color.FromArgb(75, 85, 99) });
             _performance.DropDownStyle = ComboBoxStyle.DropDownList; _performance.Width = 115; _performance.Margin = new Padding(4, 4, 0, 0);
@@ -7069,7 +7205,7 @@ namespace LinkDispositionChecker
             _progress.Width = 300; _progress.Height = 20; _progress.Location = new Point(26, 10); _progress.Anchor = AnchorStyles.Left;
             _progress.Style = ProgressBarStyle.Continuous;
             _progressText.Text = "尚未开始"; _progressText.AutoSize = true; _progressText.Location = new Point(340, 11); _progressText.ForeColor = Color.FromArgb(75, 85, 99);
-            var note = new Label { Text = "开始核验后会自动追证和 AI 收尾；只有最终证据冲突的才需人工查看", AutoSize = true, ForeColor = Color.FromArgb(107, 114, 128), Anchor = AnchorStyles.Top | AnchorStyles.Right, Location = new Point(footer.Width - 560, 11) };
+            var note = new Label { Text = "访问异常仅发送单条公开链接到云取证；不发送 Cookie、账号或工作簿", AutoSize = true, ForeColor = Color.FromArgb(107, 114, 128), Anchor = AnchorStyles.Top | AnchorStyles.Right, Location = new Point(footer.Width - 560, 11) };
             footer.Controls.Add(_activity); footer.Controls.Add(_progress); footer.Controls.Add(_progressText); footer.Controls.Add(note);
             footer.SizeChanged += delegate
             {
@@ -7155,7 +7291,7 @@ namespace LinkDispositionChecker
                     pendingJobs = pendingJobs.Where(job => !sampledKeys.Contains(job.Key)).ToList();
                     if (preflightSummary.RequiresDecision)
                     {
-                        executionLog.RecordEvent("预检发现集中异常；4.0 继续处理其他基础设施，不再全局中断");
+                        executionLog.RecordEvent("预检发现集中异常；4.1 继续处理其他基础设施，不再全局中断");
                     }
                 }
 
@@ -7173,7 +7309,8 @@ namespace LinkDispositionChecker
                             if (platformRestrictions.IsPaused(job))
                             {
                                 CheckResult deferred = CreateInfrastructureDeferredResult(job,
-                                    PlatformRestrictionController.DisplayLabel(job, BatchPreflightPlanner.PlatformKey(job)));
+                                    PlatformRestrictionController.DisplayLabel(job, BatchPreflightPlanner.PlatformKey(job)),
+                                    platformRestrictions.IsPubliclyUnavailable(job));
                                 _uiResults.Enqueue(deferred);
                                 executionLog.Observe(deferred);
                                 Interlocked.Increment(ref _runCompleted);
@@ -7275,7 +7412,8 @@ namespace LinkDispositionChecker
                 UpdateStats();
                 _progressText.Text = "本次自动核验全部结束：共 " + _allRows.Count +
                     " 条，已失效 " + _removedTotal + "，仍可访问 " + _aliveTotal +
-                    "，访问异常 " + _temporaryTotal + "，证据待复核 " + _reviewTotal;
+                    "，公网不可访问 " + _unavailableTotal + "，访问异常 " + _temporaryTotal +
+                    "，证据待复核 " + _reviewTotal;
             }
         }
 
@@ -7356,7 +7494,8 @@ namespace LinkDispositionChecker
                 };
         }
 
-        internal static CheckResult CreateInfrastructureDeferredResult(CheckJob job, string label)
+        internal static CheckResult CreateInfrastructureDeferredResult(CheckJob job, string label,
+            bool publiclyUnavailable = false)
         {
             if (job == null) throw new ArgumentNullException("job");
             string infrastructure = String.IsNullOrWhiteSpace(job.InfrastructureKey)
@@ -7364,13 +7503,14 @@ namespace LinkDispositionChecker
             return new CheckResult
             {
                 Number = job.Number,
-                Verdict = "暂时异常",
-                StatusCode = "基础设施异常",
+                Verdict = publiclyUnavailable ? "公网不可访问" : "暂时异常",
+                StatusCode = publiclyUnavailable ? "多出口不可达" : "基础设施异常",
                 Title = "",
                 OriginalUrl = job.Url,
                 FinalUrl = "",
-                Evidence = "同一基础设施已有多条链接完成自动追证，但均未取得正文或明确删除页；" +
-                    "为避免继续集中请求，本条沿用该组访问异常并保留一键重试",
+                Evidence = publiclyUnavailable
+                    ? "核验不通过—公网不可访问：同一共享基础设施已有多条代表链接经本机代理、直连、同站对照及独立公网云浏览器验证，均无法取得正常页面；本条复用该基础设施结论，但不伪称看到了明确删除页"
+                    : "同一基础设施已有多条链接完成自动追证，但均未取得正文或明确删除页；为避免继续集中请求，本条沿用该组访问异常并保留一键重试",
                 CheckedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
                 Duration = "0.0s",
                 ExpectedTitle = job.ExpectedTitle ?? "",
@@ -7383,8 +7523,8 @@ namespace LinkDispositionChecker
                 SourceRow = job.SourceRow,
                 InfrastructureKey = infrastructure,
                 SiteHealth = "基础设施组连续异常：" + (label ?? infrastructure),
-                EvidenceStage = "基础设施组追证已执行",
-                AcquisitionAttempts = "共享基础设施结果复用",
+                EvidenceStage = publiclyUnavailable ? "多出口公网不可达结论复用" : "基础设施组追证已执行",
+                AcquisitionAttempts = publiclyUnavailable ? "共享基础设施多出口证据复用" : "共享基础设施结果复用",
                 SkipDeepReview = true,
                 EvidenceTrail = new List<VerificationEvidence>
                 {
@@ -7434,6 +7574,7 @@ namespace LinkDispositionChecker
                 if (_rows.Count < _performanceProfile.GridRows && ShouldDisplay(item)) _rows.Add(item);
                 if (item.Verdict == "已失效") _removedTotal++;
                 else if (item.Verdict == "仍可访问") _aliveTotal++;
+                else if (item.Verdict == "公网不可访问") _unavailableTotal++;
                 else if (item.Verdict == "暂时异常") _temporaryTotal++;
                 else _reviewTotal++;
                 batch.Add(item);
@@ -7452,8 +7593,10 @@ namespace LinkDispositionChecker
         {
             _removedTotal = _allRows.Count(item => item.Verdict == "已失效");
             _aliveTotal = _allRows.Count(item => item.Verdict == "仍可访问");
+            _unavailableTotal = _allRows.Count(item => item.Verdict == "公网不可访问");
             _temporaryTotal = _allRows.Count(item => item.Verdict == "暂时异常");
-            _reviewTotal = _allRows.Count - _removedTotal - _aliveTotal - _temporaryTotal;
+            _reviewTotal = _allRows.Count - _removedTotal - _aliveTotal -
+                _unavailableTotal - _temporaryTotal;
         }
 
         private bool ShouldDisplay(CheckResult item)
@@ -7462,8 +7605,10 @@ namespace LinkDispositionChecker
             return selected == 0 ||
                 (selected == 1 && item.Verdict == "已失效") ||
                 (selected == 2 && item.Verdict == "仍可访问") ||
-                (selected == 3 && item.Verdict == "暂时异常") ||
-                (selected == 4 && item.Verdict != "已失效" && item.Verdict != "仍可访问" && item.Verdict != "暂时异常");
+                (selected == 3 && item.Verdict == "公网不可访问") ||
+                (selected == 4 && item.Verdict == "暂时异常") ||
+                (selected == 5 && item.Verdict != "已失效" && item.Verdict != "仍可访问" &&
+                 item.Verdict != "公网不可访问" && item.Verdict != "暂时异常");
         }
 
         private static string FormatDuration(TimeSpan value)
@@ -8070,7 +8215,8 @@ namespace LinkDispositionChecker
         internal static bool ShouldDiscardForResume(CheckResult result, bool engineChanged)
         {
             if (result == null) return false;
-            if (engineChanged) return result.Verdict != "已失效" && result.Verdict != "仍可访问";
+            if (engineChanged) return result.Verdict != "已失效" &&
+                result.Verdict != "仍可访问" && result.Verdict != "公网不可访问";
             return result.Verdict == "暂时异常";
         }
 
@@ -8091,6 +8237,7 @@ namespace LinkDispositionChecker
             _allCount.Text = _allRows.Count.ToString();
             _removedCount.Text = _removedTotal.ToString();
             _aliveCount.Text = _aliveTotal.ToString();
+            _unavailableCount.Text = _unavailableTotal.ToString();
             _temporaryCount.Text = _temporaryTotal.ToString();
             _reviewCount.Text = _reviewTotal.ToString();
             _aiSettings.Enabled = !_running;

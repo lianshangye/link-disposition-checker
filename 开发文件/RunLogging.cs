@@ -196,7 +196,8 @@ namespace LinkDispositionChecker
             foreach (var group in runItems.GroupBy(item => Host(item.OriginalUrl))
                 .OrderByDescending(group => group.Count()).ThenBy(group => group.Key).Take(30))
             {
-                int final = group.Count(item => item.Verdict == "已失效" || item.Verdict == "仍可访问");
+                int final = group.Count(item => item.Verdict == "已失效" ||
+                    item.Verdict == "仍可访问" || item.Verdict == "公网不可访问");
                 int temporary = group.Count(NetworkRestrictionCircuitBreaker.IsTransientRestriction);
                 lines.Add("- " + Safe(group.Key, 120) + "：共 " + group.Count() + "，已判定 " + final + "，暂时异常 " + temporary);
             }
@@ -212,8 +213,9 @@ namespace LinkDispositionChecker
                 .GroupBy(item => item.InfrastructureKey, StringComparer.OrdinalIgnoreCase)
                 .OrderByDescending(group => group.Count()).ThenBy(group => group.Key).Take(20))
                 lines.Add("- " + Safe(group.Key, 100) + "：共 " + group.Count() +
-                    "，已确认 " + group.Count(item => item.Verdict == "已失效" || item.Verdict == "仍可访问") +
-                    "，仍异常 " + group.Count(NetworkRestrictionCircuitBreaker.IsTransientRestriction));
+                    "，已确认 " + group.Count(item => item.Verdict == "已失效" ||
+                        item.Verdict == "仍可访问" || item.Verdict == "公网不可访问") +
+                    "，仍待重试 " + group.Count(item => item.Verdict == "暂时异常"));
             lines.Add("");
             lines.Add("七、AI 使用");
             lines.Add("----------");
@@ -239,7 +241,8 @@ namespace LinkDispositionChecker
             lines.Add("九、匿名问题样本（最多 30 条）");
             lines.Add("----------------------------");
             List<CheckResult> issues = runItems.Where(item =>
-                item.Verdict != "已失效" && item.Verdict != "仍可访问").Take(30).ToList();
+                item.Verdict != "已失效" && item.Verdict != "仍可访问" &&
+                item.Verdict != "公网不可访问").Take(30).ToList();
             foreach (CheckResult item in issues)
             {
                 lines.Add("- ID=" + AnonymousId(item.OriginalUrl) +
@@ -273,9 +276,11 @@ namespace LinkDispositionChecker
         {
             lines.Add(label + "：已失效 " + items.Count(item => item.Verdict == "已失效") +
                 "，仍可访问 " + items.Count(item => item.Verdict == "仍可访问") +
+                "，公网不可访问 " + items.Count(item => item.Verdict == "公网不可访问") +
                 "，暂时异常 " + items.Count(item => item.Verdict == "暂时异常") +
                 "，人工复核/其他 " + items.Count(item =>
-                    item.Verdict != "已失效" && item.Verdict != "仍可访问" && item.Verdict != "暂时异常"));
+                    item.Verdict != "已失效" && item.Verdict != "仍可访问" &&
+                    item.Verdict != "公网不可访问" && item.Verdict != "暂时异常"));
         }
 
         private static void AppendCounts(List<string> lines, IEnumerable<KeyValuePair<string, int>> values, int maximum)
@@ -290,6 +295,7 @@ namespace LinkDispositionChecker
         {
             if (item == null) return "未知";
             if (!String.IsNullOrWhiteSpace(item.AiLastError)) return "AI 调用失败";
+            if (item.Verdict == "公网不可访问") return "多出口公网不可达";
             int code;
             if (Int32.TryParse(item.StatusCode ?? "", out code))
             {
@@ -306,7 +312,8 @@ namespace LinkDispositionChecker
             if (Regex.IsMatch((item.StatusCode ?? "") + " " + evidence, "超时|timeout", RegexOptions.IgnoreCase)) return "请求超时";
             if (Regex.IsMatch((item.StatusCode ?? "") + " " + evidence, "连接失败|无法建立连接|connection", RegexOptions.IgnoreCase)) return "连接失败";
             if (item.Verdict == "人工复核" || item.Verdict == "疑似已处置") return "证据不足或冲突";
-            return item.Verdict == "已失效" || item.Verdict == "仍可访问" ? "已完成判断" : "其他";
+            return item.Verdict == "已失效" || item.Verdict == "仍可访问" ||
+                item.Verdict == "公网不可访问" ? "已完成判断" : "其他";
         }
 
         private static IEnumerable<string> Suggestions(List<CheckResult> items)

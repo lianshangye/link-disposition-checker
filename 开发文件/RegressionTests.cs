@@ -50,7 +50,8 @@ internal static class RegressionTests
         }, out circuitReason);
         circuitPassed = circuitPassed && !String.IsNullOrWhiteSpace(circuitReason) &&
             Checker.NormalizeVisibleVerdict("暂时异常") == "暂时异常" &&
-            Checker.NormalizeVisibleVerdict("疑似已处置") == "疑似已处置";
+            Checker.NormalizeVisibleVerdict("疑似已处置") == "疑似已处置" &&
+            Checker.NormalizeVisibleVerdict("公网不可访问") == "公网不可访问";
         Console.WriteLine((circuitPassed ? "PASS " : "FAIL ") + "连续网络风控自动熔断且保留真实结果标签");
         if (!circuitPassed) _failures++;
 
@@ -243,18 +244,54 @@ internal static class RegressionTests
             ExpectedTitle = "目标文章",
             InfrastructureKey = "IP 203.0.113.8"
         }, "IP 203.0.113.8");
+        CheckResult publicUnavailableDeferred = MainForm.CreateInfrastructureDeferredResult(new CheckJob
+        {
+            Number = 89,
+            Url = "https://news-b.example.com/article/89",
+            Platform = "网媒",
+            InfrastructureKey = "IP 203.0.113.9"
+        }, "IP 203.0.113.9", true);
+        bool publicUnavailableGatePassed = Checker.ShouldMarkPubliclyUnavailable(
+            new CheckResult
+            {
+                Verdict = "暂时异常",
+                StatusCode = "502",
+                SiteHealth = "站点整体异常",
+                Evidence = "系统代理和直连均失败"
+            },
+            new RemoteEvidenceResponse { TargetUnreachable = true }) &&
+            !Checker.ShouldMarkPubliclyUnavailable(
+                new CheckResult
+                {
+                    Verdict = "暂时异常",
+                    StatusCode = "502",
+                    SiteHealth = "站点首页可访问"
+                },
+                new RemoteEvidenceResponse { TargetUnreachable = true });
         bool evidenceEscalationRoutingPassed =
-            SessionStore.CurrentEngineVersion == "4.0.0" &&
+            SessionStore.CurrentEngineVersion == "4.1.0" &&
             infrastructureDeferred.Number == 88 &&
             infrastructureDeferred.Verdict == "暂时异常" &&
             infrastructureDeferred.SkipDeepReview &&
             infrastructureDeferred.InfrastructureKey == "IP 203.0.113.8" &&
             infrastructureDeferred.EvidenceTrail != null &&
             infrastructureDeferred.EvidenceTrail.Count == 1 &&
-            infrastructureDeferred.EvidenceStage.Contains("基础设施");
+            infrastructureDeferred.EvidenceStage.Contains("基础设施") &&
+            publicUnavailableDeferred.Verdict == "公网不可访问" &&
+            publicUnavailableDeferred.EvidenceStage.Contains("公网不可达") &&
+            publicUnavailableGatePassed;
         Console.WriteLine((evidenceEscalationRoutingPassed ? "PASS " : "FAIL ") +
-            "4.0 全量结果、共享基础设施复用和自动追证字段");
+            "4.1 多出口公网不可达、共享基础设施复用和自动追证字段");
         if (!evidenceEscalationRoutingPassed) _failures++;
+
+        bool excelVerdictPassed =
+            OpenXmlExcelBridge.ToExcelVerdict("已失效") == "是" &&
+            OpenXmlExcelBridge.ToExcelVerdict("仍可访问") == "否" &&
+            OpenXmlExcelBridge.ToExcelVerdict("公网不可访问") == "公网不可访问" &&
+            OpenXmlExcelBridge.ToExcelVerdict("人工复核") == "待复核";
+        Console.WriteLine((excelVerdictPassed ? "PASS " : "FAIL ") +
+            "Excel 写回区分明确删除、公网不可访问和待复核");
+        if (!excelVerdictPassed) _failures++;
 
         bool baijiaIdPassed = Checker.ExtractBaiduArticleId(new Uri("https://baijiahao.baidu.com/s?id=1870762825559558263&wfr=spider&for=pc")) == "1870762825559558263";
         bool dtNidPassed = Checker.ExtractBaiduArticleNid(new Uri("https://mbd.baidu.com/newspage/data/dtlandingwise?nid=dt_5277434666597158759")) == "dt_5277434666597158759";

@@ -16,6 +16,7 @@ if ([String]::IsNullOrWhiteSpace($OutputCsv)) {
 $source = Join-Path $PSScriptRoot 'LinkDispositionChecker.cs'
 $aiSource = Join-Path $PSScriptRoot 'AiReview.cs'
 $logSource = Join-Path $PSScriptRoot 'RunLogging.cs'
+$acceptanceSource = Join-Path $PSScriptRoot 'AcceptanceEvidence.cs'
 $runnerSource = Join-Path $PSScriptRoot 'FastAuditRunner.cs'
 $dependencyRoot = Join-Path $PSScriptRoot 'dependencies'
 $webViewCore = Join-Path $dependencyRoot 'Microsoft.Web.WebView2.Core.dll'
@@ -33,7 +34,7 @@ try {
         /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll `
         /reference:System.Windows.Forms.dll /reference:System.Net.Http.dll /reference:System.Web.Extensions.dll /reference:System.Security.dll `
         /reference:Microsoft.CSharp.dll /reference:System.Xml.Linq.dll /reference:System.IO.Compression.dll `
-        /reference:System.IO.Compression.FileSystem.dll /reference:$webViewCore /reference:$webViewForms $source $aiSource $logSource $runnerSource
+        /reference:System.IO.Compression.FileSystem.dll /reference:$webViewCore /reference:$webViewForms $source $aiSource $logSource $acceptanceSource $runnerSource
     if ($LASTEXITCODE -ne 0) { throw 'Representative runner compilation failed.' }
 
     $arguments = '"' + $InputCsv + '" "' + $OutputCsv + '"'
@@ -50,7 +51,7 @@ try {
     $unavailable = @($rows | Where-Object { [string]@($_.PSObject.Properties)[1].Value -eq $unavailableLabel }).Count
     $temporary = @($rows | Where-Object { [string]@($_.PSObject.Properties)[1].Value -eq $temporaryLabel }).Count
     $review = $rows.Count - $removed - $alive - $unavailable - $temporary
-    $unresolved = $review + $temporary
+    $unresolved = $review + $temporary + $unavailable
     $rate = if ($rows.Count -eq 0) { 0 } else { 100.0 * $unresolved / $rows.Count }
     Write-Host "TOTAL=$($rows.Count)"
     Write-Host "REMOVED=$removed"

@@ -269,7 +269,7 @@ internal static class RegressionTests
                 },
                 new RemoteEvidenceResponse { TargetUnreachable = true });
         bool evidenceEscalationRoutingPassed =
-            SessionStore.CurrentEngineVersion == "4.1.0" &&
+            SessionStore.CurrentEngineVersion == "4.2.0" &&
             infrastructureDeferred.Number == 88 &&
             infrastructureDeferred.Verdict == "暂时异常" &&
             infrastructureDeferred.SkipDeepReview &&
@@ -278,20 +278,115 @@ internal static class RegressionTests
             infrastructureDeferred.EvidenceTrail.Count == 1 &&
             infrastructureDeferred.EvidenceStage.Contains("基础设施") &&
             publicUnavailableDeferred.Verdict == "公网不可访问" &&
-            publicUnavailableDeferred.EvidenceStage.Contains("公网不可达") &&
+            publicUnavailableDeferred.EvidenceStage.Contains("自动多线路不可访问") &&
             publicUnavailableGatePassed;
         Console.WriteLine((evidenceEscalationRoutingPassed ? "PASS " : "FAIL ") +
-            "4.1 多出口公网不可达、共享基础设施复用和自动追证字段");
+            "4.2 多线路不可访问、共享基础设施复用和自动追证字段");
         if (!evidenceEscalationRoutingPassed) _failures++;
 
         bool excelVerdictPassed =
             OpenXmlExcelBridge.ToExcelVerdict("已失效") == "是" &&
             OpenXmlExcelBridge.ToExcelVerdict("仍可访问") == "否" &&
-            OpenXmlExcelBridge.ToExcelVerdict("公网不可访问") == "公网不可访问" &&
+            OpenXmlExcelBridge.ToExcelVerdict("公网不可访问") == "待独立复核" &&
             OpenXmlExcelBridge.ToExcelVerdict("人工复核") == "待复核";
         Console.WriteLine((excelVerdictPassed ? "PASS " : "FAIL ") +
-            "Excel 写回区分明确删除、公网不可访问和待复核");
+            "Excel 写回不把多线路不可访问伪装成明确失效");
         if (!excelVerdictPassed) _failures++;
+
+        var unavailableForAcceptance = new CheckResult
+        {
+            Number = 90,
+            OriginalUrl = "https://shared.example.com/article/90",
+            Verdict = "公网不可访问",
+            StatusCode = "502",
+            InfrastructureKey = "IP 203.0.113.90",
+            Evidence = "系统代理、直连和公开云均未取得正文"
+        };
+        ContractAcceptanceView unavailableView =
+            ContractAcceptanceClassifier.Evaluate(unavailableForAcceptance);
+        BatchPreflightSummary unavailablePreflight = BatchPreflightPlanner.Analyze(new[]
+        {
+            new KeyValuePair<CheckJob, CheckResult>(
+                new CheckJob { Number = 90, Url = unavailableForAcceptance.OriginalUrl },
+                unavailableForAcceptance)
+        });
+        bool acceptanceClassifierPassed =
+            unavailableView.ContentStatus == "未知" &&
+            unavailableView.RequiresIndependentNetworkReview &&
+            unavailableView.AcceptanceRecommendation.Contains("尚不能归责供应商") &&
+            !unavailableView.ContentResolved &&
+            unavailablePreflight.Resolved == 0 &&
+            unavailablePreflight.EvidenceInsufficient == 1 &&
+            ContractAcceptanceClassifier.IsContentResolved(new CheckResult { Verdict = "已失效" }) &&
+            ContractAcceptanceClassifier.IsContentResolved(new CheckResult { Verdict = "仍可访问" });
+        Console.WriteLine((acceptanceClassifierPassed ? "PASS " : "FAIL ") +
+            "内容状态、公开可访问性和合同归责严格分离");
+        if (!acceptanceClassifierPassed) _failures++;
+
+        string packageTestDirectory = Path.Combine(Path.GetTempPath(),
+            "LinkCheckerAcceptanceTest-" + Guid.NewGuid().ToString("N"));
+        bool evidencePackagePassed = false;
+        try
+        {
+            var packageRows = new List<CheckResult>();
+            for (int index = 0; index < 6; index++)
+            {
+                packageRows.Add(new CheckResult
+                {
+                    Number = index + 1,
+                    OriginalUrl = "https://control" + index + ".example.com/article/" + index,
+                    Verdict = "仍可访问",
+                    InfrastructureKey = "CONTROL-" + index,
+                    Evidence = "取得目标正文"
+                });
+            }
+            packageRows.Add(new CheckResult
+            {
+                Number = 7,
+                OriginalUrl = "https://removed.example.com/article/7",
+                Verdict = "已失效",
+                InfrastructureKey = "REMOVED-1",
+                Evidence = "目标页明确提示已删除"
+            });
+            for (int index = 0; index < 34; index++)
+            {
+                packageRows.Add(new CheckResult
+                {
+                    Number = 8 + index,
+                    OriginalUrl = "https://blocked" + (index % 9) + ".example.com/article/" + index,
+                    Verdict = "公网不可访问",
+                    StatusCode = "502",
+                    InfrastructureKey = "SHARED-" + (index % 4),
+                    Evidence = "多线路均未取得正文"
+                });
+            }
+            AcceptanceEvidencePackage package = AcceptanceEvidencePackageWriter.WriteToBaseDirectory(
+                packageRows, "RUN-CONTRACT-TEST", packageTestDirectory,
+                System.Reflection.Assembly.GetExecutingAssembly().Location,
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "platform-rules.json"));
+            string method = File.ReadAllText(Path.Combine(package.DirectoryPath, "04_环境与方法说明.txt"));
+            string review = File.ReadAllText(Path.Combine(package.DirectoryPath, "03_独立普通网络复核清单.csv"));
+            string manifest = File.ReadAllText(Path.Combine(package.DirectoryPath, "SHA256SUMS.txt"));
+            int targetSamples = review.Split('\n').Count(line => line.Contains("\"目标样本\""));
+            evidencePackagePassed =
+                package.Total == 41 && package.ContentResolved == 7 &&
+                package.IndependentReviewRequired == 34 &&
+                targetSamples == 30 &&
+                File.Exists(package.ZipPath) &&
+                File.Exists(Path.Combine(packageTestDirectory, "最近一次验收证据包.txt")) &&
+                method.Contains("不能单独排除某一共享基础设施对数据中心网络的限制") &&
+                method.Contains("不等于内容删除") &&
+                manifest.Contains("01_验收汇总.csv") &&
+                !review.Contains("sk-secret");
+        }
+        finally
+        {
+            if (Directory.Exists(packageTestDirectory))
+                Directory.Delete(packageTestDirectory, true);
+        }
+        Console.WriteLine((evidencePackagePassed ? "PASS " : "FAIL ") +
+            "合同验收证据包、独立普通网络分层抽样和文件哈希");
+        if (!evidencePackagePassed) _failures++;
 
         bool baijiaIdPassed = Checker.ExtractBaiduArticleId(new Uri("https://baijiahao.baidu.com/s?id=1870762825559558263&wfr=spider&for=pc")) == "1870762825559558263";
         bool dtNidPassed = Checker.ExtractBaiduArticleNid(new Uri("https://mbd.baidu.com/newspage/data/dtlandingwise?nid=dt_5277434666597158759")) == "dt_5277434666597158759";

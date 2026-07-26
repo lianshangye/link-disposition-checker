@@ -149,7 +149,7 @@ namespace LinkDispositionChecker
             lines.Add("");
             lines.Add("运行编号：" + Safe(context == null ? "" : context.RunId, 100));
             lines.Add("工具版本：" + SessionStore.CurrentEngineVersion);
-            lines.Add("日志格式：3");
+            lines.Add("日志格式：4");
             lines.Add("执行类型：" + Safe(context == null ? "" : context.Operation, 80));
             lines.Add("启动方式：" + Safe(context == null ? "" : context.Trigger, 80));
             lines.Add("开始时间：" + (context == null ? "" : context.StartedAt.ToString("yyyy-MM-dd HH:mm:ss zzz")));
@@ -172,6 +172,10 @@ namespace LinkDispositionChecker
             lines.Add("基础核验剩余：" + Math.Max(0, (context == null ? 0 : context.TotalJobs) - allItems.Count));
             AppendVerdictCounts(lines, "本次结果", runItems);
             AppendVerdictCounts(lines, "累计结果", allItems);
+            lines.Add("本次内容状态已确认：" + runItems.Count(ContractAcceptanceClassifier.IsContentResolved) +
+                " / " + runItems.Count);
+            lines.Add("累计内容状态已确认：" + allItems.Count(ContractAcceptanceClassifier.IsContentResolved) +
+                " / " + allItems.Count);
             lines.Add("");
             lines.Add("二、本次网络与状态分布");
             lines.Add("----------------------");
@@ -196,10 +200,13 @@ namespace LinkDispositionChecker
             foreach (var group in runItems.GroupBy(item => Host(item.OriginalUrl))
                 .OrderByDescending(group => group.Count()).ThenBy(group => group.Key).Take(30))
             {
-                int final = group.Count(item => item.Verdict == "已失效" ||
-                    item.Verdict == "仍可访问" || item.Verdict == "公网不可访问");
+                int final = group.Count(ContractAcceptanceClassifier.IsContentResolved);
+                int independent = group.Count(item =>
+                    ContractAcceptanceClassifier.Evaluate(item).RequiresIndependentNetworkReview);
                 int temporary = group.Count(NetworkRestrictionCircuitBreaker.IsTransientRestriction);
-                lines.Add("- " + Safe(group.Key, 120) + "：共 " + group.Count() + "，已判定 " + final + "，暂时异常 " + temporary);
+                lines.Add("- " + Safe(group.Key, 120) + "：共 " + group.Count() +
+                    "，内容状态已确认 " + final + "，待独立普通网络复核 " + independent +
+                    "，暂时异常 " + temporary);
             }
             if (runItems.Count == 0) lines.Add("- 无");
             lines.Add("");
@@ -213,8 +220,9 @@ namespace LinkDispositionChecker
                 .GroupBy(item => item.InfrastructureKey, StringComparer.OrdinalIgnoreCase)
                 .OrderByDescending(group => group.Count()).ThenBy(group => group.Key).Take(20))
                 lines.Add("- " + Safe(group.Key, 100) + "：共 " + group.Count() +
-                    "，已确认 " + group.Count(item => item.Verdict == "已失效" ||
-                        item.Verdict == "仍可访问" || item.Verdict == "公网不可访问") +
+                    "，内容状态已确认 " + group.Count(ContractAcceptanceClassifier.IsContentResolved) +
+                    "，待独立普通网络复核 " + group.Count(item =>
+                        ContractAcceptanceClassifier.Evaluate(item).RequiresIndependentNetworkReview) +
                     "，仍待重试 " + group.Count(item => item.Verdict == "暂时异常"));
             lines.Add("");
             lines.Add("七、AI 使用");
@@ -241,8 +249,7 @@ namespace LinkDispositionChecker
             lines.Add("九、匿名问题样本（最多 30 条）");
             lines.Add("----------------------------");
             List<CheckResult> issues = runItems.Where(item =>
-                item.Verdict != "已失效" && item.Verdict != "仍可访问" &&
-                item.Verdict != "公网不可访问").Take(30).ToList();
+                !ContractAcceptanceClassifier.IsContentResolved(item)).Take(30).ToList();
             foreach (CheckResult item in issues)
             {
                 lines.Add("- ID=" + AnonymousId(item.OriginalUrl) +
@@ -276,7 +283,7 @@ namespace LinkDispositionChecker
         {
             lines.Add(label + "：已失效 " + items.Count(item => item.Verdict == "已失效") +
                 "，仍可访问 " + items.Count(item => item.Verdict == "仍可访问") +
-                "，公网不可访问 " + items.Count(item => item.Verdict == "公网不可访问") +
+                "，多线路不可访问（待独立复核） " + items.Count(item => item.Verdict == "公网不可访问") +
                 "，暂时异常 " + items.Count(item => item.Verdict == "暂时异常") +
                 "，人工复核/其他 " + items.Count(item =>
                     item.Verdict != "已失效" && item.Verdict != "仍可访问" &&
@@ -295,7 +302,7 @@ namespace LinkDispositionChecker
         {
             if (item == null) return "未知";
             if (!String.IsNullOrWhiteSpace(item.AiLastError)) return "AI 调用失败";
-            if (item.Verdict == "公网不可访问") return "多出口公网不可达";
+            if (item.Verdict == "公网不可访问") return "自动多线路不可访问（待独立复核）";
             int code;
             if (Int32.TryParse(item.StatusCode ?? "", out code))
             {
@@ -312,8 +319,8 @@ namespace LinkDispositionChecker
             if (Regex.IsMatch((item.StatusCode ?? "") + " " + evidence, "超时|timeout", RegexOptions.IgnoreCase)) return "请求超时";
             if (Regex.IsMatch((item.StatusCode ?? "") + " " + evidence, "连接失败|无法建立连接|connection", RegexOptions.IgnoreCase)) return "连接失败";
             if (item.Verdict == "人工复核" || item.Verdict == "疑似已处置") return "证据不足或冲突";
-            return item.Verdict == "已失效" || item.Verdict == "仍可访问" ||
-                item.Verdict == "公网不可访问" ? "已完成判断" : "其他";
+            return item.Verdict == "已失效" || item.Verdict == "仍可访问"
+                ? "内容状态已确认" : "其他";
         }
 
         private static IEnumerable<string> Suggestions(List<CheckResult> items)
@@ -327,6 +334,7 @@ namespace LinkDispositionChecker
             int restricted = items.Count(item => FailureCategory(item) == "平台限流" ||
                 FailureCategory(item) == "网络出口限制" || FailureCategory(item) == "安全验证");
             int insufficient = items.Count(item => FailureCategory(item) == "证据不足或冲突");
+            int independent = items.Count(item => item.Verdict == "公网不可访问");
             var result = new List<string>();
             if (fives * 100 >= items.Count * 30)
                 result.Add("HTTP 5xx 占比达到 " + (fives * 100.0 / items.Count).ToString("0.0") + "%，优先检查单位代理、出口线路或目标站点服务状态。");
@@ -334,6 +342,8 @@ namespace LinkDispositionChecker
                 result.Add("限流/出口限制/安全验证占比较高，应降低同平台频率并比较浏览器通道与普通 HTTP 通道。");
             if (insufficient > 0)
                 result.Add("有 " + insufficient + " 条已取得响应但证据不足，适合进一步浏览器补证或 AI 证据复核。");
+            if (independent > 0)
+                result.Add("有 " + independent + " 条仅能证明自动多线路不可访问；不能据此证明删除或归责供应商，应使用验收证据包中的普通网络复核清单完成控制实验。");
             if (result.Count == 0) result.Add("未发现单一占比突出的系统性异常，请结合匿名问题样本继续分析。");
             return result;
         }

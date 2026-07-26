@@ -5,6 +5,7 @@ New-Item -ItemType Directory -Path $buildOutputDirectory -Force | Out-Null
 $source = Join-Path $PSScriptRoot 'LinkDispositionChecker.cs'
 $aiSource = Join-Path $PSScriptRoot 'AiReview.cs'
 $logSource = Join-Path $PSScriptRoot 'RunLogging.cs'
+$acceptanceSource = Join-Path $PSScriptRoot 'AcceptanceEvidence.cs'
 $outputName = (([char[]](0x4FB5,0x6743,0x94FE,0x63A5,0x5904,0x7F6E,0x6838,0x9A8C,0x5DE5,0x5177)) -join '') + '.exe'
 $output = Join-Path $projectRoot $outputName
 $latestOutput = Join-Path $buildOutputDirectory 'LinkChecker.latest.exe'
@@ -32,9 +33,9 @@ foreach ($dependency in @($webViewCore, $webViewForms, $webViewLoader, $webViewL
     if (-not (Test-Path -LiteralPath $dependency)) { throw "Missing WebView2 dependency: $dependency" }
 }
 
-& $compiler /nologo /target:winexe /platform:x64 /optimize+ /out:$buildOutput /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Net.Http.dll /reference:System.Web.Extensions.dll /reference:System.Security.dll /reference:Microsoft.CSharp.dll /reference:System.Xml.Linq.dll /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll /reference:$webViewCore /reference:$webViewForms $source $aiSource $logSource
+& $compiler /nologo /target:winexe /platform:x64 /optimize+ /out:$buildOutput /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Net.Http.dll /reference:System.Web.Extensions.dll /reference:System.Security.dll /reference:Microsoft.CSharp.dll /reference:System.Xml.Linq.dll /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll /reference:$webViewCore /reference:$webViewForms $source $aiSource $logSource $acceptanceSource
 if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
-& $compiler /nologo /target:winexe /platform:x86 /optimize+ /out:$buildOutputX86 /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Net.Http.dll /reference:System.Web.Extensions.dll /reference:System.Security.dll /reference:Microsoft.CSharp.dll /reference:System.Xml.Linq.dll /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll /reference:$webViewCore /reference:$webViewForms $source $aiSource $logSource
+& $compiler /nologo /target:winexe /platform:x86 /optimize+ /out:$buildOutputX86 /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Net.Http.dll /reference:System.Web.Extensions.dll /reference:System.Security.dll /reference:Microsoft.CSharp.dll /reference:System.Xml.Linq.dll /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll /reference:$webViewCore /reference:$webViewForms $source $aiSource $logSource $acceptanceSource
 if ($LASTEXITCODE -ne 0) { throw 'x86 build failed' }
 & $compiler /nologo /target:exe /platform:anycpu /optimize+ /out:$diagnosticBuildOutput /reference:System.dll /reference:System.Core.dll /reference:System.Net.Http.dll $diagnosticSource
 if ($LASTEXITCODE -ne 0) { throw 'Network diagnostics build failed' }

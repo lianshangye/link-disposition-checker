@@ -25,8 +25,8 @@ using Microsoft.Web.WebView2.WinForms;
 
 [assembly: AssemblyTitle("侵权链接处置核验工具")]
 [assembly: AssemblyProduct("侵权链接处置核验工具")]
-[assembly: AssemblyVersion("4.1.0.0")]
-[assembly: AssemblyFileVersion("4.1.0.0")]
+[assembly: AssemblyVersion("4.2.0.0")]
+[assembly: AssemblyFileVersion("4.2.0.0")]
 
 namespace LinkDispositionChecker
 {
@@ -63,6 +63,11 @@ namespace LinkDispositionChecker
         public string AcquisitionAttempts { get; set; }
         public string SiteHealth { get; set; }
         public string InfrastructureKey { get; set; }
+        public string ContentStatus { get; set; }
+        public string PublicReachability { get; set; }
+        public string AcceptanceRecommendation { get; set; }
+        public string EvidenceGrade { get; set; }
+        public string SupplierAction { get; set; }
     }
 
     internal sealed class RenderedPageData
@@ -576,7 +581,7 @@ namespace LinkDispositionChecker
 
     internal static class SessionStore
     {
-        public const string CurrentEngineVersion = "4.1.0";
+        public const string CurrentEngineVersion = "4.2.0";
         private static readonly object SyncRoot = new object();
         private static readonly JavaScriptSerializer Serializer = new JavaScriptSerializer { MaxJsonLength = Int32.MaxValue };
         public static readonly string SessionPath = Path.Combine(StoragePaths.UserDataDirectory, "last-session.json");
@@ -677,7 +682,10 @@ namespace LinkDispositionChecker
     internal static class ExcelBridge
     {
         private static readonly Regex UrlPattern = new Regex(@"https?://[^\s\""'<>，；]+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-        private static readonly string[] ResultHeaders = new[] { "链接是否失效" };
+        private static readonly string[] ResultHeaders = new[]
+        {
+            "链接是否失效", "公开可访问性", "合同验收建议"
+        };
 
         public static List<ExcelSheetPlan> LoadPlans(string path)
         {
@@ -922,22 +930,17 @@ namespace LinkDispositionChecker
                             CheckResult result;
                             if (!resultMap.TryGetValue(source.Url, out result)) continue;
                             int rowOffset = source.Row - dataStartRow + 1;
-                            matrix.SetValue(Checker.NormalizeVisibleVerdict(result.Verdict), rowOffset, 1);
-                            matrix.SetValue(result.StatusCode, rowOffset, 2);
-                            matrix.SetValue(result.FinalUrl, rowOffset, 3);
-                            matrix.SetValue(result.Evidence, rowOffset, 4);
-                            matrix.SetValue(result.CheckedAt, rowOffset, 5);
-                            matrix.SetValue(result.Title, rowOffset, 6);
+                            ContractAcceptanceView view = ContractAcceptanceClassifier.Evaluate(result);
+                            matrix.SetValue(OpenXmlExcelBridge.ToExcelVerdict(result.Verdict), rowOffset, 1);
+                            matrix.SetValue(view.PublicReachability, rowOffset, 2);
+                            matrix.SetValue(view.AcceptanceRecommendation, rowOffset, 3);
                         }
                         outputRange = sheet.Range[sheet.Cells[dataStartRow, plan.ResultStartColumn], sheet.Cells[maxRow, plan.ResultStartColumn + ResultHeaders.Length - 1]];
                         outputRange.Value2 = matrix;
                         sheet.Columns[plan.ResultStartColumn].ColumnWidth = 15;
-                        sheet.Columns[plan.ResultStartColumn + 1].ColumnWidth = 11;
-                        sheet.Columns[plan.ResultStartColumn + 2].ColumnWidth = 36;
-                        sheet.Columns[plan.ResultStartColumn + 3].ColumnWidth = 44;
-                        sheet.Columns[plan.ResultStartColumn + 4].ColumnWidth = 20;
-                        sheet.Columns[plan.ResultStartColumn + 5].ColumnWidth = 30;
-                        sheet.Columns[plan.ResultStartColumn + 3].WrapText = true;
+                        sheet.Columns[plan.ResultStartColumn + 1].ColumnWidth = 25;
+                        sheet.Columns[plan.ResultStartColumn + 2].ColumnWidth = 38;
+                        sheet.Columns[plan.ResultStartColumn + 2].WrapText = true;
                     }
                     finally
                     {
@@ -1054,7 +1057,10 @@ namespace LinkDispositionChecker
         private static readonly XNamespace RelNs = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
         private static readonly XNamespace PackageRelNs = "http://schemas.openxmlformats.org/package/2006/relationships";
         private static readonly Regex UrlPattern = new Regex(@"https?://[^\s\""'<>，；]+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-        private static readonly string[] ResultHeaders = new[] { "链接是否失效" };
+        private static readonly string[] ResultHeaders = new[]
+        {
+            "链接是否失效", "公开可访问性", "合同验收建议"
+        };
 
         public static List<ExcelSheetPlan> LoadPlans(string path)
         {
@@ -1251,7 +1257,12 @@ namespace LinkDispositionChecker
                         }
                         XElement sourceCell = FindCell(cellsByReference, source.Row, plan.LinkColumn);
                         string sourceStyle = sourceCell == null ? null : (string)sourceCell.Attribute("s");
-                        string[] values = new[] { source.ManualOnly ? "待复核" : ToExcelVerdict(result.Verdict) };
+                        ContractAcceptanceView view = source.ManualOnly ? null :
+                            ContractAcceptanceClassifier.Evaluate(result);
+                        string[] values = source.ManualOnly
+                            ? new[] { "待复核", "未核验", "人工补录" }
+                            : new[] { ToExcelVerdict(result.Verdict), view.PublicReachability,
+                                view.AcceptanceRecommendation };
                         for (int i = 0; i < values.Length; i++)
                         {
                             XElement cell = GetOrCreateCell(sheetData, rowsByNumber, cellsByReference, source.Row, plan.ResultStartColumn + i);
@@ -1472,7 +1483,7 @@ namespace LinkDispositionChecker
                 columns = new XElement(MainNs + "cols");
                 if (sheetData == null) worksheet.Add(columns); else sheetData.AddBeforeSelf(columns);
             }
-            double[] widths = new[] { 16d };
+            double[] widths = new[] { 16d, 26d, 40d };
             for (int i = 0; i < widths.Length; i++)
             {
                 int column = startColumn + i;
@@ -1583,11 +1594,11 @@ namespace LinkDispositionChecker
 
         internal static string ToExcelVerdict(string verdict)
         {
-            // “是”只用于明确失效证据。公网不可访问是可执行的核验不通过结论，
-            // 但不伪称已经看到删除页，因此在 Excel 中保留独立文字。
+            // “是”只用于明确失效证据。自动多线路不可访问不等于删除，
+            // 也不能在没有独立普通网络控制实验时归责供应商。
             if (verdict == "已失效") return "是";
             if (verdict == "仍可访问") return "否";
-            if (verdict == "公网不可访问") return "公网不可访问";
+            if (verdict == "公网不可访问") return "待独立复核";
             return "待复核";
         }
 
@@ -3999,7 +4010,11 @@ namespace LinkDispositionChecker
                 ProbeResponse directResult = await ReadProbeWithClientAsync(_directClient, url, headers, token);
                 return directResult ?? proxyResult;
             }
-            catch (OperationCanceledException) { throw; }
+            catch (OperationCanceledException)
+            {
+                if (token.IsCancellationRequested) throw;
+                return null;
+            }
             catch { return null; }
         }
 
@@ -4083,7 +4098,11 @@ namespace LinkDispositionChecker
                     }
                 }
             }
-            catch (OperationCanceledException) { throw; }
+            catch (OperationCanceledException)
+            {
+                if (token.IsCancellationRequested) throw;
+                return null;
+            }
             catch { return null; }
         }
 
@@ -4110,7 +4129,11 @@ namespace LinkDispositionChecker
                     }
                 }
             }
-            catch (OperationCanceledException) { throw; }
+            catch (OperationCanceledException)
+            {
+                if (token.IsCancellationRequested) throw;
+                return null;
+            }
             catch { return null; }
         }
 
@@ -4603,9 +4626,9 @@ namespace LinkDispositionChecker
             if (ShouldMarkPubliclyUnavailable(result, publicCloud))
             {
                 result.Verdict = "公网不可访问";
-                result.EvidenceStage = "多出口公网不可达已确认";
-                result.Evidence = "核验不通过—公网不可访问：本机系统代理、直连、同站健康对照和独立公网云浏览器均未取得目标正文或正常页面" +
-                    comparison + "；这能确认当前链接不具备公网可访问性，但不伪称看到了明确删除页";
+                result.EvidenceStage = "自动多线路不可访问已记录";
+                result.Evidence = "自动多线路不可访问（内容状态未知）：本机系统代理、直连、同站健康对照和独立公网云浏览器均未取得目标正文或正常页面" +
+                    comparison + "；这只能确认当前自动取证环境未取得内容，仍需独立普通网络复核";
             }
             else
             {
@@ -6779,8 +6802,9 @@ namespace LinkDispositionChecker
                 if (job != null) summary.SampledKeys.Add(job.Key);
                 if (result == null) continue;
                 summary.Checked++;
-                if (result.Verdict == "已失效" || result.Verdict == "仍可访问" ||
-                    result.Verdict == "公网不可访问") summary.Resolved++;
+                ContractAcceptanceView acceptance = ContractAcceptanceClassifier.Evaluate(result);
+                if (acceptance.ContentResolved) summary.Resolved++;
+                else if (acceptance.RequiresIndependentNetworkReview) summary.EvidenceInsufficient++;
                 else if (NetworkRestrictionCircuitBreaker.IsTransientRestriction(result)) summary.TransientRestrictions++;
                 else summary.EvidenceInsufficient++;
             }
@@ -7054,6 +7078,7 @@ namespace LinkDispositionChecker
         private readonly Button _remoteSettings = new Button();
         private readonly Button _open = new Button();
         private readonly Button _openLog = new Button();
+        private readonly Button _acceptancePack = new Button();
         private readonly ComboBox _filter = new ComboBox();
         private readonly ComboBox _performance = new ComboBox();
         private readonly ComboBox _networkMode = new ComboBox();
@@ -7065,9 +7090,9 @@ namespace LinkDispositionChecker
         private readonly Label _allCount = MakeStat("0", "总链接");
         private readonly Label _removedCount = MakeStat("0", "高置信已失效");
         private readonly Label _aliveCount = MakeStat("0", "仍可访问");
-        private readonly Label _unavailableCount = MakeStat("0", "公网不可访问");
+        private readonly Label _unavailableCount = MakeStat("0", "多线路不可访问");
         private readonly Label _temporaryCount = MakeStat("0", "访问异常待重试");
-        private readonly Label _reviewCount = MakeStat("0", "证据待复核");
+        private readonly Label _reviewCount = MakeStat("0", "其他待补证/复核");
         private readonly BindingList<CheckResult> _rows = new BindingList<CheckResult>();
         private readonly List<CheckResult> _allRows = new List<CheckResult>();
         private List<ExcelSheetPlan> _excelPlans = new List<ExcelSheetPlan>();
@@ -7115,7 +7140,7 @@ namespace LinkDispositionChecker
         {
             var header = new Panel { Dock = DockStyle.Top, Height = 82, BackColor = Color.FromArgb(27, 62, 111) };
             var title = new Label { Text = "侵权链接处置核验", ForeColor = Color.White, Font = new Font("微软雅黑", 19, FontStyle.Bold), AutoSize = true, Location = new Point(24, 13) };
-            var sub = new Label { Text = "本机多线路 + 无缓存公开云取证 + 内置浏览器 + AI 收尾", ForeColor = Color.FromArgb(206, 220, 239), AutoSize = true, Location = new Point(27, 51) };
+            var sub = new Label { Text = "内容状态 + 公开可访问性 + 合同验收证据链", ForeColor = Color.FromArgb(206, 220, 239), AutoSize = true, Location = new Point(27, 51) };
             var versionPanel = new Panel { Dock = DockStyle.Right, Width = 152, BackColor = Color.FromArgb(27, 62, 111) };
             var versionBadge = new Label
             {
@@ -7174,8 +7199,10 @@ namespace LinkDispositionChecker
             StyleButton(_stop, "停止", false); StyleButton(_deepReview, "重新运行后台追证", false);
             StyleButton(_aiReview, "AI 辅助复核", false); StyleButton(_aiSettings, "AI 设置", false);
             StyleButton(_remoteSettings, "远程取证设置", false);
-            StyleButton(_export, "导出结果", false); StyleButton(_open, "打开选中链接", false); StyleButton(_openLog, "查看执行日志", false);
-            _stop.Enabled = false; _retryNetwork.Enabled = false; _deepReview.Enabled = false; _aiReview.Enabled = false;
+            StyleButton(_export, "导出结果", false); StyleButton(_acceptancePack, "生成验收证据包", false);
+            StyleButton(_open, "打开选中链接", false); StyleButton(_openLog, "查看执行日志", false);
+            _stop.Enabled = false; _retryNetwork.Enabled = false; _deepReview.Enabled = false;
+            _aiReview.Enabled = false; _acceptancePack.Enabled = false;
             _start.Click += async delegate { await StartChecksAsync(false); }; _stop.Click += delegate { if (_cancellation != null) _cancellation.Cancel(); };
             _retryNetwork.Click += async delegate { await ResumeLastSessionAsync(true); };
             _deepReview.Click += delegate { RunSelectedReview(); }; _export.Click += ExportClick; _open.Click += OpenSelectedClick;
@@ -7187,10 +7214,11 @@ namespace LinkDispositionChecker
                 using (var form = new RemoteEvidenceSettingsForm()) form.ShowDialog(this);
             };
             _openLog.Click += delegate { OpenLatestExecutionLog(); };
-            toolbar.Controls.Add(_start); toolbar.Controls.Add(_retryNetwork); toolbar.Controls.Add(_stop); toolbar.Controls.Add(_deepReview); toolbar.Controls.Add(_aiReview); toolbar.Controls.Add(_aiSettings); toolbar.Controls.Add(_remoteSettings); toolbar.Controls.Add(_export); toolbar.Controls.Add(_open); toolbar.Controls.Add(_openLog);
+            _acceptancePack.Click += delegate { GenerateAcceptanceEvidencePackage(null, true); };
+            toolbar.Controls.Add(_start); toolbar.Controls.Add(_retryNetwork); toolbar.Controls.Add(_stop); toolbar.Controls.Add(_deepReview); toolbar.Controls.Add(_aiReview); toolbar.Controls.Add(_aiSettings); toolbar.Controls.Add(_remoteSettings); toolbar.Controls.Add(_export); toolbar.Controls.Add(_acceptancePack); toolbar.Controls.Add(_open); toolbar.Controls.Add(_openLog);
             toolbar.Controls.Add(new Label { Text = "    显示：", AutoSize = true, Margin = new Padding(8, 9, 0, 0), ForeColor = Color.FromArgb(75, 85, 99) });
             _filter.DropDownStyle = ComboBoxStyle.DropDownList; _filter.Width = 160; _filter.Margin = new Padding(4, 4, 0, 0);
-            _filter.Items.AddRange(new object[] { "全部结果", "高置信已失效", "仍可访问", "公网不可访问", "访问异常待重试", "证据待复核" }); _filter.SelectedIndex = 0; _filter.SelectedIndexChanged += delegate { ApplyFilter(); };
+            _filter.Items.AddRange(new object[] { "全部结果", "高置信已失效", "仍可访问", "多线路不可访问（待独立复核）", "访问异常待重试", "其他待补证/复核" }); _filter.SelectedIndex = 0; _filter.SelectedIndexChanged += delegate { ApplyFilter(); };
             toolbar.Controls.Add(_filter); main.Controls.Add(toolbar, 0, 2);
             toolbar.Controls.Add(new Label { Text = "    性能：", AutoSize = true, Margin = new Padding(8, 9, 0, 0), ForeColor = Color.FromArgb(75, 85, 99) });
             _performance.DropDownStyle = ComboBoxStyle.DropDownList; _performance.Width = 115; _performance.Margin = new Padding(4, 4, 0, 0);
@@ -7205,7 +7233,7 @@ namespace LinkDispositionChecker
             _progress.Width = 300; _progress.Height = 20; _progress.Location = new Point(26, 10); _progress.Anchor = AnchorStyles.Left;
             _progress.Style = ProgressBarStyle.Continuous;
             _progressText.Text = "尚未开始"; _progressText.AutoSize = true; _progressText.Location = new Point(340, 11); _progressText.ForeColor = Color.FromArgb(75, 85, 99);
-            var note = new Label { Text = "访问异常仅发送单条公开链接到云取证；不发送 Cookie、账号或工作簿", AutoSize = true, ForeColor = Color.FromArgb(107, 114, 128), Anchor = AnchorStyles.Top | AnchorStyles.Right, Location = new Point(footer.Width - 560, 11) };
+            var note = new Label { Text = "自动多线路不可访问不等于删除；独立普通网络复核后才能归责", AutoSize = true, ForeColor = Color.FromArgb(107, 114, 128), Anchor = AnchorStyles.Top | AnchorStyles.Right, Location = new Point(footer.Width - 560, 11) };
             footer.Controls.Add(_activity); footer.Controls.Add(_progress); footer.Controls.Add(_progressText); footer.Controls.Add(note);
             footer.SizeChanged += delegate
             {
@@ -7222,7 +7250,10 @@ namespace LinkDispositionChecker
             _grid.BackgroundColor = Color.White; _grid.BorderStyle = BorderStyle.None; _grid.GridColor = Color.FromArgb(229, 231, 235); _grid.RowTemplate.Height = 34;
             _grid.ColumnHeadersHeight = 38; _grid.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(238, 242, 247); _grid.ColumnHeadersDefaultCellStyle.ForeColor = Color.FromArgb(55, 65, 81);
             _grid.ColumnHeadersDefaultCellStyle.Font = new Font("微软雅黑", 9.2f, FontStyle.Bold); _grid.EnableHeadersVisualStyles = false;
-            AddColumn("Number", "#", 46); AddColumn("Verdict", "核验结果", 130); AddColumn("AiDecision", "AI建议", 105); AddColumn("StatusCode", "HTTP", 68); AddColumn("Platform", "平台", 110); AddColumn("ContentType", "内容类型", 75); AddColumn("ExpectedAuthor", "发文作者", 120); AddColumn("Title", "页面标题", 190);
+            AddColumn("Number", "#", 46); AddColumn("Verdict", "核验结果", 130);
+            AddColumn("ContentStatus", "内容状态", 105); AddColumn("PublicReachability", "公开可访问性", 185);
+            AddColumn("AcceptanceRecommendation", "合同验收建议", 235); AddColumn("EvidenceGrade", "证据等级", 155);
+            AddColumn("AiDecision", "AI建议", 105); AddColumn("StatusCode", "HTTP", 68); AddColumn("Platform", "平台", 110); AddColumn("ContentType", "内容类型", 75); AddColumn("ExpectedAuthor", "发文作者", 120); AddColumn("Title", "页面标题", 190);
             AddColumn("OriginalUrl", "原链接", 300); AddColumn("Evidence", "判定依据", 330);
             AddColumn("EvidenceStage", "追证阶段", 170); AddColumn("SiteHealth", "站点对照", 155);
             AddColumn("InfrastructureKey", "基础设施", 140); AddColumn("AcquisitionAttempts", "取证线路", 220);
@@ -7247,7 +7278,7 @@ namespace LinkDispositionChecker
                 return;
             }
 
-            _running = true; _start.Enabled = false; _retryNetwork.Enabled = false; _stop.Enabled = true; _deepReview.Enabled = false; _remoteSettings.Enabled = false; _import.Enabled = false; _clear.Enabled = false; _input.ReadOnly = true;
+            _running = true; _start.Enabled = false; _retryNetwork.Enabled = false; _stop.Enabled = true; _deepReview.Enabled = false; _remoteSettings.Enabled = false; _acceptancePack.Enabled = false; _import.Enabled = false; _clear.Enabled = false; _input.ReadOnly = true;
             _performance.Enabled = false;
             _networkMode.Enabled = false;
             _resume.Enabled = false;
@@ -7410,10 +7441,13 @@ namespace LinkDispositionChecker
                 RecalculateCounters();
                 ApplyFilter();
                 UpdateStats();
+                string packagePath = GenerateAcceptanceEvidencePackage(executionLog.RunId, false);
+                int contentResolved = _removedTotal + _aliveTotal;
                 _progressText.Text = "本次自动核验全部结束：共 " + _allRows.Count +
-                    " 条，已失效 " + _removedTotal + "，仍可访问 " + _aliveTotal +
-                    "，公网不可访问 " + _unavailableTotal + "，访问异常 " + _temporaryTotal +
-                    "，证据待复核 " + _reviewTotal;
+                    " 条；内容状态已确认 " + contentResolved + "（失效 " + _removedTotal +
+                    " / 正文仍在 " + _aliveTotal + "）；待独立普通网络复核 " + _unavailableTotal +
+                    "；其他待补证/复核 " + (_temporaryTotal + _reviewTotal) +
+                    (String.IsNullOrWhiteSpace(packagePath) ? "" : "；验收证据包已生成");
             }
         }
 
@@ -7509,7 +7543,7 @@ namespace LinkDispositionChecker
                 OriginalUrl = job.Url,
                 FinalUrl = "",
                 Evidence = publiclyUnavailable
-                    ? "核验不通过—公网不可访问：同一共享基础设施已有多条代表链接经本机代理、直连、同站对照及独立公网云浏览器验证，均无法取得正常页面；本条复用该基础设施结论，但不伪称看到了明确删除页"
+                    ? "自动多线路不可访问（内容状态未知）：同一共享基础设施已有多条代表链接经本机代理、直连、同站对照及独立公网云浏览器验证，均无法取得正常页面；本条复用该基础设施访问结论，不能证明删除或归责供应商"
                     : "同一基础设施已有多条链接完成自动追证，但均未取得正文或明确删除页；为避免继续集中请求，本条沿用该组访问异常并保留一键重试",
                 CheckedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
                 Duration = "0.0s",
@@ -7523,7 +7557,7 @@ namespace LinkDispositionChecker
                 SourceRow = job.SourceRow,
                 InfrastructureKey = infrastructure,
                 SiteHealth = "基础设施组连续异常：" + (label ?? infrastructure),
-                EvidenceStage = publiclyUnavailable ? "多出口公网不可达结论复用" : "基础设施组追证已执行",
+                EvidenceStage = publiclyUnavailable ? "自动多线路不可访问记录复用" : "基础设施组追证已执行",
                 AcquisitionAttempts = publiclyUnavailable ? "共享基础设施多出口证据复用" : "共享基础设施结果复用",
                 SkipDeepReview = true,
                 EvidenceTrail = new List<VerificationEvidence>
@@ -7570,6 +7604,7 @@ namespace LinkDispositionChecker
             while (added < maximum && _uiResults.TryDequeue(out item))
             {
                 item.Verdict = Checker.NormalizeVisibleVerdict(item.Verdict);
+                ContractAcceptanceClassifier.Apply(item);
                 _allRows.Add(item);
                 if (_rows.Count < _performanceProfile.GridRows && ShouldDisplay(item)) _rows.Add(item);
                 if (item.Verdict == "已失效") _removedTotal++;
@@ -7591,6 +7626,11 @@ namespace LinkDispositionChecker
 
         private void RecalculateCounters()
         {
+            foreach (CheckResult item in _allRows)
+            {
+                item.Verdict = Checker.NormalizeVisibleVerdict(item.Verdict);
+                ContractAcceptanceClassifier.Apply(item);
+            }
             _removedTotal = _allRows.Count(item => item.Verdict == "已失效");
             _aliveTotal = _allRows.Count(item => item.Verdict == "仍可访问");
             _unavailableTotal = _allRows.Count(item => item.Verdict == "公网不可访问");
@@ -7867,6 +7907,7 @@ namespace LinkDispositionChecker
             _aiSettings.Enabled = !busy;
             _aiReview.Enabled = !busy && _allRows.Any(AiReviewPolicy.IsEligible);
             _export.Enabled = !busy;
+            _acceptancePack.Enabled = !busy && _allRows.Count > 0;
             _input.ReadOnly = busy;
             _performance.Enabled = !busy;
             _networkMode.Enabled = !busy;
@@ -7916,6 +7957,36 @@ namespace LinkDispositionChecker
             }
         }
 
+        private string GenerateAcceptanceEvidencePackage(string runId, bool showMessage)
+        {
+            if (_allRows.Count == 0) return "";
+            try
+            {
+                AcceptanceEvidencePackage package = AcceptanceEvidencePackageWriter.Write(_allRows, runId);
+                _acceptancePack.Tag = package.ZipPath;
+                if (showMessage)
+                {
+                    MessageBox.Show(
+                        "验收证据包已生成：\n" + package.ZipPath +
+                        "\n\n内容状态已确认：" + package.ContentResolved + " / " + package.Total +
+                        "\n待独立普通网络复核：" + package.IndependentReviewRequired +
+                        "\n待补证/人工复核：" + package.SupplementRequired +
+                        "\n\n注意：证据包包含完整业务链接，发送给供应商前请按单位的数据管理要求处理。",
+                        "验收证据包已生成", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                return package.ZipPath;
+            }
+            catch (Exception ex)
+            {
+                if (showMessage)
+                    MessageBox.Show("验收证据包生成失败：\n" + ex.Message,
+                        "生成失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                else
+                    _progressText.Text = "核验已完成，但验收证据包生成失败：" + ex.Message;
+                return "";
+            }
+        }
+
         private void OpenLatestExecutionLog()
         {
             string path = ExecutionLogWriter.LatestLogPath;
@@ -7946,7 +8017,11 @@ namespace LinkDispositionChecker
         {
             try
             {
-                if (item != null) item.Verdict = Checker.NormalizeVisibleVerdict(item.Verdict);
+                if (item != null)
+                {
+                    item.Verdict = Checker.NormalizeVisibleVerdict(item.Verdict);
+                    ContractAcceptanceClassifier.Apply(item);
+                }
                 SessionStore.Append(item);
             }
             catch (Exception ex) { _progressText.Text = "深度复核进度保存失败：" + ex.Message; }
@@ -8243,6 +8318,7 @@ namespace LinkDispositionChecker
             _aiSettings.Enabled = !_running;
             _aiReview.Enabled = !_running && _allRows.Any(AiReviewPolicy.IsEligible);
             _openLog.Enabled = File.Exists(ExecutionLogWriter.LatestLogPath);
+            _acceptancePack.Enabled = !_running && _allRows.Count > 0;
         }
 
         private void ImportClick(object sender, EventArgs e)
@@ -8322,7 +8398,7 @@ namespace LinkDispositionChecker
             if (_allRows.Count == 0) { MessageBox.Show("当前没有可导出的结果。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
             if (!String.IsNullOrEmpty(_excelPath) && _excelPlans.Count > 0)
             {
-                DialogResult answer = MessageBox.Show("将在原 Excel 中回填一列“链接是否失效”，并先自动创建备份。\n\n是否继续？",
+                DialogResult answer = MessageBox.Show("将在原 Excel 中回填“链接是否失效、公开可访问性、合同验收建议”三列，并先自动创建备份。\n\n是否继续？",
                     "写回原 Excel", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
                 if (answer != DialogResult.Yes) return;
                 try
@@ -8354,9 +8430,22 @@ namespace LinkDispositionChecker
         {
             using (var writer = new StreamWriter(path, false, new UTF8Encoding(true)))
             {
-                writer.WriteLine("序号,核验结果,AI建议,AI置信度,AI模型,HTTP状态,平台,内容类型,发文作者,页面标题,原链接,最终地址,判定依据,追证阶段,取证线路,站点对照,基础设施,核验时间,耗时");
+                writer.WriteLine("序号,内容状态,公开可访问性,合同验收建议,证据等级,供应商行动,核验结果,AI建议,AI置信度,AI模型,HTTP状态,平台,内容类型,发文作者,页面标题,原链接,最终地址,判定依据,追证阶段,取证线路,站点对照,基础设施,核验时间,耗时");
                 foreach (var r in rows.OrderBy(x => x.Number))
-                    writer.WriteLine(String.Join(",", new[] { r.Number.ToString(), Csv(Checker.NormalizeVisibleVerdict(r.Verdict)), Csv(r.AiDecision), Csv(r.AiReviewed ? r.AiConfidence.ToString("P0") : ""), Csv(r.AiModel), Csv(r.StatusCode), Csv(r.Platform), Csv(r.ContentType), Csv(r.ExpectedAuthor), Csv(r.Title), Csv(r.OriginalUrl), Csv(r.FinalUrl), Csv(r.Evidence), Csv(r.EvidenceStage), Csv(r.AcquisitionAttempts), Csv(r.SiteHealth), Csv(r.InfrastructureKey), Csv(r.CheckedAt), Csv(r.Duration) }));
+                {
+                    ContractAcceptanceView view = ContractAcceptanceClassifier.Evaluate(r);
+                    writer.WriteLine(String.Join(",", new[]
+                    {
+                        r.Number.ToString(), Csv(view.ContentStatus), Csv(view.PublicReachability),
+                        Csv(view.AcceptanceRecommendation), Csv(view.EvidenceGrade), Csv(view.SupplierAction),
+                        Csv(Checker.NormalizeVisibleVerdict(r.Verdict)), Csv(r.AiDecision),
+                        Csv(r.AiReviewed ? r.AiConfidence.ToString("P0") : ""), Csv(r.AiModel),
+                        Csv(r.StatusCode), Csv(r.Platform), Csv(r.ContentType), Csv(r.ExpectedAuthor),
+                        Csv(r.Title), Csv(r.OriginalUrl), Csv(r.FinalUrl), Csv(r.Evidence),
+                        Csv(r.EvidenceStage), Csv(r.AcquisitionAttempts), Csv(r.SiteHealth),
+                        Csv(r.InfrastructureKey), Csv(r.CheckedAt), Csv(r.Duration)
+                    }));
+                }
             }
         }
 

@@ -18,7 +18,17 @@ internal static class FastAuditRunner
     public static int Main(string[] args)
     {
         if (args.Length < 2) return 2;
-        return Run(args[0], args[1]).GetAwaiter().GetResult();
+        try
+        {
+            return Run(args[0], args[1]).GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("ERROR_TYPE=" + ex.GetType().FullName);
+            Console.Error.WriteLine("ERROR_MESSAGE=" + (ex.Message ?? "").Replace("\r", " ").Replace("\n", " "));
+            Console.Error.WriteLine("ERROR_STACK=" + (ex.StackTrace ?? "").Replace("\r", " ").Replace("\n", " | "));
+            return 99;
+        }
     }
 
     private static async Task<CheckResult> CheckOne(
@@ -56,6 +66,7 @@ internal static class FastAuditRunner
         result.SourceSheet = job.SourceSheet;
         result.SourceRow = job.SourceRow;
         result.InfrastructureKey = job.InfrastructureKey;
+        ContractAcceptanceClassifier.Apply(result);
         return result;
     }
 
@@ -138,12 +149,19 @@ internal static class FastAuditRunner
         List<CheckResult> ordered = results.OrderBy(item => item.Number).ToList();
         using (var writer = new StreamWriter(output, false, new UTF8Encoding(true)))
         {
-            writer.WriteLine("序号,核验结果,AI判断,AI置信度,AI模型,HTTP状态,平台,内容类型,发文作者,页面标题,原链接,最终地址,判定依据,追证阶段,取证线路,站点对照,基础设施,核验时间,耗时");
+            writer.WriteLine("序号,核验结果,内容状态,公开可访问性,合同验收建议,证据等级,供应商行动,AI判断,AI置信度,AI模型,HTTP状态,平台,内容类型,发文作者,页面标题,原链接,最终地址,判定依据,追证阶段,取证线路,站点对照,基础设施,核验时间,耗时");
             foreach (CheckResult result in ordered)
+            {
+                ContractAcceptanceView view = ContractAcceptanceClassifier.Evaluate(result);
                 writer.WriteLine(String.Join(",", new[]
                 {
                     result.Number.ToString(),
                     Csv(result.Verdict),
+                    Csv(view.ContentStatus),
+                    Csv(view.PublicReachability),
+                    Csv(view.AcceptanceRecommendation),
+                    Csv(view.EvidenceGrade),
+                    Csv(view.SupplierAction),
                     Csv(result.AiDecision),
                     Csv(result.AiReviewed ? result.AiConfidence.ToString("P0") : ""),
                     Csv(result.AiModel),
@@ -162,6 +180,7 @@ internal static class FastAuditRunner
                     Csv(result.CheckedAt),
                     Csv(result.Duration)
                 }));
+            }
         }
 
         int removed = ordered.Count(item => item.Verdict == "已失效");
@@ -169,15 +188,18 @@ internal static class FastAuditRunner
         int unavailable = ordered.Count(item => item.Verdict == "公网不可访问");
         int temporary = ordered.Count(item => item.Verdict == "暂时异常");
         int review = ordered.Count - removed - alive - unavailable - temporary;
-        double explicitRate = ordered.Count == 0 ? 0 :
-            100.0 * (removed + alive + unavailable) / ordered.Count;
+        int contentResolved = removed + alive;
+        double contentResolvedRate = ordered.Count == 0 ? 0 :
+            100.0 * contentResolved / ordered.Count;
         Console.WriteLine("TOTAL=" + ordered.Count);
         Console.WriteLine("REMOVED=" + removed);
         Console.WriteLine("ALIVE=" + alive);
         Console.WriteLine("PUBLIC_UNAVAILABLE=" + unavailable);
         Console.WriteLine("TEMPORARY=" + temporary);
         Console.WriteLine("REVIEW=" + review);
-        Console.WriteLine("EXPLICIT_RATE=" + explicitRate.ToString("0.00") + "%");
+        Console.WriteLine("CONTENT_RESOLVED=" + contentResolved);
+        Console.WriteLine("CONTENT_RESOLVED_RATE=" + contentResolvedRate.ToString("0.00") + "%");
+        Console.WriteLine("CONTRACT_PENDING=" + (ordered.Count - contentResolved));
         Console.WriteLine("PAUSED_GROUPS=" + restrictions.PausedPlatforms.Count);
         Console.WriteLine("OUTPUT=" + output);
         return ordered.Count == jobs.Count ? 0 : 1;

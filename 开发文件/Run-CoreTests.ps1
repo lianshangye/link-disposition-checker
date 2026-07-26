@@ -9,6 +9,7 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $source = Join-Path $PSScriptRoot 'LinkDispositionChecker.cs'
 $aiSource = Join-Path $PSScriptRoot 'AiReview.cs'
 $logSource = Join-Path $PSScriptRoot 'RunLogging.cs'
+$acceptanceSource = Join-Path $PSScriptRoot 'AcceptanceEvidence.cs'
 $dependencyRoot = Join-Path $PSScriptRoot 'dependencies'
 $webViewCore = Join-Path $dependencyRoot 'Microsoft.Web.WebView2.Core.dll'
 $webViewForms = Join-Path $dependencyRoot 'Microsoft.Web.WebView2.WinForms.dll'
@@ -46,7 +47,7 @@ function Invoke-Test([string]$Name, [string]$TestSource, [string]$MainClass,
         '/optimize+',
         ('/out:' + $executable),
         ('/main:' + $MainClass)
-    ) + $references + @($source, $aiSource, $logSource, (Join-Path $PSScriptRoot $TestSource))
+    ) + $references + @($source, $aiSource, $logSource, $acceptanceSource, (Join-Path $PSScriptRoot $TestSource))
     & $Compiler @compilerArguments
     if ($LASTEXITCODE -ne 0) { throw "$Name compilation failed." }
     foreach ($argument in $Arguments) {

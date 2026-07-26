@@ -25,8 +25,8 @@ using Microsoft.Web.WebView2.WinForms;
 
 [assembly: AssemblyTitle("侵权链接处置核验工具")]
 [assembly: AssemblyProduct("侵权链接处置核验工具")]
-[assembly: AssemblyVersion("3.16.0.0")]
-[assembly: AssemblyFileVersion("3.16.0.0")]
+[assembly: AssemblyVersion("4.0.0.0")]
+[assembly: AssemblyFileVersion("4.0.0.0")]
 
 namespace LinkDispositionChecker
 {
@@ -59,6 +59,10 @@ namespace LinkDispositionChecker
         public string AiModel { get; set; }
         public int AiAttemptCount { get; set; }
         public string AiLastError { get; set; }
+        public string EvidenceStage { get; set; }
+        public string AcquisitionAttempts { get; set; }
+        public string SiteHealth { get; set; }
+        public string InfrastructureKey { get; set; }
     }
 
     internal sealed class RenderedPageData
@@ -170,6 +174,84 @@ namespace LinkDispositionChecker
         public string Error { get; set; }
     }
 
+    internal sealed class RemoteEvidenceSettings
+    {
+        public int Version { get; set; }
+        public string[] Endpoints { get; set; }
+    }
+
+    internal sealed class RemoteEvidenceResponse
+    {
+        public int Status { get; set; }
+        public string FinalUrl { get; set; }
+        public string Title { get; set; }
+        public string Text { get; set; }
+        public string Html { get; set; }
+        public string Source { get; set; }
+        public string Error { get; set; }
+    }
+
+    internal static class RemoteEvidenceStore
+    {
+        private static readonly JavaScriptSerializer Serializer = new JavaScriptSerializer { MaxJsonLength = 1000000 };
+        internal static readonly string SettingsPath =
+            Path.Combine(StoragePaths.UserDataDirectory, "remote-evidence.json");
+
+        internal static List<string> LoadEndpoints()
+        {
+            var endpoints = new List<string>();
+            try
+            {
+                if (File.Exists(SettingsPath))
+                {
+                    RemoteEvidenceSettings settings = Serializer.Deserialize<RemoteEvidenceSettings>(
+                        File.ReadAllText(SettingsPath, Encoding.UTF8));
+                    if (settings != null && settings.Endpoints != null) endpoints.AddRange(settings.Endpoints);
+                }
+            }
+            catch { }
+            string environment = Environment.GetEnvironmentVariable("LINK_CHECKER_REMOTE_EVIDENCE_ENDPOINTS") ?? "";
+            if (!String.IsNullOrWhiteSpace(environment))
+                endpoints.AddRange(environment.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries));
+            return endpoints.Select(item => (item ?? "").Trim())
+                .Where(item =>
+                {
+                    Uri uri;
+                    return Uri.TryCreate(item.Replace("{url}", "https%3A%2F%2Fexample.com"), UriKind.Absolute, out uri) &&
+                        uri.Scheme == Uri.UriSchemeHttps;
+                })
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(4)
+                .ToList();
+        }
+
+        internal static void SaveEndpoints(IEnumerable<string> endpoints)
+        {
+            List<string> validated = (endpoints ?? Enumerable.Empty<string>())
+                .Select(item => (item ?? "").Trim())
+                .Where(item => item.Length > 0)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(4)
+                .ToList();
+            foreach (string endpoint in validated)
+            {
+                Uri uri;
+                string check = endpoint.Replace("{url}", "https%3A%2F%2Fexample.com");
+                if (!Uri.TryCreate(check, UriKind.Absolute, out uri) || uri.Scheme != Uri.UriSchemeHttps)
+                    throw new InvalidOperationException("远程取证节点必须使用 HTTPS：" + endpoint);
+            }
+            Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath));
+            string temporary = SettingsPath + ".tmp";
+            File.WriteAllText(temporary, Serializer.Serialize(new RemoteEvidenceSettings
+            {
+                Version = 1,
+                Endpoints = validated.ToArray()
+            }), new UTF8Encoding(false));
+            if (File.Exists(SettingsPath)) File.Replace(temporary, SettingsPath, null);
+            else File.Move(temporary, SettingsPath);
+        }
+    }
+
     internal sealed class ExcelLinkSource
     {
         public string Url { get; set; }
@@ -213,6 +295,7 @@ namespace LinkDispositionChecker
         public string ContentType { get; set; }
         public string SourceSheet { get; set; }
         public int SourceRow { get; set; }
+        public string InfrastructureKey { get; set; }
 
         public string Key
         {
@@ -492,7 +575,7 @@ namespace LinkDispositionChecker
 
     internal static class SessionStore
     {
-        public const string CurrentEngineVersion = "3.16.0";
+        public const string CurrentEngineVersion = "4.0.0";
         private static readonly object SyncRoot = new object();
         private static readonly JavaScriptSerializer Serializer = new JavaScriptSerializer { MaxJsonLength = Int32.MaxValue };
         public static readonly string SessionPath = Path.Combine(StoragePaths.UserDataDirectory, "last-session.json");
@@ -1543,6 +1626,7 @@ namespace LinkDispositionChecker
         private readonly HttpClient _client;
         private readonly HttpClient _directClient;
         private readonly HttpClient _zhihuClient;
+        private readonly HttpClient _remoteEvidenceClient;
         private readonly int _bodyBytes;
         private static readonly SemaphoreSlim ZhihuProbeGate = new SemaphoreSlim(1, 1);
         private static readonly SemaphoreSlim BaiduPublicProbeGate = new SemaphoreSlim(1, 1);
@@ -1560,6 +1644,8 @@ namespace LinkDispositionChecker
         private static readonly SemaphoreSlim BrowserSemaphore = new SemaphoreSlim(1, 1);
         private static readonly ConcurrentDictionary<string, RequestPacingState> RequestPacing =
             new ConcurrentDictionary<string, RequestPacingState>(StringComparer.OrdinalIgnoreCase);
+        private static readonly ConcurrentDictionary<string, string> InfrastructureByHost =
+            new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private static readonly string BrowserPath = FindBrowserPath();
 
         private sealed class RequestPacingState
@@ -1578,12 +1664,70 @@ namespace LinkDispositionChecker
                 "gifshow.com", "bilibili.com", "baidu.com", "dongchedi.com", "xueqiu.com"
             })
                 if (host == platform || host.EndsWith("." + platform, StringComparison.Ordinal)) return platform;
+            string infrastructure;
+            if (host.Length > 0 && InfrastructureByHost.TryGetValue(host, out infrastructure) &&
+                !String.IsNullOrWhiteSpace(infrastructure)) return infrastructure;
             return host;
+        }
+
+        internal static async Task<Dictionary<string, int>> RegisterInfrastructureAsync(
+            IEnumerable<CheckJob> jobs, CancellationToken token)
+        {
+            List<string> hosts = (jobs ?? Enumerable.Empty<CheckJob>())
+                .Where(item => item != null)
+                .Select(item =>
+                {
+                    Uri uri;
+                    return Uri.TryCreate(item.Url, UriKind.Absolute, out uri)
+                        ? (uri.Host ?? "").Trim().Trim('.').ToLowerInvariant() : "";
+                })
+                .Where(host => host.Length > 0)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            var gate = new SemaphoreSlim(12, 12);
+            var tasks = hosts.Select(async host =>
+            {
+                await gate.WaitAsync(token);
+                try
+                {
+                    Task<IPAddress[]> lookup = Dns.GetHostAddressesAsync(host);
+                    Task finished = await Task.WhenAny(lookup, Task.Delay(3500, token));
+                    token.ThrowIfCancellationRequested();
+                    if (finished != lookup) return;
+                    IPAddress address = (await lookup)
+                        .Where(item => item != null)
+                        .OrderBy(item => item.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork ? 0 : 1)
+                        .FirstOrDefault();
+                    if (address != null)
+                        InfrastructureByHost[host] = "IP " + address;
+                }
+                catch { }
+                finally { gate.Release(); }
+            }).ToArray();
+            await Task.WhenAll(tasks);
+
+            foreach (CheckJob job in jobs ?? Enumerable.Empty<CheckJob>())
+            {
+                Uri uri;
+                string infrastructure;
+                if (job != null && Uri.TryCreate(job.Url, UriKind.Absolute, out uri) &&
+                    InfrastructureByHost.TryGetValue(uri.Host, out infrastructure))
+                    job.InfrastructureKey = infrastructure;
+            }
+            return (jobs ?? Enumerable.Empty<CheckJob>())
+                .Where(item => item != null)
+                .GroupBy(item => String.IsNullOrWhiteSpace(item.InfrastructureKey)
+                    ? BatchPreflightPlanner.PlatformKey(item) : item.InfrastructureKey,
+                    StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
         }
 
         internal static int RequestPacingMilliseconds(Uri uri)
         {
             string key = RequestPacingKey(uri);
+            IPAddress address;
+            if (IPAddress.TryParse(uri == null ? "" : uri.Host, out address) &&
+                IPAddress.IsLoopback(address)) return 0;
             return new[]
             {
                 "zhihu.com", "weibo.com", "weibo.cn", "douyin.com", "iesdouyin.com",
@@ -1690,6 +1834,8 @@ namespace LinkDispositionChecker
             _client = CreateClient(true);
             _directClient = CreateClient(false);
             _zhihuClient = CreateClient(true);
+            _remoteEvidenceClient = CreateClient(true);
+            _remoteEvidenceClient.Timeout = TimeSpan.FromSeconds(25);
             _bodyBytes = Math.Max(180000, bodyBytes);
         }
 
@@ -4317,6 +4463,247 @@ namespace LinkDispositionChecker
                 Regex.IsMatch(html, "(?:desc|description|share_title)\\D{0,16}[^\\\"']{4,}", RegexOptions.IgnoreCase);
         }
 
+        internal async Task<CheckResult> EscalateEvidenceAsync(CheckResult result, CancellationToken token)
+        {
+            if (result == null || !NetworkRestrictionCircuitBreaker.IsTransientRestriction(result)) return result;
+            Uri original;
+            if (!Uri.TryCreate(result.OriginalUrl, UriKind.Absolute, out original)) return result;
+
+            var attempts = new List<string>();
+            var trail = result.EvidenceTrail ?? new List<VerificationEvidence>();
+            result.EvidenceTrail = trail;
+            result.InfrastructureKey = RequestPacingKey(original);
+            trail.Add(new VerificationEvidence
+            {
+                Kind = EvidenceKind.TemporaryFailure,
+                Strength = EvidenceStrength.Supporting,
+                Source = "initial-request",
+                Platform = result.Platform,
+                Message = "首次访问未取得正文：" + (result.Evidence ?? ""),
+                FinalUrl = result.FinalUrl,
+                IsCurrentResponse = true
+            });
+
+            Uri clean = BuildCleanEvidenceUri(original);
+            ProbeResponse cleanRemovalCandidate = null;
+            if (clean != null && !String.Equals(clean.AbsoluteUri, original.AbsoluteUri, StringComparison.OrdinalIgnoreCase))
+            {
+                attempts.Add("去除分享/统计参数");
+                ProbeResponse cleanProbe = await TryReadProbeAsync(clean.AbsoluteUri, null, token);
+                if (cleanProbe != null && (cleanProbe.Status == 404 || cleanProbe.Status == 410))
+                    cleanRemovalCandidate = cleanProbe;
+                else if (ApplyProbeEvidence(result, cleanProbe, "规范化链接", clean, trail))
+                {
+                    result.AcquisitionAttempts = String.Join(" → ", attempts);
+                    result.EvidenceStage = "自动追证已确认";
+                    return result;
+                }
+            }
+
+            attempts.Add("同站健康对照");
+            Uri siteRoot = new UriBuilder(original.Scheme, original.Host,
+                original.IsDefaultPort ? -1 : original.Port, "/").Uri;
+            ProbeResponse rootProbe = await TryReadProbeAsync(siteRoot.AbsoluteUri, null, token);
+            if (rootProbe != null)
+            {
+                if (rootProbe.Status >= 200 && rootProbe.Status < 400)
+                {
+                    result.SiteHealth = "站点首页可访问";
+                    trail.Add(new VerificationEvidence
+                    {
+                        Kind = EvidenceKind.IdentityOnly,
+                        Strength = EvidenceStrength.Supporting,
+                        Source = "site-control",
+                        Platform = result.Platform,
+                        Message = "同站首页返回 HTTP " + rootProbe.Status + "，目标链接异常不是整站完全离线",
+                        FinalUrl = rootProbe.FinalUrl,
+                        IsCurrentResponse = true
+                    });
+                    if (cleanRemovalCandidate != null &&
+                        ApplyProbeEvidence(result, cleanRemovalCandidate, "规范化链接", clean, trail))
+                    {
+                        result.AcquisitionAttempts = String.Join(" → ", attempts);
+                        result.EvidenceStage = "自动追证已确认";
+                        return result;
+                    }
+                }
+                else if (rootProbe.Status >= 500)
+                {
+                    result.SiteHealth = "站点整体异常";
+                    trail.Add(new VerificationEvidence
+                    {
+                        Kind = EvidenceKind.TemporaryFailure,
+                        Strength = EvidenceStrength.Strong,
+                        Source = "site-control",
+                        Platform = result.Platform,
+                        Message = "同站首页也返回 HTTP " + rootProbe.Status + "，当前更符合整站或共享基础设施异常",
+                        FinalUrl = rootProbe.FinalUrl,
+                        IsCurrentResponse = true
+                    });
+                }
+                else result.SiteHealth = "站点首页 HTTP " + rootProbe.Status;
+            }
+            else result.SiteHealth = "同站首页未响应";
+
+            List<string> remoteEndpoints = RemoteEvidenceStore.LoadEndpoints();
+            if (remoteEndpoints.Count > 0)
+            {
+                int endpointNumber = 0;
+                foreach (string endpoint in remoteEndpoints)
+                {
+                    endpointNumber++;
+                    attempts.Add("远程节点" + endpointNumber);
+                    RemoteEvidenceResponse remote = await TryRemoteEvidenceAsync(endpoint, original, token);
+                    if (ApplyRemoteEvidence(result, remote, "remote-" + endpointNumber, trail))
+                    {
+                        result.AcquisitionAttempts = String.Join(" → ", attempts);
+                        result.EvidenceStage = "远程追证已确认";
+                        return result;
+                    }
+                }
+                result.EvidenceStage = "本地与远程追证均未确认";
+            }
+            else
+            {
+                attempts.Add("远程节点未配置");
+                result.EvidenceStage = "本地追证完成，远程节点未配置";
+            }
+
+            result.AcquisitionAttempts = String.Join(" → ", attempts);
+            string comparison = String.IsNullOrWhiteSpace(result.SiteHealth) ? "" : "；" + result.SiteHealth;
+            result.Evidence = "自动追证仍未取得目标正文或明确删除页" + comparison +
+                (remoteEndpoints.Count == 0 ? "；尚未配置独立远程取证节点" : "；已尝试 " + remoteEndpoints.Count + " 个远程节点");
+            return result;
+        }
+
+        private static Uri BuildCleanEvidenceUri(Uri original)
+        {
+            if (original == null) return null;
+            try
+            {
+                var builder = new UriBuilder(original) { Fragment = "" };
+                if (String.IsNullOrWhiteSpace(builder.Query)) return builder.Uri;
+                var kept = new List<string>();
+                foreach (string pair in builder.Query.TrimStart('?').Split('&'))
+                {
+                    if (String.IsNullOrWhiteSpace(pair)) continue;
+                    string key = pair.Split('=')[0].Trim().ToLowerInvariant();
+                    if (key.StartsWith("utm_", StringComparison.Ordinal) ||
+                        new[] { "share_token", "share_uid", "share_did", "timestamp", "tt_from",
+                            "module_name", "category_new", "upstream_biz", "use_new_style",
+                            "isappinstalled", "sharefrom", "share_source" }.Contains(key))
+                        continue;
+                    kept.Add(pair);
+                }
+                builder.Query = String.Join("&", kept);
+                return builder.Uri;
+            }
+            catch { return original; }
+        }
+
+        private static bool ApplyProbeEvidence(CheckResult result, ProbeResponse probe, string source,
+            Uri requested, List<VerificationEvidence> trail)
+        {
+            if (result == null || probe == null) return false;
+            if (probe.Status == 404 || probe.Status == 410)
+            {
+                result.Verdict = "已失效";
+                result.StatusCode = probe.Status.ToString();
+                result.FinalUrl = String.IsNullOrWhiteSpace(probe.FinalUrl) ? requested.AbsoluteUri : probe.FinalUrl;
+                result.Evidence = source + "返回 HTTP " + probe.Status + "，确认目标地址不存在";
+                trail.Add(new VerificationEvidence
+                {
+                    Kind = EvidenceKind.TargetRemovalExplicit,
+                    Strength = EvidenceStrength.Conclusive,
+                    Source = source,
+                    Platform = result.Platform,
+                    Message = result.Evidence,
+                    FinalUrl = result.FinalUrl,
+                    IsCurrentResponse = true
+                });
+                return true;
+            }
+            if (probe.Status < 200 || probe.Status >= 400 || String.IsNullOrWhiteSpace(probe.Body)) return false;
+            RenderedPageData page = BuildRenderedPageData(probe.Body,
+                String.IsNullOrWhiteSpace(probe.FinalUrl) ? requested.AbsoluteUri : probe.FinalUrl);
+            DeepDecision decision = ClassifyRenderedPage(result, page);
+            if (!decision.Resolved || (decision.Verdict != "已失效" && decision.Verdict != "仍可访问")) return false;
+            result.Verdict = decision.Verdict;
+            result.StatusCode = probe.Status.ToString();
+            result.FinalUrl = page.Url;
+            result.Title = page.Title;
+            result.AnalysisContext = AiReviewPolicy.BuildObservedContext(page.Title, page.MainText, page.Text);
+            result.Evidence = source + "确认：" + decision.Evidence;
+            trail.Add(new VerificationEvidence
+            {
+                Kind = decision.Verdict == "已失效" ? EvidenceKind.TargetRemovalExplicit : EvidenceKind.TargetContentPresent,
+                Strength = EvidenceStrength.Strong,
+                Source = source,
+                Platform = result.Platform,
+                Message = result.Evidence,
+                FinalUrl = result.FinalUrl,
+                IsCurrentResponse = true
+            });
+            return true;
+        }
+
+        private async Task<RemoteEvidenceResponse> TryRemoteEvidenceAsync(string endpoint, Uri target,
+            CancellationToken token)
+        {
+            try
+            {
+                HttpResponseMessage response;
+                if (endpoint.IndexOf("{url}", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    string requestUrl = Regex.Replace(endpoint, "\\{url\\}",
+                        Uri.EscapeDataString(target.AbsoluteUri), RegexOptions.IgnoreCase);
+                    response = await _remoteEvidenceClient.GetAsync(requestUrl, token);
+                }
+                else
+                {
+                    string payload = new JavaScriptSerializer().Serialize(new { url = target.AbsoluteUri });
+                    response = await _remoteEvidenceClient.PostAsync(endpoint,
+                        new StringContent(payload, Encoding.UTF8, "application/json"), token);
+                }
+                using (response)
+                {
+                    if (!response.IsSuccessStatusCode) return new RemoteEvidenceResponse
+                    {
+                        Error = "远程节点返回 HTTP " + (int)response.StatusCode,
+                        Source = endpoint
+                    };
+                    string body = await ReadLimitedBodyAsync(response.Content, Math.Min(_bodyBytes, 1000000), token);
+                    RemoteEvidenceResponse parsed = new JavaScriptSerializer { MaxJsonLength = 1200000 }
+                        .Deserialize<RemoteEvidenceResponse>(body);
+                    if (parsed == null) parsed = new RemoteEvidenceResponse { Error = "远程节点响应无法解析" };
+                    if (String.IsNullOrWhiteSpace(parsed.Source)) parsed.Source = endpoint;
+                    return parsed;
+                }
+            }
+            catch (Exception ex)
+            {
+                return new RemoteEvidenceResponse { Error = FriendlyError(ex), Source = endpoint };
+            }
+        }
+
+        private static bool ApplyRemoteEvidence(CheckResult result, RemoteEvidenceResponse remote,
+            string source, List<VerificationEvidence> trail)
+        {
+            if (result == null || remote == null || !String.IsNullOrWhiteSpace(remote.Error)) return false;
+            string body = !String.IsNullOrWhiteSpace(remote.Html) ? remote.Html :
+                "<title>" + WebUtility.HtmlEncode(remote.Title ?? "") + "</title><main>" +
+                WebUtility.HtmlEncode(remote.Text ?? "") + "</main>";
+            var probe = new ProbeResponse
+            {
+                Status = remote.Status,
+                Body = body,
+                FinalUrl = String.IsNullOrWhiteSpace(remote.FinalUrl) ? result.OriginalUrl : remote.FinalUrl
+            };
+            Uri requested;
+            if (!Uri.TryCreate(result.OriginalUrl, UriKind.Absolute, out requested)) return false;
+            return ApplyProbeEvidence(result, probe, source, requested, trail);
+        }
+
         private async Task<HttpResponseMessage> SendWithFallbackAsync(Uri uri, CancellationToken token)
         {
             using (var fallbackBudget = CancellationTokenSource.CreateLinkedTokenSource(token))
@@ -5158,13 +5545,16 @@ namespace LinkDispositionChecker
         private bool _loginPreparation = true;
         private bool _completionShown;
         private readonly bool _fastMode;
+        private readonly bool _autoStart;
         private readonly HashSet<string> _pausedPlatformKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         public int ResolvedCount { get; private set; }
 
-        public DeepReviewForm(IEnumerable<CheckResult> items, Action<CheckResult> onProgress, bool fastMode = false)
+        public DeepReviewForm(IEnumerable<CheckResult> items, Action<CheckResult> onProgress,
+            bool fastMode = false, bool autoStart = false)
         {
             _fastMode = fastMode;
+            _autoStart = autoStart;
             IEnumerable<CheckResult> sourceItems = items ?? Enumerable.Empty<CheckResult>();
             _items = fastMode ? sourceItems.ToList() : sourceItems
                 .OrderBy(GetReviewBatchOrder)
@@ -5247,6 +5637,7 @@ namespace LinkDispositionChecker
                     ? (_fastMode ? "可直接开始内置浏览器快速复核。" : "可直接点击“开始后台复核（登录可选）”。")
                     : (_fastMode ? "登录是可选项；也可直接开始，工具会先检查各平台公开页面状态。" : BuildReviewBatchSummary() + "。这些是后台复核候选，不是要求你逐条手动查看的数量；登录是可选项，开始后会自动继续下一条。");
                 if (_loginPlatforms.Items.Count > 0) _loginPlatforms.SelectedIndex = 0;
+                if (_autoStart) await ContinueAfterVerificationAsync();
             }
             catch (Exception ex)
             {
@@ -5267,7 +5658,12 @@ namespace LinkDispositionChecker
                 _status.Text = completion;
                 _stop.Text = "关闭";
                 _continue.Enabled = false;
-                if (!_fastMode && !_completionShown)
+                if (_autoStart)
+                {
+                    _completionShown = true;
+                    Close();
+                }
+                else if (!_fastMode && !_completionShown)
                 {
                     _completionShown = true;
                     WindowState = FormWindowState.Normal;
@@ -6275,13 +6671,18 @@ namespace LinkDispositionChecker
 
         internal static string PlatformKey(CheckJob job)
         {
+            string platform = job == null ? "" : (job.Platform ?? "").Trim();
+            bool genericPlatform = String.IsNullOrWhiteSpace(platform) ||
+                platform == "网媒" || platform == "未知" || platform == "未知平台";
+            if (genericPlatform && job != null && !String.IsNullOrWhiteSpace(job.InfrastructureKey))
+                return job.InfrastructureKey.Trim();
             Uri uri;
             if (job != null && Uri.TryCreate(job.Url, UriKind.Absolute, out uri))
             {
                 string key = Checker.RequestPacingKey(uri);
                 if (!String.IsNullOrWhiteSpace(key)) return key;
             }
-            if (job != null && !String.IsNullOrWhiteSpace(job.Platform)) return job.Platform.Trim();
+            if (!String.IsNullOrWhiteSpace(platform)) return platform;
             return "未知平台";
         }
     }
@@ -6423,6 +6824,73 @@ namespace LinkDispositionChecker
         }
     }
 
+    internal sealed class RemoteEvidenceSettingsForm : Form
+    {
+        private readonly TextBox _endpoints = new TextBox();
+
+        internal RemoteEvidenceSettingsForm()
+        {
+            Text = "远程取证节点设置";
+            StartPosition = FormStartPosition.CenterParent;
+            Size = new Size(720, 470);
+            MinimumSize = new Size(620, 400);
+            Font = new Font("微软雅黑", 9.5f);
+            BackColor = Color.White;
+
+            var title = new Label
+            {
+                Text = "独立远程取证节点",
+                Font = new Font("微软雅黑", 15, FontStyle.Bold),
+                AutoSize = true,
+                Location = new Point(24, 20)
+            };
+            var help = new Label
+            {
+                Text = "每行一个 HTTPS 节点，最多 4 个。节点用于从不同网络出口读取公开网页。\n" +
+                    "支持 GET 模板（地址中包含 {url}）或 POST JSON：{\"url\":\"目标地址\"}。\n" +
+                    "节点返回 JSON：status、finalUrl、title、text/html、source、error。未配置时只执行本地追证。",
+                AutoSize = true,
+                ForeColor = Color.FromArgb(75, 85, 99),
+                Location = new Point(25, 62)
+            };
+            _endpoints.Multiline = true;
+            _endpoints.ScrollBars = ScrollBars.Vertical;
+            _endpoints.Location = new Point(28, 135);
+            _endpoints.Size = new Size(646, 210);
+            _endpoints.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+            _endpoints.Text = String.Join(Environment.NewLine, RemoteEvidenceStore.LoadEndpoints());
+
+            var save = new Button
+            {
+                Text = "保存",
+                Size = new Size(110, 36),
+                Location = new Point(564, 365),
+                Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
+                BackColor = Color.FromArgb(38, 99, 177),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat
+            };
+            save.FlatAppearance.BorderSize = 0;
+            save.Click += delegate
+            {
+                try
+                {
+                    RemoteEvidenceStore.SaveEndpoints(_endpoints.Lines);
+                    DialogResult = DialogResult.OK;
+                    Close();
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(ex.Message, "无法保存", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            };
+            Controls.Add(title);
+            Controls.Add(help);
+            Controls.Add(_endpoints);
+            Controls.Add(save);
+        }
+    }
+
     internal sealed class MainForm : Form
     {
         private readonly TextBox _input = new TextBox();
@@ -6436,6 +6904,7 @@ namespace LinkDispositionChecker
         private readonly Button _deepReview = new Button();
         private readonly Button _aiReview = new Button();
         private readonly Button _aiSettings = new Button();
+        private readonly Button _remoteSettings = new Button();
         private readonly Button _open = new Button();
         private readonly Button _openLog = new Button();
         private readonly ComboBox _filter = new ComboBox();
@@ -6553,8 +7022,9 @@ namespace LinkDispositionChecker
 
             var toolbar = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = true, AutoScroll = true, Padding = new Padding(0, 6, 0, 4) };
             StyleButton(_start, "开始核验", true); StyleButton(_retryNetwork, "重试访问异常", false);
-            StyleButton(_stop, "停止", false); StyleButton(_deepReview, "启动后台复核候选项", false);
+            StyleButton(_stop, "停止", false); StyleButton(_deepReview, "重新运行后台追证", false);
             StyleButton(_aiReview, "AI 辅助复核", false); StyleButton(_aiSettings, "AI 设置", false);
+            StyleButton(_remoteSettings, "远程取证设置", false);
             StyleButton(_export, "导出结果", false); StyleButton(_open, "打开选中链接", false); StyleButton(_openLog, "查看执行日志", false);
             _stop.Enabled = false; _retryNetwork.Enabled = false; _deepReview.Enabled = false; _aiReview.Enabled = false;
             _start.Click += async delegate { await StartChecksAsync(false); }; _stop.Click += delegate { if (_cancellation != null) _cancellation.Cancel(); };
@@ -6562,8 +7032,13 @@ namespace LinkDispositionChecker
             _deepReview.Click += delegate { RunSelectedReview(); }; _export.Click += ExportClick; _open.Click += OpenSelectedClick;
             _aiReview.Click += async delegate { await RunAiReviewAsync(); };
             _aiSettings.Click += delegate { ShowAiSettings(); };
+            _remoteSettings.Click += delegate
+            {
+                if (_running) return;
+                using (var form = new RemoteEvidenceSettingsForm()) form.ShowDialog(this);
+            };
             _openLog.Click += delegate { OpenLatestExecutionLog(); };
-            toolbar.Controls.Add(_start); toolbar.Controls.Add(_retryNetwork); toolbar.Controls.Add(_stop); toolbar.Controls.Add(_deepReview); toolbar.Controls.Add(_aiReview); toolbar.Controls.Add(_aiSettings); toolbar.Controls.Add(_export); toolbar.Controls.Add(_open); toolbar.Controls.Add(_openLog);
+            toolbar.Controls.Add(_start); toolbar.Controls.Add(_retryNetwork); toolbar.Controls.Add(_stop); toolbar.Controls.Add(_deepReview); toolbar.Controls.Add(_aiReview); toolbar.Controls.Add(_aiSettings); toolbar.Controls.Add(_remoteSettings); toolbar.Controls.Add(_export); toolbar.Controls.Add(_open); toolbar.Controls.Add(_openLog);
             toolbar.Controls.Add(new Label { Text = "    显示：", AutoSize = true, Margin = new Padding(8, 9, 0, 0), ForeColor = Color.FromArgb(75, 85, 99) });
             _filter.DropDownStyle = ComboBoxStyle.DropDownList; _filter.Width = 160; _filter.Margin = new Padding(4, 4, 0, 0);
             _filter.Items.AddRange(new object[] { "全部结果", "高置信已失效", "仍可访问", "访问异常待重试", "证据待复核" }); _filter.SelectedIndex = 0; _filter.SelectedIndexChanged += delegate { ApplyFilter(); };
@@ -6581,7 +7056,7 @@ namespace LinkDispositionChecker
             _progress.Width = 300; _progress.Height = 20; _progress.Location = new Point(26, 10); _progress.Anchor = AnchorStyles.Left;
             _progress.Style = ProgressBarStyle.Continuous;
             _progressText.Text = "尚未开始"; _progressText.AutoSize = true; _progressText.Location = new Point(340, 11); _progressText.ForeColor = Color.FromArgb(75, 85, 99);
-            var note = new Label { Text = "候选项会在你手动启动后后台复核；只有最终无法确认的才需人工查看", AutoSize = true, ForeColor = Color.FromArgb(107, 114, 128), Anchor = AnchorStyles.Top | AnchorStyles.Right, Location = new Point(footer.Width - 560, 11) };
+            var note = new Label { Text = "开始核验后会自动追证和 AI 收尾；只有最终证据冲突的才需人工查看", AutoSize = true, ForeColor = Color.FromArgb(107, 114, 128), Anchor = AnchorStyles.Top | AnchorStyles.Right, Location = new Point(footer.Width - 560, 11) };
             footer.Controls.Add(_activity); footer.Controls.Add(_progress); footer.Controls.Add(_progressText); footer.Controls.Add(note);
             footer.SizeChanged += delegate
             {
@@ -6599,7 +7074,10 @@ namespace LinkDispositionChecker
             _grid.ColumnHeadersHeight = 38; _grid.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(238, 242, 247); _grid.ColumnHeadersDefaultCellStyle.ForeColor = Color.FromArgb(55, 65, 81);
             _grid.ColumnHeadersDefaultCellStyle.Font = new Font("微软雅黑", 9.2f, FontStyle.Bold); _grid.EnableHeadersVisualStyles = false;
             AddColumn("Number", "#", 46); AddColumn("Verdict", "核验结果", 130); AddColumn("AiDecision", "AI建议", 105); AddColumn("StatusCode", "HTTP", 68); AddColumn("Platform", "平台", 110); AddColumn("ContentType", "内容类型", 75); AddColumn("ExpectedAuthor", "发文作者", 120); AddColumn("Title", "页面标题", 190);
-            AddColumn("OriginalUrl", "原链接", 300); AddColumn("Evidence", "判定依据", 330); AddColumn("FinalUrl", "最终地址", 250); AddColumn("CheckedAt", "核验时间", 145); AddColumn("Duration", "耗时", 62);
+            AddColumn("OriginalUrl", "原链接", 300); AddColumn("Evidence", "判定依据", 330);
+            AddColumn("EvidenceStage", "追证阶段", 170); AddColumn("SiteHealth", "站点对照", 155);
+            AddColumn("InfrastructureKey", "基础设施", 140); AddColumn("AcquisitionAttempts", "取证线路", 220);
+            AddColumn("FinalUrl", "最终地址", 250); AddColumn("CheckedAt", "核验时间", 145); AddColumn("Duration", "耗时", 62);
             _grid.CellFormatting += GridCellFormatting;
             _grid.CellDoubleClick += delegate { OpenSelected(); };
         }
@@ -6620,7 +7098,7 @@ namespace LinkDispositionChecker
                 return;
             }
 
-            _running = true; _start.Enabled = false; _retryNetwork.Enabled = false; _stop.Enabled = true; _deepReview.Enabled = false; _import.Enabled = false; _clear.Enabled = false; _input.ReadOnly = true;
+            _running = true; _start.Enabled = false; _retryNetwork.Enabled = false; _stop.Enabled = true; _deepReview.Enabled = false; _remoteSettings.Enabled = false; _import.Enabled = false; _clear.Enabled = false; _input.ReadOnly = true;
             _performance.Enabled = false;
             _networkMode.Enabled = false;
             _resume.Enabled = false;
@@ -6642,17 +7120,20 @@ namespace LinkDispositionChecker
                 !String.IsNullOrWhiteSpace(launchMode) ? launchMode : resumeExisting ? "继续上次核验" : "开始核验",
                 Convert.ToString(_performance.SelectedItem), Convert.ToString(_networkMode.SelectedItem),
                 jobs.Count, _allRows.Count, pendingJobs.Count);
-            var circuitBreaker = new NetworkRestrictionCircuitBreaker(8);
             var platformRestrictions = new PlatformRestrictionController(3);
             string circuitReason = "";
             string executionError = "";
             bool cancelled = false;
             int deferredJobs = 0;
             BatchPreflightSummary preflightSummary = new BatchPreflightSummary();
-            bool explicitNetworkRetry = String.Equals(launchMode, "重试访问异常", StringComparison.Ordinal);
-            bool continueDespitePreflight = explicitNetworkRetry;
             try
             {
+                _progressText.Text = "正在识别共享基础设施并安排访问节奏……";
+                Dictionary<string, int> infrastructures =
+                    await Checker.RegisterInfrastructureAsync(pendingJobs, _cancellation.Token);
+                int sharedGroups = infrastructures.Count(item => item.Value > 1);
+                executionLog.RecordEvent("基础设施识别完成：共 " + infrastructures.Count +
+                    " 组，其中 " + sharedGroups + " 组承载多个链接");
                 if (pendingJobs.Count >= 20)
                 {
                     preflightSummary = await RunBatchPreflightAsync(checker, pendingJobs, platformRestrictions, executionLog);
@@ -6661,29 +7142,7 @@ namespace LinkDispositionChecker
                     pendingJobs = pendingJobs.Where(job => !sampledKeys.Contains(job.Key)).ToList();
                     if (preflightSummary.RequiresDecision)
                     {
-                        if (explicitNetworkRetry)
-                        {
-                            executionLog.RecordEvent("使用者已通过“重试访问异常”明确启动重试；预检异常后继续处理其他站点");
-                        }
-                        else
-                        {
-                            DialogResult decision = MessageBox.Show(
-                                "访问预检发现较多临时异常：\n\n" + preflightSummary.Description +
-                                "\n\n这只说明当前部分网站、代理线路或目标服务器没有返回正常页面，不代表全部链接都无法核验，也不等同于触发风控。" +
-                                "\n\n点击“是”：仍然继续，本轮不再因全局连续异常自动停止；连续异常的站点仍会单独保留待重试。" +
-                                "\n点击“否”：保存当前进度并暂停。",
-                                "访问预检发现异常，是否仍然继续？",
-                                MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button1);
-                            continueDespitePreflight = decision == DialogResult.Yes;
-                            executionLog.RecordEvent(continueDespitePreflight
-                                ? "使用者选择在预检异常后继续，仍保留站点级暂停"
-                                : "使用者选择在预检异常后暂停");
-                        }
-                        if (BatchRunSafetyPolicy.ShouldPauseAfterPreflight(preflightSummary, continueDespitePreflight))
-                        {
-                            circuitReason = "使用者根据网络预检选择暂停（" + preflightSummary.Description + "）";
-                            cancelled = true;
-                        }
+                        executionLog.RecordEvent("预检发现集中异常；4.0 继续处理其他基础设施，不再全局中断");
                     }
                 }
 
@@ -6700,24 +7159,24 @@ namespace LinkDispositionChecker
                             CheckJob job = pendingJobs[index];
                             if (platformRestrictions.IsPaused(job))
                             {
+                                CheckResult deferred = CreateInfrastructureDeferredResult(job,
+                                    PlatformRestrictionController.DisplayLabel(job, BatchPreflightPlanner.PlatformKey(job)));
+                                _uiResults.Enqueue(deferred);
+                                executionLog.Observe(deferred);
+                                Interlocked.Increment(ref _runCompleted);
                                 Interlocked.Increment(ref deferredJobs);
                                 continue;
                             }
                             var item = await checker.CheckAsync(job.Url, job.Number, job.ExpectedTitle, job.ExpectedExcerpt, job.ExpectedAuthor, job.Platform, job.ContentType, false, _cancellation.Token);
+                            if (NetworkRestrictionCircuitBreaker.IsTransientRestriction(item))
+                                item = await checker.EscalateEvidenceAsync(item, _cancellation.Token);
                             item.SourceSheet = job.SourceSheet; item.SourceRow = job.SourceRow;
+                            item.InfrastructureKey = job.InfrastructureKey;
                             _uiResults.Enqueue(item);
                             executionLog.Observe(item);
                             Interlocked.Increment(ref _runCompleted);
                             string pausedPlatform;
                             platformRestrictions.Observe(job, item, out pausedPlatform);
-                            string observedReason;
-                            if (BatchRunSafetyPolicy.ShouldUseGlobalCircuitBreaker(continueDespitePreflight) &&
-                                circuitBreaker.Observe(item, out observedReason))
-                            {
-                                circuitReason = observedReason;
-                                _cancellation.Cancel();
-                                break;
-                            }
                         }
                     }).ToArray();
                     await Task.WhenAll(workers);
@@ -6741,7 +7200,7 @@ namespace LinkDispositionChecker
                 FlushUiResults(Int32.MaxValue);
                 if (_runWatch != null) _runWatch.Stop();
                 _allRows.Sort((a, b) => a.Number.CompareTo(b.Number));
-                _running = false; ApplyFilter(); UpdateStats(); _start.Enabled = true; _stop.Enabled = false; _deepReview.Enabled = _allRows.Any(IsEvidenceReviewCandidate); _import.Enabled = true; _clear.Enabled = true; _input.ReadOnly = false;
+                _running = false; ApplyFilter(); UpdateStats(); _start.Enabled = true; _stop.Enabled = false; _deepReview.Enabled = _allRows.Any(IsEvidenceReviewCandidate); _remoteSettings.Enabled = true; _import.Enabled = true; _clear.Enabled = true; _input.ReadOnly = false;
                 _performance.Enabled = true;
                 _networkMode.Enabled = true;
                 RefreshResumeButton(); SaveSessionSafe();
@@ -6776,10 +7235,7 @@ namespace LinkDispositionChecker
                 }
                 else if (!interrupted && !hasDeferredJobs && _allRows.Count > 0)
                 {
-                    string completionMessage = String.IsNullOrEmpty(_excelPath)
-                        ? "快速核验已结束，进度已自动保存。\n\n“待后台复核候选”不是要求你逐条手动核验的数量。需要进一步确认时，请手动点击“启动后台复核候选项”；启动后会自动后台处理，最后只保留确实无法确认的项目。"
-                        : "快速核验已结束，进度已自动保存，尚未修改原 Excel。\n\n“待后台复核候选”不是要求你逐条手动核验的数量。需要进一步确认时请手动开始，后台完成后再写回 Excel。";
-                    MessageBox.Show(completionMessage, "已完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    _progressText.Text = "基础核验完成，正在自动启动浏览器追证和 AI 收尾……";
                 }
                 else if (!String.IsNullOrWhiteSpace(circuitReason))
                 {
@@ -6789,13 +7245,24 @@ namespace LinkDispositionChecker
                 }
                 else if (hasDeferredJobs)
                 {
-                    MessageBox.Show("本轮已完成所有能够继续处理的任务，没有中断其他站点。\n\n" +
-                        "另有 " + deferredJobs + " 条链接因以下站点连续没有返回正常页面，已保留为“访问异常待重试”：\n\n" +
-                        String.Join("、", pausedPlatforms.Take(12)) +
-                        (pausedPlatforms.Count > 12 ? " 等 " + pausedPlatforms.Count + " 个站点" : "") +
-                        "\n\n稍后点击“重试访问异常”即可只重试异常和未处理链接；它们不会被计入人工复核。",
-                        "本轮完成，部分链接待重试", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    _progressText.Text = "基础核验完成，" + deferredJobs +
+                        " 条共享基础设施异常已生成结果；正在自动处理其余可追证候选……";
                 }
+            }
+
+            if (!cancelled && String.IsNullOrWhiteSpace(executionError))
+            {
+                if (_allRows.Any(IsEvidenceReviewCandidate))
+                    RunDeepReview(true);
+                if (AiSettingsStore.Exists && _allRows.Any(AiReviewPolicy.IsEligible))
+                    await RunAiReviewAsync(true);
+                SaveSessionSafe();
+                RecalculateCounters();
+                ApplyFilter();
+                UpdateStats();
+                _progressText.Text = "本次自动核验全部结束：共 " + _allRows.Count +
+                    " 条，已失效 " + _removedTotal + "，仍可访问 " + _aliveTotal +
+                    "，访问异常 " + _temporaryTotal + "，证据待复核 " + _reviewTotal;
             }
         }
 
@@ -6813,8 +7280,11 @@ namespace LinkDispositionChecker
                         "  ·  " + BatchPreflightPlanner.PlatformKey(job);
                     CheckResult item = await checker.CheckAsync(job.Url, job.Number, job.ExpectedTitle, job.ExpectedExcerpt,
                         job.ExpectedAuthor, job.Platform, job.ContentType, false, _cancellation.Token);
+                    if (NetworkRestrictionCircuitBreaker.IsTransientRestriction(item))
+                        item = await checker.EscalateEvidenceAsync(item, _cancellation.Token);
                     item.SourceSheet = job.SourceSheet;
                     item.SourceRow = job.SourceRow;
+                    item.InfrastructureKey = job.InfrastructureKey;
                     _uiResults.Enqueue(item);
                     executionLog.Observe(item);
                     Interlocked.Increment(ref _runCompleted);
@@ -6871,6 +7341,52 @@ namespace LinkDispositionChecker
                     DeepReviewed = false,
                     EdgeFastReviewed = false
                 };
+        }
+
+        internal static CheckResult CreateInfrastructureDeferredResult(CheckJob job, string label)
+        {
+            if (job == null) throw new ArgumentNullException("job");
+            string infrastructure = String.IsNullOrWhiteSpace(job.InfrastructureKey)
+                ? BatchPreflightPlanner.PlatformKey(job) : job.InfrastructureKey;
+            return new CheckResult
+            {
+                Number = job.Number,
+                Verdict = "暂时异常",
+                StatusCode = "基础设施异常",
+                Title = "",
+                OriginalUrl = job.Url,
+                FinalUrl = "",
+                Evidence = "同一基础设施已有多条链接完成自动追证，但均未取得正文或明确删除页；" +
+                    "为避免继续集中请求，本条沿用该组访问异常并保留一键重试",
+                CheckedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
+                Duration = "0.0s",
+                ExpectedTitle = job.ExpectedTitle ?? "",
+                ExpectedExcerpt = job.ExpectedExcerpt ?? "",
+                ExpectedAuthor = job.ExpectedAuthor ?? "",
+                Platform = job.Platform ?? "",
+                ContentType = String.IsNullOrWhiteSpace(job.ContentType)
+                    ? Checker.InferContentType(job.Platform, job.Url, job.ExpectedTitle) : job.ContentType,
+                SourceSheet = job.SourceSheet,
+                SourceRow = job.SourceRow,
+                InfrastructureKey = infrastructure,
+                SiteHealth = "基础设施组连续异常：" + (label ?? infrastructure),
+                EvidenceStage = "基础设施组追证已执行",
+                AcquisitionAttempts = "共享基础设施结果复用",
+                SkipDeepReview = true,
+                EvidenceTrail = new List<VerificationEvidence>
+                {
+                    new VerificationEvidence
+                    {
+                        Kind = EvidenceKind.TemporaryFailure,
+                        Strength = EvidenceStrength.Strong,
+                        Source = "infrastructure-circuit",
+                        Platform = job.Platform ?? "",
+                        Message = "同一基础设施连续自动追证失败，未获得目标正文或明确删除证据",
+                        FinalUrl = "",
+                        IsCurrentResponse = true
+                    }
+                }
+            };
         }
 
         private void AnimationTick(object sender, EventArgs e)
@@ -6947,7 +7463,9 @@ namespace LinkDispositionChecker
         internal static bool IsEvidenceReviewCandidate(CheckResult item)
         {
             return item != null && !item.SkipDeepReview &&
-                (item.Verdict == "人工复核" || item.Verdict == "疑似已处置");
+                (item.Verdict == "人工复核" || item.Verdict == "疑似已处置" ||
+                 (item.Verdict == "暂时异常" &&
+                  String.Equals(item.SiteHealth, "站点首页可访问", StringComparison.OrdinalIgnoreCase)));
         }
 
         private void RunDeepReview(bool automatic)
@@ -6956,6 +7474,7 @@ namespace LinkDispositionChecker
             var pending = reviewable.Where(item => !item.DeepReviewed).ToList();
             if (pending.Count == 0)
             {
+                if (automatic) return;
                 if (reviewable.Count == 0)
                 {
                     if (!automatic) MessageBox.Show("当前没有需要深度复核的链接。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -6971,7 +7490,8 @@ namespace LinkDispositionChecker
             ExecutionLogContext executionLog = ExecutionLogContext.Start("后台深度复核",
                 automatic ? "自动启动" : "手动启动", Convert.ToString(_performance.SelectedItem),
                 Convert.ToString(_networkMode.SelectedItem), _allRows.Count, _allRows.Count - pending.Count, pending.Count);
-            using (var form = new DeepReviewForm(pending, SaveDeepReviewProgress)) form.ShowDialog(this);
+            using (var form = new DeepReviewForm(pending, SaveDeepReviewProgress, false, automatic))
+                form.ShowDialog(this);
             foreach (CheckResult item in pending.Where(item => item.DeepReviewed)) executionLog.Observe(item);
             RecalculateCounters(); ApplyFilter(); UpdateStats();
             SaveSessionSafe();
@@ -6998,12 +7518,13 @@ namespace LinkDispositionChecker
             UpdateStats();
         }
 
-        private async Task RunAiReviewAsync()
+        private async Task RunAiReviewAsync(bool automatic = false)
         {
             if (_running) return;
             AiRuntimeSettings settings = AiSettingsStore.Load();
             if (String.IsNullOrWhiteSpace(settings.Token) || String.IsNullOrWhiteSpace(settings.Model))
             {
+                if (automatic) return;
                 using (var form = new AiSettingsForm())
                 {
                     if (form.ShowDialog(this) != DialogResult.OK || !form.SettingsSaved) return;
@@ -7011,9 +7532,10 @@ namespace LinkDispositionChecker
                 settings = AiSettingsStore.Load();
             }
 
-            List<CheckResult> candidates = _allRows.Where(AiReviewPolicy.IsEligible).OrderBy(item => item.Number).Take(100).ToList();
+            List<CheckResult> candidates = _allRows.Where(AiReviewPolicy.IsEligible).OrderBy(item => item.Number).ToList();
             if (candidates.Count == 0)
             {
+                if (automatic) return;
                 int withoutContext = _allRows.Count(item =>
                     (item.Verdict == "人工复核" || item.Verdict == "疑似已处置") &&
                     !NetworkRestrictionCircuitBreaker.IsTransientRestriction(item) &&
@@ -7025,15 +7547,18 @@ namespace LinkDispositionChecker
                 return;
             }
 
-            DialogResult answer = MessageBox.Show("将把 " + candidates.Count + " 条记录的链接、标题、作者、HTTP 状态、机器证据和可见正文摘要发送到 Yunwu API。\n\n" +
-                "不会发送 Cookie、账号、完整 Excel 或浏览器凭证。最多处理 100 条，可能产生 API 费用。\n\n是否继续？",
-                "开始 AI 辅助复核", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-            if (answer != DialogResult.Yes) return;
+            if (!automatic)
+            {
+                DialogResult answer = MessageBox.Show("将把 " + candidates.Count + " 条记录的链接、标题、作者、HTTP 状态、机器证据和可见正文摘要发送到 Yunwu API。\n\n" +
+                    "不会发送 Cookie、账号、完整 Excel 或浏览器凭证。处理数量不设硬上限，可能产生 API 费用。\n\n是否继续？",
+                    "开始 AI 辅助复核", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (answer != DialogResult.Yes) return;
+            }
 
             _running = true;
             _cancellation = new CancellationTokenSource();
             SetAiReviewBusy(true);
-            ExecutionLogContext executionLog = ExecutionLogContext.Start("AI辅助复核", "手动启动",
+            ExecutionLogContext executionLog = ExecutionLogContext.Start("AI辅助复核", automatic ? "自动启动" : "手动启动",
                 Convert.ToString(_performance.SelectedItem), Convert.ToString(_networkMode.SelectedItem),
                 _allRows.Count, _allRows.Count - candidates.Count, candidates.Count);
             string executionOutcome = "完成";
@@ -7134,13 +7659,14 @@ namespace LinkDispositionChecker
                 _progressText.Text = (batchPaused ? "AI 辅助复核已暂停：" : "AI 辅助复核完成：") +
                     "尝试 " + processed + " 条，成功 " + Math.Max(0, processed - failed) +
                     " 条，失败 " + failed + " 条，仍可稍后处理 " + remainingEligible + " 条";
-                MessageBox.Show((batchPaused ? "AI 辅助复核已安全暂停。" : "AI 辅助复核完成。") +
-                    "\n\n尝试：" + processed + " 条\n成功：" + Math.Max(0, processed - failed) +
-                    " 条\n失败：" + failed + " 条\n新增自动确认：" + resolved +
-                    " 条\n仍可稍后处理：" + remainingEligible + " 条" +
-                    (batchPaused ? "\n\n原因：" + executionReason : ""),
-                    batchPaused ? "AI 复核已暂停" : "AI 复核完成", MessageBoxButtons.OK,
-                    batchPaused ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
+                if (!automatic || batchPaused)
+                    MessageBox.Show((batchPaused ? "AI 辅助复核已安全暂停。" : "AI 辅助复核完成。") +
+                        "\n\n尝试：" + processed + " 条\n成功：" + Math.Max(0, processed - failed) +
+                        " 条\n失败：" + failed + " 条\n新增自动确认：" + resolved +
+                        " 条\n仍可稍后处理：" + remainingEligible + " 条" +
+                        (batchPaused ? "\n\n原因：" + executionReason : ""),
+                        batchPaused ? "AI 复核已暂停" : "AI 复核完成", MessageBoxButtons.OK,
+                        batchPaused ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
             }
             catch (OperationCanceledException)
             {
@@ -7668,9 +8194,9 @@ namespace LinkDispositionChecker
         {
             using (var writer = new StreamWriter(path, false, new UTF8Encoding(true)))
             {
-                writer.WriteLine("序号,核验结果,AI建议,AI置信度,AI模型,HTTP状态,平台,内容类型,发文作者,页面标题,原链接,最终地址,判定依据,核验时间,耗时");
+                writer.WriteLine("序号,核验结果,AI建议,AI置信度,AI模型,HTTP状态,平台,内容类型,发文作者,页面标题,原链接,最终地址,判定依据,追证阶段,取证线路,站点对照,基础设施,核验时间,耗时");
                 foreach (var r in rows.OrderBy(x => x.Number))
-                    writer.WriteLine(String.Join(",", new[] { r.Number.ToString(), Csv(Checker.NormalizeVisibleVerdict(r.Verdict)), Csv(r.AiDecision), Csv(r.AiReviewed ? r.AiConfidence.ToString("P0") : ""), Csv(r.AiModel), Csv(r.StatusCode), Csv(r.Platform), Csv(r.ContentType), Csv(r.ExpectedAuthor), Csv(r.Title), Csv(r.OriginalUrl), Csv(r.FinalUrl), Csv(r.Evidence), Csv(r.CheckedAt), Csv(r.Duration) }));
+                    writer.WriteLine(String.Join(",", new[] { r.Number.ToString(), Csv(Checker.NormalizeVisibleVerdict(r.Verdict)), Csv(r.AiDecision), Csv(r.AiReviewed ? r.AiConfidence.ToString("P0") : ""), Csv(r.AiModel), Csv(r.StatusCode), Csv(r.Platform), Csv(r.ContentType), Csv(r.ExpectedAuthor), Csv(r.Title), Csv(r.OriginalUrl), Csv(r.FinalUrl), Csv(r.Evidence), Csv(r.EvidenceStage), Csv(r.AcquisitionAttempts), Csv(r.SiteHealth), Csv(r.InfrastructureKey), Csv(r.CheckedAt), Csv(r.Duration) }));
             }
         }
 

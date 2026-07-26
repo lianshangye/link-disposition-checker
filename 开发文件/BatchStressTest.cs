@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -14,14 +15,25 @@ namespace LinkDispositionChecker
     {
         public static void Main()
         {
-            RunAsync().GetAwaiter().GetResult();
+            try { RunAsync().GetAwaiter().GetResult(); }
+            catch (Exception ex)
+            {
+                Console.WriteLine("STRESS_ERROR_TYPE=" + ex.GetType().FullName);
+                Console.WriteLine("STRESS_ERROR_MESSAGE=" + ex.Message);
+                Console.WriteLine("STRESS_ERROR_STACK=" + (ex.StackTrace ?? ""));
+                Environment.ExitCode = 3;
+            }
         }
 
         private static async Task RunAsync()
         {
             const int total = 50000;
             const int workers = 10;
-            const string prefix = "http://127.0.0.1:18765/";
+            var portProbe = new TcpListener(IPAddress.Loopback, 0);
+            portProbe.Start();
+            int port = ((IPEndPoint)portProbe.LocalEndpoint).Port;
+            portProbe.Stop();
+            string prefix = "http://127.0.0.1:" + port + "/";
             string backupSession = SessionStore.SessionPath + ".stress-backup";
             string backupJournal = SessionStore.JournalPath + ".stress-backup";
             Backup(SessionStore.SessionPath, backupSession);

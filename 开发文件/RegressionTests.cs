@@ -228,11 +228,33 @@ internal static class RegressionTests
 
         bool reviewRoutingPassed =
             !MainForm.IsEvidenceReviewCandidate(new CheckResult { Verdict = "暂时异常" }) &&
+            MainForm.IsEvidenceReviewCandidate(new CheckResult { Verdict = "暂时异常", SiteHealth = "站点首页可访问" }) &&
             MainForm.IsEvidenceReviewCandidate(new CheckResult { Verdict = "人工复核" }) &&
             MainForm.IsEvidenceReviewCandidate(new CheckResult { Verdict = "疑似已处置" }) &&
             !MainForm.IsEvidenceReviewCandidate(new CheckResult { Verdict = "人工复核", SkipDeepReview = true });
         Console.WriteLine((reviewRoutingPassed ? "PASS " : "FAIL ") + "网络待重试与证据复核候选严格分流");
         if (!reviewRoutingPassed) _failures++;
+
+        CheckResult infrastructureDeferred = MainForm.CreateInfrastructureDeferredResult(new CheckJob
+        {
+            Number = 88,
+            Url = "https://news-a.example.com/article/88",
+            Platform = "网媒",
+            ExpectedTitle = "目标文章",
+            InfrastructureKey = "IP 203.0.113.8"
+        }, "IP 203.0.113.8");
+        bool evidenceEscalationRoutingPassed =
+            SessionStore.CurrentEngineVersion == "4.0.0" &&
+            infrastructureDeferred.Number == 88 &&
+            infrastructureDeferred.Verdict == "暂时异常" &&
+            infrastructureDeferred.SkipDeepReview &&
+            infrastructureDeferred.InfrastructureKey == "IP 203.0.113.8" &&
+            infrastructureDeferred.EvidenceTrail != null &&
+            infrastructureDeferred.EvidenceTrail.Count == 1 &&
+            infrastructureDeferred.EvidenceStage.Contains("基础设施");
+        Console.WriteLine((evidenceEscalationRoutingPassed ? "PASS " : "FAIL ") +
+            "4.0 全量结果、共享基础设施复用和自动追证字段");
+        if (!evidenceEscalationRoutingPassed) _failures++;
 
         bool baijiaIdPassed = Checker.ExtractBaiduArticleId(new Uri("https://baijiahao.baidu.com/s?id=1870762825559558263&wfr=spider&for=pc")) == "1870762825559558263";
         bool dtNidPassed = Checker.ExtractBaiduArticleNid(new Uri("https://mbd.baidu.com/newspage/data/dtlandingwise?nid=dt_5277434666597158759")) == "dt_5277434666597158759";

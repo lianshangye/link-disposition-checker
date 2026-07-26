@@ -1,6 +1,6 @@
 param(
-    [string]$CsvPath = 'C:\Users\MQ\Desktop\_长城汽车半年度业绩预告舆情20日10时.csv',
-    [string]$ExcelPath = 'C:\Users\MQ\Desktop\魏总相关负面链接.xlsx',
+    [string]$CsvPath = '',
+    [string]$ExcelPath = '',
     [switch]$RegressionOnly
 )
 
@@ -71,8 +71,14 @@ try {
     Invoke-Test -Name 'Regression-x64' -TestSource 'RegressionTests.cs' -MainClass 'RegressionTests' -Platform 'x64' -Compiler $compiler64 -Arguments @()
     Invoke-Test -Name 'Regression-x86' -TestSource 'RegressionTests.cs' -MainClass 'RegressionTests' -Platform 'x86' -Compiler $compiler32 -Arguments @()
     if (-not $RegressionOnly) {
-        Invoke-Test -Name 'CsvImport-x64' -TestSource 'CsvImportTests.cs' -MainClass 'CsvImportTests' -Platform 'x64' -Compiler $compiler64 -Arguments @($CsvPath)
-        Invoke-Test -Name 'ExcelImport-x64' -TestSource 'ExcelImportTests.cs' -MainClass 'ExcelImportTests' -Platform 'x64' -Compiler $compiler64 -Arguments @($ExcelPath)
+        if (-not [String]::IsNullOrWhiteSpace($CsvPath) -and (Test-Path -LiteralPath $CsvPath)) {
+            Invoke-Test -Name 'CsvImport-x64' -TestSource 'CsvImportTests.cs' -MainClass 'CsvImportTests' -Platform 'x64' -Compiler $compiler64 -Arguments @($CsvPath)
+        }
+        else { Write-Warning 'CSV import fixture not supplied; skipping optional CSV import test.' }
+        if (-not [String]::IsNullOrWhiteSpace($ExcelPath) -and (Test-Path -LiteralPath $ExcelPath)) {
+            Invoke-Test -Name 'ExcelImport-x64' -TestSource 'ExcelImportTests.cs' -MainClass 'ExcelImportTests' -Platform 'x64' -Compiler $compiler64 -Arguments @($ExcelPath)
+        }
+        else { Write-Warning 'Excel import fixture not supplied; skipping optional Excel import test.' }
     }
     Invoke-Test -Name 'NetworkFallback-x64' -TestSource 'NetworkFallbackTests.cs' -MainClass 'NetworkFallbackTests' -Platform 'x64' -Compiler $compiler64 -Arguments @()
     Write-Host 'All core tests passed.'

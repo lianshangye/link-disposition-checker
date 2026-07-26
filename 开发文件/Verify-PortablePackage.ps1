@@ -45,7 +45,7 @@ try {
 
     $x64 = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $root 'x64\LinkChecker.exe'))
     $x86 = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $root 'x86\LinkChecker.exe'))
-    if ($x64.FileVersion -ne '3.10.5.0' -or $x86.FileVersion -ne '3.10.5.0') {
+    if ($x64.FileVersion -ne '4.0.0.0' -or $x86.FileVersion -ne '4.0.0.0') {
         throw "Unexpected executable versions: x64=$($x64.FileVersion), x86=$($x86.FileVersion)"
     }
     $sourceRules = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $projectRoot 'platform-rules.json')).Hash
@@ -62,7 +62,9 @@ try {
 
     $readme = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $root $readmeName)
     $logic = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $root $logicName)
-    if ($readme -notmatch '3\.10\.5' -or $logic.Length -lt 5000) { throw 'Packaged documentation is incomplete.' }
+    if ($readme -notmatch '4\.0\.0' -or $logic -notmatch '4\.0\.0' -or $logic.Length -lt 5000) {
+        throw 'Packaged documentation is incomplete.'
+    }
 
     $fileCount = @(Get-ChildItem -LiteralPath $root -Recurse -File).Count
     $zipHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash

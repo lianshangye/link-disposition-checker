@@ -149,7 +149,7 @@ namespace LinkDispositionChecker
             lines.Add("");
             lines.Add("运行编号：" + Safe(context == null ? "" : context.RunId, 100));
             lines.Add("工具版本：" + SessionStore.CurrentEngineVersion);
-            lines.Add("日志格式：2");
+            lines.Add("日志格式：3");
             lines.Add("执行类型：" + Safe(context == null ? "" : context.Operation, 80));
             lines.Add("启动方式：" + Safe(context == null ? "" : context.Trigger, 80));
             lines.Add("开始时间：" + (context == null ? "" : context.StartedAt.ToString("yyyy-MM-dd HH:mm:ss zzz")));
@@ -202,7 +202,20 @@ namespace LinkDispositionChecker
             }
             if (runItems.Count == 0) lines.Add("- 无");
             lines.Add("");
-            lines.Add("六、AI 使用");
+            lines.Add("六、自动追证与基础设施");
+            lines.Add("----------------------");
+            lines.Add("配置的远程取证节点：" + RemoteEvidenceStore.LoadEndpoints().Count);
+            AppendCounts(lines, runItems.GroupBy(item => String.IsNullOrWhiteSpace(item.EvidenceStage) ? "未进入自动追证" : item.EvidenceStage)
+                .Select(group => new KeyValuePair<string, int>(group.Key, group.Count()))
+                .OrderByDescending(item => item.Value).ThenBy(item => item.Key), 20);
+            foreach (var group in runItems.Where(item => !String.IsNullOrWhiteSpace(item.InfrastructureKey))
+                .GroupBy(item => item.InfrastructureKey, StringComparer.OrdinalIgnoreCase)
+                .OrderByDescending(group => group.Count()).ThenBy(group => group.Key).Take(20))
+                lines.Add("- " + Safe(group.Key, 100) + "：共 " + group.Count() +
+                    "，已确认 " + group.Count(item => item.Verdict == "已失效" || item.Verdict == "仍可访问") +
+                    "，仍异常 " + group.Count(NetworkRestrictionCircuitBreaker.IsTransientRestriction));
+            lines.Add("");
+            lines.Add("七、AI 使用");
             lines.Add("----------");
             lines.Add("本次 AI 请求次数：" + (context == null ? 0 : context.AiRequests));
             lines.Add("本次 AI 成功条数：" + (context == null ? 0 : context.AiSucceeded));
@@ -217,13 +230,13 @@ namespace LinkDispositionChecker
                 .OrderByDescending(group => group.Count()))
                 lines.Add("- 模型 " + Safe(group.Key, 100) + "：" + group.Count() + " 条");
             lines.Add("");
-            lines.Add("七、关键执行事件（最多 50 条）");
+            lines.Add("八、关键执行事件（最多 50 条）");
             lines.Add("--------------------------");
             List<string> events = context == null ? new List<string>() : context.Events.Take(50).ToList();
             foreach (string item in events) lines.Add("- " + Safe(item, 300));
             if (events.Count == 0) lines.Add("- 无异常事件");
             lines.Add("");
-            lines.Add("八、匿名问题样本（最多 30 条）");
+            lines.Add("九、匿名问题样本（最多 30 条）");
             lines.Add("----------------------------");
             List<CheckResult> issues = runItems.Where(item =>
                 item.Verdict != "已失效" && item.Verdict != "仍可访问").Take(30).ToList();
@@ -236,11 +249,14 @@ namespace LinkDispositionChecker
                     "；结果=" + Safe(item.Verdict, 40) +
                     "；类型=" + FailureCategory(item) +
                     "；耗时=" + Safe(item.Duration, 30) +
+                    "；追证=" + Safe(item.EvidenceStage, 80) +
+                    "；站点=" + Safe(item.SiteHealth, 80) +
+                    "；基础设施=" + Safe(item.InfrastructureKey, 80) +
                     "；原因=" + Safe(item.Evidence, 220));
             }
             if (issues.Count == 0) lines.Add("- 无");
             lines.Add("");
-            lines.Add("九、自动诊断提示");
+            lines.Add("十、自动诊断提示");
             lines.Add("----------------");
             foreach (string suggestion in Suggestions(runItems)) lines.Add("- " + suggestion);
             lines.Add("");

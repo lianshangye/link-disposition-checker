@@ -49,7 +49,8 @@ Copy-Item -LiteralPath $launcherBuildOutput -Destination $launcherOutput -Force
 try { Copy-Item -LiteralPath $buildOutput -Destination $output -Force }
 catch { Write-Warning 'The main EXE is currently running. LinkChecker.latest.exe and the portable package contain the newest build.' }
 Copy-Item -LiteralPath $launcherBuildOutput -Destination (Join-Path $projectRoot 'StartupCheck.exe') -Force
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'StartTool.cmd') -Destination (Join-Path $projectRoot '启动工具.cmd') -Force
+$startName = (([char[]](0x542F,0x52A8,0x5DE5,0x5177)) -join '') + '.cmd'
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'StartTool.cmd') -Destination (Join-Path $projectRoot $startName) -Force
 foreach ($pair in @(
     @($webViewCore, (Join-Path $projectRoot 'Microsoft.Web.WebView2.Core.dll')),
     @($webViewForms, (Join-Path $projectRoot 'Microsoft.Web.WebView2.WinForms.dll')),

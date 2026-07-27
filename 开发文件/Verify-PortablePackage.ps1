@@ -1,8 +1,15 @@
+param(
+    [string]$ZipPath = ''
+)
+
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$zipPath = Get-ChildItem -LiteralPath $projectRoot -Recurse -Filter '*.zip' |
-    Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
-if ([String]::IsNullOrWhiteSpace($zipPath)) { throw 'Portable ZIP was not found.' }
+if ([String]::IsNullOrWhiteSpace($ZipPath)) {
+    $ZipPath = Get-ChildItem -LiteralPath $projectRoot -Recurse -Filter '*.zip' |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
+}
+else { $ZipPath = (Resolve-Path -LiteralPath $ZipPath).Path }
+if ([String]::IsNullOrWhiteSpace($ZipPath)) { throw 'Portable ZIP was not found.' }
 $startName = (([char[]](0x542F,0x52A8,0x5DE5,0x5177)) -join '') + '.cmd'
 $readmeName = (([char[]](0x4F7F,0x7528,0x8BF4,0x660E)) -join '') + '.txt'
 $logicName = (([char[]](0x6838,0x9A8C,0x903B,0x8F91,0x8BF4,0x660E)) -join '') + '.txt'
@@ -12,7 +19,7 @@ $startupReportName = (([char[]](0x542F,0x52A8,0x68C0,0x67E5,0x62A5,0x544A)) -joi
 $verifyRoot = Join-Path $env:TEMP ('LinkCheckerPackageVerify_' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $verifyRoot | Out-Null
 try {
-    Expand-Archive -LiteralPath $zipPath -DestinationPath $verifyRoot
+    Expand-Archive -LiteralPath $ZipPath -DestinationPath $verifyRoot
     $package = Get-ChildItem -LiteralPath $verifyRoot -Directory | Select-Object -First 1
     if ($null -eq $package) { throw 'ZIP does not contain a package directory.' }
     $root = $package.FullName
@@ -45,7 +52,7 @@ try {
 
     $x64 = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $root 'x64\LinkChecker.exe'))
     $x86 = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $root 'x86\LinkChecker.exe'))
-    if ($x64.FileVersion -ne '4.4.1.0' -or $x86.FileVersion -ne '4.4.1.0') {
+    if ($x64.FileVersion -ne '4.4.2.0' -or $x86.FileVersion -ne '4.4.2.0') {
         throw "Unexpected executable versions: x64=$($x64.FileVersion), x86=$($x86.FileVersion)"
     }
     $sourceRules = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $projectRoot 'platform-rules.json')).Hash
@@ -63,8 +70,8 @@ try {
     $readme = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $root $readmeName)
     $logic = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $root $logicName)
     if (
-        $readme -notmatch '4\.4\.1' -or
-        $logic -notmatch '4\.4\.1' -or
+        $readme -notmatch '4\.4\.2' -or
+        $logic -notmatch '4\.4\.2' -or
         $readme -notmatch 'Globalping' -or
         $logic -notmatch 'HTTP 404' -or
         $readme.Length -lt 500 -or
@@ -74,11 +81,11 @@ try {
     }
 
     $fileCount = @(Get-ChildItem -LiteralPath $root -Recurse -File).Count
-    $zipHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash
+    $zipHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $ZipPath).Hash
     Write-Host "PACKAGE_FILES=$fileCount"
     Write-Host "X64_VERSION=$($x64.FileVersion)"
     Write-Host "X86_VERSION=$($x86.FileVersion)"
-    Write-Host "ZIP_BYTES=$((Get-Item -LiteralPath $zipPath).Length)"
+    Write-Host "ZIP_BYTES=$((Get-Item -LiteralPath $ZipPath).Length)"
     Write-Host "ZIP_SHA256=$zipHash"
     Write-Host "STARTUP_CHECK_REPORT=$report"
 }

@@ -72,6 +72,8 @@ function Invoke-Test([string]$Name, [string]$TestSource, [string]$MainClass,
 try {
     Invoke-Test -Name 'Regression-x64' -TestSource 'RegressionTests.cs' -MainClass 'RegressionTests' -Platform 'x64' -Compiler $compiler64 -Arguments @()
     Invoke-Test -Name 'Regression-x86' -TestSource 'RegressionTests.cs' -MainClass 'RegressionTests' -Platform 'x86' -Compiler $compiler32 -Arguments @()
+    Invoke-Test -Name 'Reliability-x64' -TestSource 'ReliabilityTests.cs' -MainClass 'ReliabilityTests' -Platform 'x64' -Compiler $compiler64 -Arguments @()
+    Invoke-Test -Name 'Reliability-x86' -TestSource 'ReliabilityTests.cs' -MainClass 'ReliabilityTests' -Platform 'x86' -Compiler $compiler32 -Arguments @()
     if (-not $RegressionOnly) {
         if (-not [String]::IsNullOrWhiteSpace($CsvPath) -and (Test-Path -LiteralPath $CsvPath)) {
             Invoke-Test -Name 'CsvImport-x64' -TestSource 'CsvImportTests.cs' -MainClass 'CsvImportTests' -Platform 'x64' -Compiler $compiler64 -Arguments @($CsvPath)
@@ -79,6 +81,7 @@ try {
         else { Write-Warning 'CSV import fixture not supplied; skipping optional CSV import test.' }
         if (-not [String]::IsNullOrWhiteSpace($ExcelPath) -and (Test-Path -LiteralPath $ExcelPath)) {
             Invoke-Test -Name 'ExcelImport-x64' -TestSource 'ExcelImportTests.cs' -MainClass 'ExcelImportTests' -Platform 'x64' -Compiler $compiler64 -Arguments @($ExcelPath)
+            Invoke-Test -Name 'ExcelWriteback-x64' -TestSource 'ExcelWritebackTests.cs' -MainClass 'ExcelWritebackTests' -Platform 'x64' -Compiler $compiler64 -Arguments @($ExcelPath)
         }
         else { Write-Warning 'Excel import fixture not supplied; skipping optional Excel import test.' }
     }

@@ -9,6 +9,9 @@
 # Browser profiles, captured pages, test fixtures, and results
 开发文件/test-data/
 核验结果/
+运行日志/
+启动检查报告.txt
+最近一次执行日志.txt
 __pycache__/
 *.py[cod]
 

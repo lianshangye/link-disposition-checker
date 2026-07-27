@@ -1,8 +1,17 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-if not exist "StartupCheck.exe" goto missing
+if exist "StartupCheck.exe" goto portable
+if exist "prepare-runtime.ps1" goto source
+goto missing
+
+:portable
 "StartupCheck.exe"
+exit /b %errorlevel%
+
+:source
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0prepare-runtime.ps1" -Launch
+if errorlevel 1 pause
 exit /b %errorlevel%
 
 :missing

@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$InputCsv = '',
     [string]$OutputCsv = ''
 )
@@ -10,7 +10,7 @@ if ([String]::IsNullOrWhiteSpace($InputCsv)) {
     $InputCsv = Join-Path $testData 'representative-validation-samples.csv'
 }
 if ([String]::IsNullOrWhiteSpace($OutputCsv)) {
-    $OutputCsv = Join-Path $testData 'representative-validation-result-3.10.5-final.csv'
+    $OutputCsv = Join-Path $testData 'representative-validation-result-4.4.2-report.csv'
 }
 
 $source = Join-Path $PSScriptRoot 'LinkDispositionChecker.cs'
@@ -63,6 +63,8 @@ try {
     Write-Host "UNRESOLVED=$unresolved"
     Write-Host ("UNRESOLVED_RATE={0:0.00}%" -f $rate)
     Write-Host "OUTPUT=$OutputCsv"
+    # Historical disposition is useful for finding conflicts, but it is not current release truth.
+    & (Join-Path $PSScriptRoot 'Compare-HumanValidation.ps1') -InputCsv $InputCsv -OutputCsv $OutputCsv
 }
 finally {
     if (Test-Path -LiteralPath $runDirectory) {

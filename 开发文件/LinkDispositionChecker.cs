@@ -25,8 +25,8 @@ using Microsoft.Web.WebView2.WinForms;
 
 [assembly: AssemblyTitle("链接失效检测工具")]
 [assembly: AssemblyProduct("链接失效检测工具")]
-[assembly: AssemblyVersion("4.4.1.0")]
-[assembly: AssemblyFileVersion("4.4.1.0")]
+[assembly: AssemblyVersion("4.4.2.0")]
+[assembly: AssemblyFileVersion("4.4.2.0")]
 
 namespace LinkDispositionChecker
 {
@@ -318,10 +318,19 @@ namespace LinkDispositionChecker
         {
             get
             {
-                return !String.IsNullOrEmpty(SourceSheet) && SourceRow > 0
-                    ? SourceSheet + "\n" + SourceRow
-                    : Url ?? "";
+                return CheckIdentity.Create(SourceSheet, SourceRow, Url);
             }
+        }
+    }
+
+    internal static class CheckIdentity
+    {
+        public static string Create(string sourceSheet, int sourceRow, string url)
+        {
+            string normalizedUrl = (url ?? "").Trim();
+            return !String.IsNullOrEmpty(sourceSheet) && sourceRow > 0
+                ? sourceSheet + "\n" + sourceRow + "\n" + normalizedUrl
+                : normalizedUrl;
         }
     }
 
@@ -477,6 +486,7 @@ namespace LinkDispositionChecker
     {
         public static readonly string UserDataDirectory = ResolveWritableDirectory(new[]
         {
+            Environment.GetEnvironmentVariable("LINK_CHECKER_TEST_DATA_DIR"),
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LinkDispositionChecker"),
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "链接失效核验工具数据"),
             Path.Combine(Path.GetTempPath(), "LinkDispositionChecker")
@@ -592,13 +602,14 @@ namespace LinkDispositionChecker
 
     internal static class SessionStore
     {
-        public const string CurrentEngineVersion = "4.4.1";
+        public const string CurrentEngineVersion = "4.4.2";
         private static readonly object SyncRoot = new object();
         private static readonly JavaScriptSerializer Serializer = new JavaScriptSerializer { MaxJsonLength = Int32.MaxValue };
         public static readonly string SessionPath = Path.Combine(StoragePaths.UserDataDirectory, "last-session.json");
         public static readonly string JournalPath = SessionPath + ".journal";
+        public static readonly string BackupPath = SessionPath + ".bak";
 
-        public static bool Exists { get { return File.Exists(SessionPath) || File.Exists(JournalPath); } }
+        public static bool Exists { get { return File.Exists(SessionPath) || File.Exists(JournalPath) || File.Exists(BackupPath); } }
 
         public static void Save(string inputText, string excelPath, IEnumerable<CheckJob> jobs, IEnumerable<CheckResult> results)
         {
@@ -618,6 +629,7 @@ namespace LinkDispositionChecker
                     Results = (results ?? Enumerable.Empty<CheckResult>()).OrderBy(item => item.Number).ToList()
                 };
                 File.WriteAllText(temporary, Serializer.Serialize(session), new UTF8Encoding(false));
+                File.Copy(temporary, BackupPath, true);
                 if (File.Exists(SessionPath)) File.Replace(temporary, SessionPath, null);
                 else File.Move(temporary, SessionPath);
                 File.WriteAllText(JournalPath, "", new UTF8Encoding(false));
@@ -648,17 +660,38 @@ namespace LinkDispositionChecker
             CheckSession session;
             lock (SyncRoot)
             {
-                string json = File.Exists(SessionPath) ? File.ReadAllText(SessionPath, Encoding.UTF8) : "";
-                session = String.IsNullOrWhiteSpace(json) ? new CheckSession { Version = 1, Results = new List<CheckResult>() } : Serializer.Deserialize<CheckSession>(json);
+                Exception primaryFailure;
+                session = TryLoadSessionFile(SessionPath, out primaryFailure);
+                if (session == null)
+                {
+                    Exception backupFailure;
+                    session = TryLoadSessionFile(BackupPath, out backupFailure);
+                    if (session == null && primaryFailure != null)
+                        throw new InvalidDataException("主进度和备份均无法读取。", primaryFailure);
+                }
                 if (session == null) session = new CheckSession { Version = 1, Results = new List<CheckResult>() };
                 if (File.Exists(JournalPath))
                 {
-                    var latest = (session.Results ?? new List<CheckResult>()).ToDictionary(ResultKey, item => item, StringComparer.OrdinalIgnoreCase);
+                    var latest = new Dictionary<string, CheckResult>(StringComparer.OrdinalIgnoreCase);
+                    foreach (CheckResult saved in session.Results ?? new List<CheckResult>())
+                        if (saved != null) latest[ResultKey(saved)] = saved;
                     foreach (string line in File.ReadLines(JournalPath, Encoding.UTF8))
                     {
                         if (String.IsNullOrWhiteSpace(line)) continue;
-                        CheckResult result = Serializer.Deserialize<CheckResult>(line);
-                        if (result != null) latest[ResultKey(result)] = result;
+                        try
+                        {
+                            CheckResult result = Serializer.Deserialize<CheckResult>(line);
+                            if (result != null)
+                            {
+                                string key = ResultKey(result);
+                                CheckResult existing;
+                                if (!latest.TryGetValue(key, out existing) || IsAtLeastAsRecent(result, existing)) latest[key] = result;
+                            }
+                        }
+                        catch
+                        {
+                            // A crash can truncate only the final append. Earlier complete lines remain usable.
+                        }
                     }
                     session.Results = latest.Values.OrderBy(item => item.Number).ToList();
                 }
@@ -670,9 +703,45 @@ namespace LinkDispositionChecker
 
         private static string ResultKey(CheckResult result)
         {
-            return result != null && !String.IsNullOrEmpty(result.SourceSheet) && result.SourceRow > 0
-                ? result.SourceSheet + "\n" + result.SourceRow
-                : (result == null ? "" : result.OriginalUrl ?? "");
+            return result == null ? "" : CheckIdentity.Create(result.SourceSheet, result.SourceRow, result.OriginalUrl);
+        }
+
+        private static CheckSession TryLoadSessionFile(string path, out Exception failure)
+        {
+            failure = null;
+            if (!File.Exists(path)) return null;
+            try
+            {
+                string json = File.ReadAllText(path, Encoding.UTF8);
+                return String.IsNullOrWhiteSpace(json) ? null : Serializer.Deserialize<CheckSession>(json);
+            }
+            catch (Exception ex)
+            {
+                failure = ex;
+                return null;
+            }
+        }
+
+        private static bool IsAtLeastAsRecent(CheckResult candidate, CheckResult existing)
+        {
+            DateTime candidateTime;
+            DateTime existingTime;
+            bool candidateParsed = DateTime.TryParse(candidate == null ? "" : candidate.CheckedAt, out candidateTime);
+            bool existingParsed = DateTime.TryParse(existing == null ? "" : existing.CheckedAt, out existingTime);
+            if (candidateParsed && existingParsed) return candidateTime >= existingTime;
+            if (existingParsed && !candidateParsed) return false;
+            return true;
+        }
+
+        public static void Clear()
+        {
+            lock (SyncRoot)
+            {
+                foreach (string path in new[] { SessionPath, JournalPath, BackupPath, SessionPath + ".tmp" })
+                {
+                    try { if (File.Exists(path)) File.Delete(path); } catch { }
+                }
+            }
         }
 
         public static string Describe()
@@ -1223,7 +1292,7 @@ namespace LinkDispositionChecker
 
             var resultRows = results.ToList();
             var resultsBySource = resultRows.Where(item => !String.IsNullOrEmpty(item.SourceSheet) && item.SourceRow > 0)
-                .GroupBy(item => item.SourceSheet + "\n" + item.SourceRow, StringComparer.OrdinalIgnoreCase)
+                .GroupBy(item => CheckIdentity.Create(item.SourceSheet, item.SourceRow, item.OriginalUrl), StringComparer.OrdinalIgnoreCase)
                 .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
             var resultsByUrl = resultRows.Where(item => !String.IsNullOrEmpty(item.OriginalUrl))
                 .GroupBy(item => item.OriginalUrl, StringComparer.OrdinalIgnoreCase)
@@ -1264,7 +1333,7 @@ namespace LinkDispositionChecker
                         CheckResult result = null;
                         if (!source.ManualOnly)
                         {
-                            resultsBySource.TryGetValue(plan.SheetName + "\n" + source.Row, out result);
+                            resultsBySource.TryGetValue(CheckIdentity.Create(plan.SheetName, source.Row, source.Url), out result);
                             if (result == null) resultsByUrl.TryGetValue(source.Url ?? "", out result);
                             if (result == null) continue;
                         }
@@ -2019,8 +2088,13 @@ namespace LinkDispositionChecker
 
                     else if (code == 404 || code == 410)
                     {
-                        result.Verdict = "已失效";
-                        result.Evidence = "服务器返回 HTTP " + code;
+                        Uri finalUri;
+                        Uri.TryCreate(result.FinalUrl, UriKind.Absolute, out finalUri);
+                        bool targetResponse = IsAuthoritativeTargetHttpRemoval(uri, finalUri);
+                        result.Verdict = targetResponse ? "已失效" : "人工复核";
+                        result.Evidence = targetResponse
+                            ? "目标地址所属站点返回 HTTP " + code
+                            : "请求跳转到其他站点或登录页后返回 HTTP " + code + "，不能证明原目标内容已删除";
                     }
                     else if (code == 429 || code == 444)
                     {
@@ -5254,6 +5328,12 @@ namespace LinkDispositionChecker
             return PlatformRules.AreSamePlatform(firstHost, secondHost);
         }
 
+        internal static bool IsAuthoritativeTargetHttpRemoval(Uri original, Uri final)
+        {
+            if (original == null || final == null || LooksLikeLogin(final.AbsoluteUri)) return false;
+            return SamePlatformHost(original.Host, final.Host);
+        }
+
         private static string NormalizePlatformHost(string host)
         {
             string value = (host ?? "").Trim().Trim('.').ToLowerInvariant();
@@ -6348,9 +6428,10 @@ namespace LinkDispositionChecker
             item.StatusCode = code.ToString();
             if (code == 404 || code == 410)
             {
-                item.Verdict = "已失效";
-                item.Evidence = "内置浏览器复核确认服务器返回 HTTP " + code;
-                return true;
+                item.Verdict = "人工复核";
+                item.Evidence = "内置浏览器快速请求返回 HTTP " + code +
+                    "，但该接口不提供最终跳转地址，需由平台接口或渲染页确认是否属于目标内容";
+                return false;
             }
             if (code == 429 || code == 444)
             {
@@ -7265,6 +7346,7 @@ namespace LinkDispositionChecker
         private CancellationTokenSource _cancellation;
         private bool _running;
         private bool _preflightRunning;
+        private bool _closeRequested;
         private int _animationFrame;
         private Stopwatch _runWatch;
         private int _runCompleted;
@@ -8267,7 +8349,7 @@ namespace LinkDispositionChecker
                 }
                 int transientRetries = 0;
                 if (!retryNetworkOnly && engineChanged)
-                    _allRows.RemoveAll(item => ShouldDiscardForResume(item, true));
+                    _allRows.RemoveAll(item => ShouldDiscardResultForEngineUpgrade(item, session.EngineVersion));
                 else if (!retryNetworkOnly)
                     transientRetries = _allRows.RemoveAll(item => ShouldDiscardForResume(item, false));
                 ApplyFilter(); UpdateStats();
@@ -8275,7 +8357,7 @@ namespace LinkDispositionChecker
                 int total = restoredJobs.Count;
                 _progressText.Text = "已恢复上次进度：" + _allRows.Count + " / " + total + " 条" +
                     (retryNetworkOnly ? "；将续检 " + (savedUnfinished + savedMissing) + " 条未完成链接" :
-                    engineChanged ? "；规则已升级，将自动重跑旧版待复核项" :
+                    engineChanged ? "；规则已升级，将自动重跑旧版不兼容结论" :
                     transientRetries > 0 ? "；将续检 " + transientRetries + " 条未完成链接" : "");
                 if (_allRows.Count < total) await StartChecksAsync(true, retryNetworkOnly ? "继续未完成" : "继续上次检测");
                 else MessageBox.Show("上次检测已经全部得到有效或失效结论。", "进度已恢复", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -8286,9 +8368,27 @@ namespace LinkDispositionChecker
             }
         }
 
-        private void MainFormClosing(object sender, FormClosingEventArgs e)
+        private async void MainFormClosing(object sender, FormClosingEventArgs e)
         {
-            if (_running && _cancellation != null) _cancellation.Cancel();
+            if (_closeRequested) return;
+            if (_running)
+            {
+                e.Cancel = true;
+                _closeRequested = true;
+                Enabled = false;
+                _progressText.Text = "正在停止并保存最后一批结果……";
+                if (_cancellation != null) _cancellation.Cancel();
+                while (_running)
+                {
+                    FlushUiResults(Int32.MaxValue);
+                    await Task.Delay(80);
+                }
+                FlushUiResults(Int32.MaxValue);
+                SaveSessionSafe();
+                BeginInvoke(new Action(Close));
+                return;
+            }
+            FlushUiResults(Int32.MaxValue);
             if (_input.TextLength > 0 || _allRows.Count > 0) SaveSessionSafe();
         }
 
@@ -8436,15 +8536,27 @@ namespace LinkDispositionChecker
 
         private static string ResultKey(CheckResult result)
         {
-            return result != null && !String.IsNullOrEmpty(result.SourceSheet) && result.SourceRow > 0
-                ? result.SourceSheet + "\n" + result.SourceRow
-                : (result == null ? "" : result.OriginalUrl ?? "");
+            return result == null ? "" : CheckIdentity.Create(result.SourceSheet, result.SourceRow, result.OriginalUrl);
         }
 
         internal static bool ShouldDiscardForResume(CheckResult result, bool engineChanged)
         {
             if (result == null) return false;
             return result.Verdict != "已失效" && result.Verdict != "仍可访问";
+        }
+
+        internal static bool ShouldDiscardResultForEngineUpgrade(CheckResult item, string previousEngineVersion)
+        {
+            if (item == null) return false;
+            if (item.Verdict != "已失效" && item.Verdict != "仍可访问") return true;
+            return IsEngineOlderThan(previousEngineVersion, 4, 4, 2);
+        }
+
+        internal static bool IsEngineOlderThan(string version, int major, int minor, int patch)
+        {
+            Version current;
+            if (!Version.TryParse(version ?? "", out current)) return true;
+            return current < new Version(major, minor, patch);
         }
 
         private void ApplyFilter()
@@ -8540,9 +8652,27 @@ namespace LinkDispositionChecker
 
         private static Encoding DetectFileEncoding(string path)
         {
-            byte[] mark = new byte[3]; using (var stream = File.OpenRead(path)) { stream.Read(mark, 0, 3); }
-            if (mark[0] == 0xEF && mark[1] == 0xBB && mark[2] == 0xBF) return Encoding.UTF8;
+            byte[] bytes;
+            using (var stream = File.OpenRead(path))
+            {
+                int length = (int)Math.Min(stream.Length, 262144L);
+                bytes = new byte[length];
+                stream.Read(bytes, 0, length);
+            }
+            if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) return Encoding.UTF8;
+            if (LooksLikeUtf8(bytes)) return new UTF8Encoding(false, true);
             return Encoding.Default;
+        }
+
+        private static bool LooksLikeUtf8(byte[] bytes)
+        {
+            if (bytes == null || bytes.Length == 0) return true;
+            try
+            {
+                string decoded = new UTF8Encoding(false, true).GetString(bytes);
+                return decoded.Any(character => character > 127) || bytes.All(value => value < 128);
+            }
+            catch (DecoderFallbackException) { return false; }
         }
 
         private void ExportClick(object sender, EventArgs e)

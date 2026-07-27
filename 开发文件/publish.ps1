@@ -1,4 +1,19 @@
+﻿param(
+    [string]$CsvPath = '',
+    [string]$ExcelPath = '',
+    [string]$GroundTruthCsv = ''
+)
+
 $ErrorActionPreference = 'Stop'
+& (Join-Path $PSScriptRoot 'Run-CoreTests.ps1') -CsvPath $CsvPath -ExcelPath $ExcelPath
+$releaseStatus = '候选版（准确性待当期人工真值验收）'
+if (-not [String]::IsNullOrWhiteSpace($GroundTruthCsv)) {
+    & (Join-Path $PSScriptRoot 'Run-ReleaseValidation.ps1') -GroundTruthCsv $GroundTruthCsv
+    $releaseStatus = '正式版（已通过当期人工真值门槛）'
+}
+else {
+    Write-Warning '未提供当期人工真值。本次包可以使用，但只能作为候选版，不能宣称准确率已经验收。'
+}
 & (Join-Path $PSScriptRoot 'build.ps1')
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
@@ -41,6 +56,12 @@ Copy-Item -LiteralPath (Join-Path $buildOutputDirectory 'StartupCheck.exe') -Des
 Copy-Item -LiteralPath (Join-Path $buildOutputDirectory 'NetworkDiagnostics.exe') -Destination $staging -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot $diagnosticLauncherName) -Destination (Join-Path $staging $publishedDiagnosticLauncherName) -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot $diagnosticLinksName) -Destination $staging -Force
+[IO.File]::WriteAllLines((Join-Path $staging '版本状态.txt'), @(
+    '链接失效核验工具 4.4.2',
+    ('打包时间：' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')),
+    ('发布状态：' + $releaseStatus),
+    '说明：候选版表示结构和回归测试通过，但尚未取得足量当期人工真值，不能宣称准确率已经验收。'
+), (New-Object Text.UTF8Encoding($true)))
 
 try {
     $compressed = $false
@@ -62,4 +83,6 @@ finally {
     if (Test-Path -LiteralPath $stagingRoot) { Remove-Item -LiteralPath $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue }
 }
 if (Test-Path -LiteralPath $package) { Remove-Item -LiteralPath $package -Recurse -Force }
+& (Join-Path $PSScriptRoot 'Verify-PortablePackage.ps1') -ZipPath $zipPath
+Write-Host "RELEASE_STATUS=$releaseStatus"
 Write-Host "Portable package: $zipPath"

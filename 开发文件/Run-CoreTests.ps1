@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$CsvPath = 'C:\Users\MQ\Desktop\_长城汽车半年度业绩预告舆情20日10时.csv',
     [string]$ExcelPath = 'C:\Users\MQ\Desktop\魏总相关负面链接.xlsx'
 )
@@ -66,12 +66,23 @@ function Invoke-Test([string]$Name, [string]$TestSource, [string]$MainClass,
 try {
     Invoke-Test -Name 'Regression-x64' -TestSource 'RegressionTests.cs' -MainClass 'RegressionTests' -Platform 'x64' -Compiler $compiler64 -Arguments @()
     Invoke-Test -Name 'Regression-x86' -TestSource 'RegressionTests.cs' -MainClass 'RegressionTests' -Platform 'x86' -Compiler $compiler32 -Arguments @()
+    $reliabilityDirectory = Join-Path $runDirectory 'reliability-data'
+    New-Item -ItemType Directory -Path $reliabilityDirectory | Out-Null
+    $env:LINK_CHECKER_DATA_DIR = $reliabilityDirectory
+    Invoke-Test -Name 'Reliability-x64' -TestSource 'ReliabilityTests.cs' -MainClass 'ReliabilityTests' -Platform 'x64' -Compiler $compiler64 -Arguments @()
+    Remove-Item Env:LINK_CHECKER_DATA_DIR -ErrorAction SilentlyContinue
     Invoke-Test -Name 'CsvImport-x64' -TestSource 'CsvImportTests.cs' -MainClass 'CsvImportTests' -Platform 'x64' -Compiler $compiler64 -Arguments @($CsvPath)
     Invoke-Test -Name 'ExcelImport-x64' -TestSource 'ExcelImportTests.cs' -MainClass 'ExcelImportTests' -Platform 'x64' -Compiler $compiler64 -Arguments @($ExcelPath)
+    $sourceHashBefore = (Get-FileHash -Algorithm SHA256 -LiteralPath $ExcelPath).Hash
+    Invoke-Test -Name 'ExcelWriteback-x64' -TestSource 'ExcelWritebackTests.cs' -MainClass 'ExcelWritebackTests' -Platform 'x64' -Compiler $compiler64 -Arguments @($ExcelPath)
+    $sourceHashAfter = (Get-FileHash -Algorithm SHA256 -LiteralPath $ExcelPath).Hash
+    if ($sourceHashBefore -ne $sourceHashAfter) { throw 'Excel writeback test changed the original workbook.' }
     Invoke-Test -Name 'NetworkFallback-x64' -TestSource 'NetworkFallbackTests.cs' -MainClass 'NetworkFallbackTests' -Platform 'x64' -Compiler $compiler64 -Arguments @()
+    & (Join-Path $PSScriptRoot 'Test-ValidationScripts.ps1')
     Write-Host 'All core tests passed.'
 }
 finally {
+    Remove-Item Env:LINK_CHECKER_DATA_DIR -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $runDirectory) {
         Remove-Item -LiteralPath $runDirectory -Recurse -Force -ErrorAction SilentlyContinue
     }

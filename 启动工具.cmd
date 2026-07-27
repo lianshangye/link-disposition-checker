@@ -1,11 +1,12 @@
 @echo off
+setlocal
 cd /d "%~dp0"
-if not exist "Microsoft.Web.WebView2.Core.dll" goto missing
-if not exist "Microsoft.Web.WebView2.WinForms.dll" goto missing
-if not exist "WebView2Loader.dll" goto missing
-start "" "侵权链接处置核验工具.exe"
-exit /b 0
+if not exist "StartupCheck.exe" goto missing
+"StartupCheck.exe"
+exit /b %errorlevel%
+
 :missing
-echo Tool files are incomplete. Please extract the entire portable package before running.
+echo StartupCheck.exe is missing.
+echo Please extract the entire ZIP before running this tool.
 pause
 exit /b 1

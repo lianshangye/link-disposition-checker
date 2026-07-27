@@ -25,8 +25,8 @@ using Microsoft.Web.WebView2.WinForms;
 
 [assembly: AssemblyTitle("侵权链接处置核验工具")]
 [assembly: AssemblyProduct("侵权链接处置核验工具")]
-[assembly: AssemblyVersion("3.10.5.0")]
-[assembly: AssemblyFileVersion("3.10.5.0")]
+[assembly: AssemblyVersion("3.11.0.0")]
+[assembly: AssemblyFileVersion("3.11.0.0")]
 
 namespace LinkDispositionChecker
 {
@@ -211,10 +211,19 @@ namespace LinkDispositionChecker
         {
             get
             {
-                return !String.IsNullOrEmpty(SourceSheet) && SourceRow > 0
-                    ? SourceSheet + "\n" + SourceRow
-                    : Url ?? "";
+                return CheckIdentity.Create(SourceSheet, SourceRow, Url);
             }
+        }
+    }
+
+    internal static class CheckIdentity
+    {
+        public static string Create(string sourceSheet, int sourceRow, string url)
+        {
+            string normalizedUrl = (url ?? "").Trim();
+            return !String.IsNullOrEmpty(sourceSheet) && sourceRow > 0
+                ? sourceSheet + "\n" + sourceRow + "\n" + normalizedUrl
+                : normalizedUrl;
         }
     }
 
@@ -330,8 +339,8 @@ namespace LinkDispositionChecker
         public static PerformanceProfile Resolve(string selection)
         {
             if (selection == "低配模式") return new PerformanceProfile { Name = "低配", Workers = 3, GridRows = 700, BodyBytes = 240000, RefreshMilliseconds = 500 };
-            if (selection == "标准模式") return new PerformanceProfile { Name = "标准", Workers = 10, GridRows = 2500, BodyBytes = 550000, RefreshMilliseconds = 260 };
-            if (selection == "高性能模式") return new PerformanceProfile { Name = "高性能", Workers = 24, GridRows = 5000, BodyBytes = 900000, RefreshMilliseconds = 180 };
+            if (selection == "标准模式") return new PerformanceProfile { Name = "标准", Workers = 8, GridRows = 2500, BodyBytes = 550000, RefreshMilliseconds = 260 };
+            if (selection == "高性能模式") return new PerformanceProfile { Name = "高性能", Workers = 12, GridRows = 5000, BodyBytes = 900000, RefreshMilliseconds = 180 };
             if (!Environment.Is64BitProcess) return Resolve("低配模式");
             long memory = GetPhysicalMemoryBytes();
             int processors = Math.Max(1, Environment.ProcessorCount);
@@ -370,6 +379,7 @@ namespace LinkDispositionChecker
     {
         public static readonly string UserDataDirectory = ResolveWritableDirectory(new[]
         {
+            Environment.GetEnvironmentVariable("LINK_CHECKER_DATA_DIR"),
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LinkDispositionChecker"),
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "链接失效核验工具数据"),
             Path.Combine(Path.GetTempPath(), "LinkDispositionChecker")
@@ -485,13 +495,14 @@ namespace LinkDispositionChecker
 
     internal static class SessionStore
     {
-        public const string CurrentEngineVersion = "3.10.5";
+        public const string CurrentEngineVersion = "3.11.0";
         private static readonly object SyncRoot = new object();
         private static readonly JavaScriptSerializer Serializer = new JavaScriptSerializer { MaxJsonLength = Int32.MaxValue };
         public static readonly string SessionPath = Path.Combine(StoragePaths.UserDataDirectory, "last-session.json");
         public static readonly string JournalPath = SessionPath + ".journal";
+        public static readonly string BackupPath = SessionPath + ".bak";
 
-        public static bool Exists { get { return File.Exists(SessionPath) || File.Exists(JournalPath); } }
+        public static bool Exists { get { return File.Exists(SessionPath) || File.Exists(JournalPath) || File.Exists(BackupPath); } }
 
         public static void Save(string inputText, string excelPath, IEnumerable<CheckJob> jobs, IEnumerable<CheckResult> results)
         {
@@ -511,6 +522,7 @@ namespace LinkDispositionChecker
                     Results = (results ?? Enumerable.Empty<CheckResult>()).OrderBy(item => item.Number).ToList()
                 };
                 File.WriteAllText(temporary, Serializer.Serialize(session), new UTF8Encoding(false));
+                File.Copy(temporary, BackupPath, true);
                 if (File.Exists(SessionPath)) File.Replace(temporary, SessionPath, null);
                 else File.Move(temporary, SessionPath);
                 File.WriteAllText(JournalPath, "", new UTF8Encoding(false));
@@ -541,17 +553,38 @@ namespace LinkDispositionChecker
             CheckSession session;
             lock (SyncRoot)
             {
-                string json = File.Exists(SessionPath) ? File.ReadAllText(SessionPath, Encoding.UTF8) : "";
-                session = String.IsNullOrWhiteSpace(json) ? new CheckSession { Version = 1, Results = new List<CheckResult>() } : Serializer.Deserialize<CheckSession>(json);
+                Exception primaryFailure = null;
+                session = TryLoadSessionFile(SessionPath, out primaryFailure);
+                if (session == null)
+                {
+                    Exception backupFailure;
+                    session = TryLoadSessionFile(BackupPath, out backupFailure);
+                    if (session == null && primaryFailure != null)
+                        throw new InvalidDataException("主进度和备份均无法读取。", primaryFailure);
+                }
                 if (session == null) session = new CheckSession { Version = 1, Results = new List<CheckResult>() };
                 if (File.Exists(JournalPath))
                 {
-                    var latest = (session.Results ?? new List<CheckResult>()).ToDictionary(ResultKey, item => item, StringComparer.OrdinalIgnoreCase);
+                    var latest = new Dictionary<string, CheckResult>(StringComparer.OrdinalIgnoreCase);
+                    foreach (CheckResult saved in session.Results ?? new List<CheckResult>())
+                        if (saved != null) latest[ResultKey(saved)] = saved;
                     foreach (string line in File.ReadLines(JournalPath, Encoding.UTF8))
                     {
                         if (String.IsNullOrWhiteSpace(line)) continue;
-                        CheckResult result = Serializer.Deserialize<CheckResult>(line);
-                        if (result != null) latest[ResultKey(result)] = result;
+                        try
+                        {
+                            CheckResult result = Serializer.Deserialize<CheckResult>(line);
+                            if (result != null)
+                            {
+                                string key = ResultKey(result);
+                                CheckResult existing;
+                                if (!latest.TryGetValue(key, out existing) || IsAtLeastAsRecent(result, existing)) latest[key] = result;
+                            }
+                        }
+                        catch
+                        {
+                            // A crash can truncate only the final append. Earlier complete lines remain usable.
+                        }
                     }
                     session.Results = latest.Values.OrderBy(item => item.Number).ToList();
                 }
@@ -563,9 +596,45 @@ namespace LinkDispositionChecker
 
         private static string ResultKey(CheckResult result)
         {
-            return result != null && !String.IsNullOrEmpty(result.SourceSheet) && result.SourceRow > 0
-                ? result.SourceSheet + "\n" + result.SourceRow
-                : (result == null ? "" : result.OriginalUrl ?? "");
+            return result == null ? "" : CheckIdentity.Create(result.SourceSheet, result.SourceRow, result.OriginalUrl);
+        }
+
+        private static CheckSession TryLoadSessionFile(string path, out Exception failure)
+        {
+            failure = null;
+            if (!File.Exists(path)) return null;
+            try
+            {
+                string json = File.ReadAllText(path, Encoding.UTF8);
+                return String.IsNullOrWhiteSpace(json) ? null : Serializer.Deserialize<CheckSession>(json);
+            }
+            catch (Exception ex)
+            {
+                failure = ex;
+                return null;
+            }
+        }
+
+        private static bool IsAtLeastAsRecent(CheckResult candidate, CheckResult existing)
+        {
+            DateTime candidateTime;
+            DateTime existingTime;
+            bool candidateParsed = DateTime.TryParse(candidate == null ? "" : candidate.CheckedAt, out candidateTime);
+            bool existingParsed = DateTime.TryParse(existing == null ? "" : existing.CheckedAt, out existingTime);
+            if (candidateParsed && existingParsed) return candidateTime >= existingTime;
+            if (existingParsed && !candidateParsed) return false;
+            return true;
+        }
+
+        public static void Clear()
+        {
+            lock (SyncRoot)
+            {
+                foreach (string path in new[] { SessionPath, JournalPath, BackupPath, SessionPath + ".tmp" })
+                {
+                    try { if (File.Exists(path)) File.Delete(path); } catch { }
+                }
+            }
         }
 
         public static string Describe()
@@ -933,8 +1002,9 @@ namespace LinkDispositionChecker
 
         private static bool IsPlatformHeader(string value)
         {
-            string lower = (value ?? "").Trim().ToLowerInvariant();
-            return lower == "平台" || lower.Contains("发布平台") || lower.Contains("来源平台") || lower == "platform";
+            string lower = (value ?? "").Replace(" ", "").Trim().ToLowerInvariant();
+            return lower == "平台" || lower == "平台名称" || lower.Contains("发布平台") ||
+                lower.Contains("来源平台") || lower == "platform" || lower == "platformname";
         }
 
         private static bool IsWechatChannelPlatform(string value)
@@ -1473,8 +1543,9 @@ namespace LinkDispositionChecker
 
         private static bool IsPlatformHeader(string value)
         {
-            string lower = (value ?? "").Trim().ToLowerInvariant();
-            return lower == "平台" || lower.Contains("发布平台") || lower.Contains("来源平台") || lower == "platform";
+            string lower = (value ?? "").Replace(" ", "").Trim().ToLowerInvariant();
+            return lower == "平台" || lower == "平台名称" || lower.Contains("发布平台") ||
+                lower.Contains("来源平台") || lower == "platform" || lower == "platformname";
         }
 
         private static bool IsWechatChannelPlatform(string value)
@@ -1540,12 +1611,18 @@ namespace LinkDispositionChecker
         private static readonly SemaphoreSlim ZhihuProbeGate = new SemaphoreSlim(1, 1);
         private static readonly SemaphoreSlim BaiduPublicProbeGate = new SemaphoreSlim(1, 1);
         private static readonly SemaphoreSlim KuaishouProbeGate = new SemaphoreSlim(1, 1);
-        private static readonly SemaphoreSlim BilibiliProbeGate = new SemaphoreSlim(1, 1);
+        private static readonly SemaphoreSlim BilibiliProbeGate = new SemaphoreSlim(2, 2);
         private static readonly SemaphoreSlim RenderedSocialProbeGate = new SemaphoreSlim(3, 3);
         private static readonly object ZhihuProbeTimingSync = new object();
         private static DateTime _lastZhihuProbeStartedUtc = DateTime.MinValue;
-        private static readonly ConcurrentDictionary<string, Task<PlatformProbeOutcome>> DouyinProbeCache =
-            new ConcurrentDictionary<string, Task<PlatformProbeOutcome>>(StringComparer.OrdinalIgnoreCase);
+        private sealed class DouyinCacheEntry
+        {
+            public DateTime CreatedUtc;
+            public Task<PlatformProbeOutcome> Operation;
+        }
+
+        private static readonly ConcurrentDictionary<string, DouyinCacheEntry> DouyinProbeCache =
+            new ConcurrentDictionary<string, DouyinCacheEntry>(StringComparer.OrdinalIgnoreCase);
         private static readonly SemaphoreSlim WeiboVisitorGate = new SemaphoreSlim(1, 1);
         private static readonly SemaphoreSlim WeiboProbeGate = new SemaphoreSlim(1, 1);
         private static string _weiboVisitorCookie = "";
@@ -1625,6 +1702,29 @@ namespace LinkDispositionChecker
             public HttpResponseMessage Response;
             public Exception Error;
         }
+
+        private sealed class TransportOutcome : IDisposable
+        {
+            public HttpResponseMessage Response;
+            public bool PersistentHostFailure;
+            public string RouteSummary;
+
+            public void Dispose()
+            {
+                if (Response != null) Response.Dispose();
+            }
+        }
+
+        private sealed class HostFailureSnapshot
+        {
+            public int StatusCode;
+            public string RouteSummary;
+        }
+
+        private readonly ConcurrentDictionary<string, SemaphoreSlim> _genericHostGates =
+            new ConcurrentDictionary<string, SemaphoreSlim>(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, HostFailureSnapshot> _persistentHostFailures =
+            new ConcurrentDictionary<string, HostFailureSnapshot>(StringComparer.OrdinalIgnoreCase);
 
         public Checker() : this(900000) { }
 
@@ -1752,8 +1852,9 @@ namespace LinkDispositionChecker
 
             try
             {
-                using (var response = await SendWithFallbackAsync(uri, token))
+                using (var transport = await SendWithFallbackAsync(uri, token))
                 {
+                    HttpResponseMessage response = transport.Response;
                     int code = (int)response.StatusCode;
                     result.StatusCode = code.ToString();
                     result.FinalUrl = response.RequestMessage != null && response.RequestMessage.RequestUri != null
@@ -1764,7 +1865,10 @@ namespace LinkDispositionChecker
                     string title = ExtractTitle(body);
                     result.Title = title;
 
-                    PlatformProbeOutcome platformProbe = await ProbePlatformContentAsync(uri, expectedTitle, expectedExcerpt, expectedAuthor, token);
+                    Uri finalUri;
+                    Uri.TryCreate(result.FinalUrl, UriKind.Absolute, out finalUri);
+                    PlatformProbeOutcome platformProbe = await ProbePlatformContentAcrossRedirectAsync(
+                        uri, finalUri, expectedTitle, expectedExcerpt, expectedAuthor, token);
                     if (platformProbe != null && platformProbe.Evidences != null)
                         result.EvidenceTrail = platformProbe.Evidences;
                     if (platformProbe != null && platformProbe.Resolved)
@@ -1776,8 +1880,11 @@ namespace LinkDispositionChecker
 
                     else if (code == 404 || code == 410)
                     {
-                        result.Verdict = "已失效";
-                        result.Evidence = "服务器返回 HTTP " + code;
+                        bool targetResponse = IsAuthoritativeTargetHttpRemoval(uri, finalUri);
+                        result.Verdict = targetResponse ? "已失效" : "人工复核";
+                        result.Evidence = targetResponse
+                            ? "目标地址所属站点返回 HTTP " + code
+                            : "请求跳转到其他站点后返回 HTTP " + code + "，不能证明原目标内容已删除";
                     }
                     else if (code == 401 || code == 403 || code == 407 || code == 429)
                     {
@@ -1786,8 +1893,7 @@ namespace LinkDispositionChecker
                     }
                     else if (code >= 500)
                     {
-                        result.Verdict = "暂时异常";
-                        result.Evidence = "站点服务异常（HTTP " + code + "），建议稍后重试";
+                        ApplyUnresolvedServerFailure(result, code, transport.PersistentHostFailure, transport.RouteSummary);
                     }
                     else if (code == 451)
                     {
@@ -1958,11 +2064,82 @@ namespace LinkDispositionChecker
             return result;
         }
 
+        internal static void ApplyUnresolvedServerFailure(CheckResult result, int statusCode, bool persistentHostFailure, string routeSummary)
+        {
+            if (result == null) return;
+            result.Verdict = "暂时异常";
+            result.Evidence = persistentHostFailure
+                ? "系统网络、直连及 HTTP/HTTPS 多路线均未取得目标页面（" +
+                    (String.IsNullOrWhiteSpace(routeSummary) ? "HTTP " + statusCode : routeSummary) +
+                    "）；这只能证明当前网络无法核验，不能证明内容已删除"
+                : "站点服务异常（HTTP " + statusCode + "），不能据此判定内容已处置，建议稍后重试";
+        }
+
+        private async Task<PlatformProbeOutcome> ProbePlatformContentAcrossRedirectAsync(Uri original, Uri final,
+            string expectedTitle, string expectedExcerpt, string expectedAuthor, CancellationToken token)
+        {
+            // Supplier exports frequently contain short links. The redirected content URL carries
+            // the platform item id, so it must be probed before the short-link address.
+            if (final != null && (original == null ||
+                !String.Equals(final.AbsoluteUri, original.AbsoluteUri, StringComparison.OrdinalIgnoreCase)))
+            {
+                PlatformProbeOutcome redirected = await ProbePlatformContentAsync(
+                    final, expectedTitle, expectedExcerpt, expectedAuthor, token);
+                if (redirected != null && redirected.Resolved) return redirected;
+            }
+
+            PlatformProbeOutcome source = await ProbePlatformContentAsync(
+                original, expectedTitle, expectedExcerpt, expectedAuthor, token);
+            if (source != null) return source;
+
+            return null;
+        }
+
         private async Task<PlatformProbeOutcome> ProbePlatformContentAsync(Uri original, string expectedTitle, string expectedExcerpt, string expectedAuthor, CancellationToken token)
         {
             if (original == null) return null;
             string host = original.Host.ToLowerInvariant();
             Match identity;
+            if (host.EndsWith("weibo.com", StringComparison.Ordinal) &&
+                (original.AbsolutePath ?? "").IndexOf("/ttarticle/", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                identity = Regex.Match((original.Query ?? "") + "&" + (original.AbsolutePath ?? ""),
+                    @"(?:^|[?&])id=([0-9]{12,})|/id/([0-9]{12,})", RegexOptions.IgnoreCase);
+                if (identity.Success)
+                {
+                    string id = identity.Groups[1].Success ? identity.Groups[1].Value : identity.Groups[2].Value;
+                    string probeUrl = "https://weibo.com/ttarticle/x/m/aj/detail?id=" + id;
+                    var headers = new Dictionary<string, string>
+                    {
+                        { "User-Agent", "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 Chrome/124 Mobile Safari/537.36" },
+                        { "Accept-Language", "zh-CN,zh;q=0.9" },
+                        { "Referer", "https://weibo.com/ttarticle/x/m/show/id/" + id },
+                        { "X-Requested-With", "XMLHttpRequest" }
+                    };
+                    ProbeResponse article = await TryReadProbeAsync(probeUrl, headers, token);
+                    if (article != null && article.Status == 200)
+                    {
+                        string body = article.Body ?? "";
+                        int articleCode = ExtractJsonInt(body, "code", Int32.MinValue);
+                        string articleText = WebUtility.HtmlDecode(DecodeJsonUnicode(body));
+                        if (articleCode == 100000 && body.IndexOf(id, StringComparison.OrdinalIgnoreCase) >= 0 &&
+                            Regex.IsMatch(body, "\\\"(?:title|content)\\\"\\s*:", RegexOptions.IgnoreCase))
+                            return ProbeOutcome(EvidenceKind.TargetContentPresent, EvidenceStrength.Conclusive,
+                                "official-article-api", "微博头条文章", id,
+                                "微博头条文章官方接口返回目标文章编号和正文内容", probeUrl, true);
+                        if (articleCode == 100098)
+                        {
+                            return ProbeOutcome(EvidenceKind.TargetContentPresent, EvidenceStrength.Strong,
+                                "official-article-api", "微博头条文章", id,
+                                "微博官方文章接口确认目标文章仍存在，但完整正文仅允许登录或在客户端查看", probeUrl, true);
+                        }
+                        if (Regex.IsMatch(articleText, "文章不存在|文章已删除|内容不存在|已被删除", RegexOptions.IgnoreCase))
+                            return ProbeOutcome(EvidenceKind.TargetRemovalExplicit, EvidenceStrength.Conclusive,
+                                "official-article-api", "微博头条文章", id,
+                                "微博头条文章官方接口明确提示目标文章不存在或已删除", probeUrl, true);
+                    }
+                }
+            }
             if (host.EndsWith("yidianzixun.com", StringComparison.Ordinal) ||
                 host == "k.sina.com.cn" || host == "k.sina.cn")
             {
@@ -2005,15 +2182,14 @@ namespace LinkDispositionChecker
                         : "https://mbd.baidu.com/newspage/data/landingreact?nid=" + articleNid;
                     var sharedHeaders = new Dictionary<string, string>
                     {
-                        { "User-Agent", articleNid.StartsWith("dt_", StringComparison.OrdinalIgnoreCase)
-                            ? "Mozilla/5.0 (compatible; Baiduspider/2.0; +http://www.baidu.com/search/spider.html)"
-                            : "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 Chrome/124 Mobile Safari/537.36" },
+                        // Baidu's mobile UA is frequently sent to the captcha page even for
+                        // public Baijiahao shares. The clean public route is used below so a
+                        // captcha response is not mistaken for missing article evidence.
+                        { "User-Agent", "Mozilla/5.0 (compatible; Baiduspider/2.0; +http://www.baidu.com/search/spider.html)" },
                         { "Accept-Language", "zh-CN,zh;q=0.9" },
                         { "Referer", "https://mbd.baidu.com/" }
                     };
-                    ProbeResponse shared = articleNid.StartsWith("dt_", StringComparison.OrdinalIgnoreCase)
-                        ? await TryReadCleanPublicProbeAsync(sharedUrl, sharedHeaders, token)
-                        : await TryReadProbeAsync(sharedUrl, sharedHeaders, token);
+                    ProbeResponse shared = await TryReadCleanPublicProbeAsync(sharedUrl, sharedHeaders, token);
                     if (shared != null && shared.Status == 200)
                     {
                         string sharedText = ExtractVisibleText(shared.Body);
@@ -2033,15 +2209,30 @@ namespace LinkDispositionChecker
             }
             if (host.EndsWith("douyin.com", StringComparison.Ordinal) || host.EndsWith("iesdouyin.com", StringComparison.Ordinal))
             {
-                identity = Regex.Match(original.AbsolutePath ?? "", @"/(?:share/)?(?:video|note)/([0-9]{12,})", RegexOptions.IgnoreCase);
+                identity = Regex.Match(original.AbsolutePath ?? "", @"/(?:share/)?(?:video|note|article)/([0-9]{12,})", RegexOptions.IgnoreCase);
                 if (!identity.Success) return null;
                 string id = identity.Groups[1].Value;
                 string sourceUrl = original.AbsoluteUri;
-                Task<PlatformProbeOutcome> operation = DouyinProbeCache.GetOrAdd(id,
-                    ignored => ProbeDouyinContentAsync(sourceUrl, id, expectedTitle, expectedExcerpt, expectedAuthor, CancellationToken.None));
+                string cacheKey = id + "\n" + (expectedTitle ?? "") + "\n" + (expectedExcerpt ?? "") + "\n" + (expectedAuthor ?? "");
+                DouyinCacheEntry entry;
+                if (!DouyinProbeCache.TryGetValue(cacheKey, out entry) ||
+                    DateTime.UtcNow - entry.CreatedUtc > TimeSpan.FromMinutes(5) || entry.Operation.IsCanceled || entry.Operation.IsFaulted)
+                {
+                    entry = new DouyinCacheEntry
+                    {
+                        CreatedUtc = DateTime.UtcNow,
+                        Operation = ProbeDouyinContentAsync(sourceUrl, id, expectedTitle, expectedExcerpt, expectedAuthor, token)
+                    };
+                    DouyinProbeCache[cacheKey] = entry;
+                }
+                Task<PlatformProbeOutcome> operation = entry.Operation;
                 Task finished = await Task.WhenAny(operation, Task.Delay(18000, token));
                 if (finished != operation) { token.ThrowIfCancellationRequested(); return null; }
-                return await operation;
+                try { return await operation; }
+                finally
+                {
+                    if (operation.IsCanceled || operation.IsFaulted) DouyinProbeCache.TryRemove(cacheKey, out entry);
+                }
             }
             if (host.EndsWith("kuaishou.com", StringComparison.Ordinal) || host.EndsWith("gifshow.com", StringComparison.Ordinal))
             {
@@ -2151,18 +2342,47 @@ namespace LinkDispositionChecker
                 {
                     string id = identity.Groups[1].Value;
                     string opusUrl = "https://www.bilibili.com/opus/" + id;
+                    // B站会把带 timezone/listOnlyfans 的旧组合参数送入 -352 风控，
+                    // itemOpusStyle 是当前公开详情接口可稳定返回正文的最小参数。
+                    string apiUrl = "https://api.bilibili.com/x/polymer/web-dynamic/v1/detail?id=" + id + "&features=itemOpusStyle";
                     var opusHeaders = new Dictionary<string, string>
                     {
                         { "User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36" },
                         { "Accept-Language", "zh-CN,zh;q=0.9" },
                         { "Referer", "https://www.bilibili.com/" }
                     };
-                    ProbeResponse opusProbe;
+                    ProbeResponse opusProbe = null;
                     await BilibiliProbeGate.WaitAsync(token);
                     try
                     {
+                        ProbeResponse apiProbe = await TryReadProbeAsync(apiUrl, opusHeaders, token);
+                        if (apiProbe != null && apiProbe.Status == 200 &&
+                            ExtractJsonInt(apiProbe.Body, "code", Int32.MinValue) == -352)
+                        {
+                            await Task.Delay(900, token);
+                            apiProbe = await TryReadProbeAsync(apiUrl, opusHeaders, token);
+                        }
+                        if (apiProbe != null && apiProbe.Status == 200)
+                        {
+                            string apiBody = apiProbe.Body ?? "";
+                            string apiText = WebUtility.HtmlDecode(DecodeJsonUnicode(apiBody));
+                            int apiCode = ExtractJsonInt(apiBody, "code", Int32.MinValue);
+                            string apiMessage = ExtractJsonString(apiBody, "message");
+                            if (apiCode == 4101152 || apiMessage.IndexOf("动态不可见", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                apiMessage.IndexOf("动态不存在", StringComparison.OrdinalIgnoreCase) >= 0)
+                                return ProbeOutcome(EvidenceKind.TargetRemovalExplicit, EvidenceStrength.Conclusive,
+                                    "official-api", "B站", id, "B站官方动态接口确认目标动态不存在或不可见", apiUrl, true);
+                            if (apiCode == 0 && apiText.IndexOf(id, StringComparison.OrdinalIgnoreCase) >= 0 &&
+                                MatchesExpectedContent(expectedTitle, expectedExcerpt, apiText))
+                                return ProbeOutcome(EvidenceKind.TargetContentPresent, EvidenceStrength.Conclusive,
+                                    "official-api", "B站", id, "B站官方动态接口返回目标动态编号和匹配正文" +
+                                        (MatchesExpectedAuthor(expectedAuthor, apiText) ? "、作者" : ""), apiUrl, true);
+                        }
+
+                        // The public Opus page is a secondary source. It is only used when the
+                        // item API is rate-limited or does not contain enough identity evidence.
                         opusProbe = await TryReadProbeAsync(opusUrl, opusHeaders, token);
-                        await Task.Delay(250, token);
+                        await Task.Delay(180, token);
                     }
                     finally { BilibiliProbeGate.Release(); }
                     if (opusProbe != null && opusProbe.Status == 200 &&
@@ -3410,8 +3630,7 @@ namespace LinkDispositionChecker
                             if (String.IsNullOrWhiteSpace(currentText)) currentText = ExtractJsonStringLong(body, "text", 12000);
                             bool contentMatch = MatchesExpectedContent(expectedTitle, expectedExcerpt, currentText + " " + body);
                             bool authorMatch = MatchesExpectedAuthor(expectedAuthor, body);
-                            if (IsWeiboPresentResponse(body, id) && !String.IsNullOrWhiteSpace(currentText) && contentMatch &&
-                                (String.IsNullOrWhiteSpace(expectedAuthor) || authorMatch))
+                            if (IsWeiboPresentResponse(body, id) && !String.IsNullOrWhiteSpace(currentText) && contentMatch)
                                 apiOutcome = ProbeOutcome(EvidenceKind.TargetContentPresent, EvidenceStrength.Conclusive,
                                     "official-api", "微博", id, "微博官方单条接口返回目标微博编号、匹配正文" +
                                         (authorMatch ? "和作者“" + expectedAuthor.Trim() + "”" : ""), probeUrl, true);
@@ -3634,7 +3853,11 @@ namespace LinkDispositionChecker
                 }
             }
 
-            string probeUrl = "https://www.iesdouyin.com/share/video/" + id + "/";
+            bool noteLike = false;
+            Uri sourceUri;
+            if (Uri.TryCreate(originalUrl, UriKind.Absolute, out sourceUri))
+                noteLike = Regex.IsMatch(sourceUri.AbsolutePath ?? "", @"/(?:note|article)/", RegexOptions.IgnoreCase);
+            string probeUrl = "https://www.iesdouyin.com/share/" + (noteLike ? "note/" : "video/") + id + "/";
             var headers = new Dictionary<string, string>
             {
                 { "User-Agent", "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 Chrome/124 Mobile Safari/537.36" },
@@ -3653,10 +3876,23 @@ namespace LinkDispositionChecker
             if (targetDescription)
                 return ProbeOutcome(EvidenceKind.TargetContentPresent, EvidenceStrength.Conclusive,
                     "official-share-page", "抖音", id, "抖音官方分享页返回目标作品编号、视频文案和非空作品数据", probeUrl, true);
-            if (targetItem && itemListEmpty && filter.Success)
+            if (targetItem && itemListEmpty && filter.Success && IsDouyinRemovalFilterReason(filter.Groups[1].Value))
                 return ProbeOutcome(EvidenceKind.TargetRemovalExplicit, EvidenceStrength.Conclusive,
                     "official-share-page", "抖音", id, "抖音官方分享页确认目标作品当前不可见（" + filter.Groups[1].Value + "）", probeUrl, true);
             return null;
+        }
+
+        internal static bool IsDouyinRemovalFilterReason(string reason)
+        {
+            string normalized = (reason ?? "").Trim().ToLowerInvariant();
+            if (String.IsNullOrWhiteSpace(normalized)) return false;
+            // long_article_low_version describes a browser compatibility fallback, not deletion.
+            if (normalized == "long_article_low_version" || normalized.Contains("low_version") ||
+                normalized.Contains("unsupported") || normalized.Contains("not_support")) return false;
+            return normalized.Contains("deleted") || normalized.Contains("self_see") ||
+                normalized.Contains("private") || normalized.Contains("audit_not_pass") ||
+                normalized.Contains("not_exist") || normalized.Contains("unavailable") ||
+                normalized.Contains("violation") || normalized.Contains("ban");
         }
 
         internal static string ExtractBaiduVideoId(Uri uri)
@@ -3680,6 +3916,22 @@ namespace LinkDispositionChecker
             if (path.IndexOf("video", StringComparison.OrdinalIgnoreCase) >= 0) return "";
             Match match = Regex.Match(uri.Query ?? "", @"(?:^|[?&])nid=(?:(?:news|dt)_)?([0-9]{8,})", RegexOptions.IgnoreCase);
             if (match.Success && Regex.IsMatch(path, @"landing|tuwen|article", RegexOptions.IgnoreCase)) return match.Groups[1].Value;
+            // Baijiahao share links commonly put nid inside a URL-encoded context
+            // object (sometimes encoded twice). Decode that object before looking for
+            // the article identity; otherwise a public article is reduced to a shell.
+            if (Regex.IsMatch(path, @"landing|tuwen|article", RegexOptions.IgnoreCase) ||
+                (uri.Query ?? "").IndexOf("backurl=", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                string decodedQuery = uri.Query ?? "";
+                for (int i = 0; i < 3; i++)
+                {
+                    string next = WebUtility.UrlDecode(decodedQuery);
+                    if (String.Equals(next, decodedQuery, StringComparison.Ordinal)) break;
+                    decodedQuery = next;
+                }
+                match = Regex.Match(decodedQuery, @"[""']nid[""']\s*[:=]\s*[""']?(?:(?:news|dt)_)?([0-9]{8,})", RegexOptions.IgnoreCase);
+                if (match.Success) return match.Groups[1].Value;
+            }
             match = Regex.Match(uri.Query ?? "", @"(?:^|[?&])id=([0-9]{8,})", RegexOptions.IgnoreCase);
             if (match.Success && (host == "baijiahao.baidu.com" || Regex.IsMatch(path, @"/s$", RegexOptions.IgnoreCase))) return match.Groups[1].Value;
             match = Regex.Match(path, @"/article/([0-9]{8,})(?:\.html)?", RegexOptions.IgnoreCase);
@@ -3899,7 +4151,7 @@ namespace LinkDispositionChecker
 
         private static int ExtractJsonInt(string json, string property, int fallback)
         {
-            Match match = Regex.Match(json ?? "", "\\\"" + Regex.Escape(property) + "\\\"\\s*:\\s*(-?[0-9]+)", RegexOptions.IgnoreCase);
+            Match match = Regex.Match(json ?? "", "\\\"" + Regex.Escape(property) + "\\\"\\s*:\\s*\\\"?(-?[0-9]+)\\\"?", RegexOptions.IgnoreCase);
             int value;
             return match.Success && Int32.TryParse(match.Groups[1].Value, out value) ? value : fallback;
         }
@@ -4203,7 +4455,7 @@ namespace LinkDispositionChecker
                 Regex.IsMatch(html, "(?:desc|description|share_title)\\D{0,16}[^\\\"']{4,}", RegexOptions.IgnoreCase);
         }
 
-        private async Task<HttpResponseMessage> SendWithFallbackAsync(Uri uri, CancellationToken token)
+        private async Task<TransportOutcome> SendWithFallbackAsync(Uri uri, CancellationToken token)
         {
             var candidates = new List<Uri> { uri };
             if (uri != null && uri.Scheme == Uri.UriSchemeHttp)
@@ -4217,32 +4469,152 @@ namespace LinkDispositionChecker
                 catch { }
             }
 
-            HttpResponseMessage retainedResponse = null;
-            var errors = new List<Exception>();
-            foreach (HttpClient client in new[] { _client, _directClient })
+            bool genericHost = IsGenericWebMediaTransportHost(uri);
+            string hostKey = uri == null ? "" : uri.Host.ToLowerInvariant();
+            SemaphoreSlim hostGate = null;
+            if (genericHost)
             {
-                foreach (Uri candidate in candidates)
-                {
-                    SendAttempt attempt = await TrySendClientAsync(client, candidate, token);
-                    if (attempt.Response != null)
-                    {
-                        if (!IsRetryableTransportStatus(attempt.Response, candidate))
-                        {
-                            if (retainedResponse != null) retainedResponse.Dispose();
-                            return attempt.Response;
-                        }
-                        if (retainedResponse == null) retainedResponse = attempt.Response;
-                        else attempt.Response.Dispose();
-                    }
-                    if (attempt.Error != null) errors.Add(attempt.Error);
-                }
+                hostGate = _genericHostGates.GetOrAdd(hostKey, ignored => new SemaphoreSlim(1, 1));
+                await hostGate.WaitAsync(token);
             }
 
-            if (retainedResponse != null) return retainedResponse;
-            Exception error = errors.LastOrDefault();
-            if (error is TaskCanceledException) throw (TaskCanceledException)error;
-            if (error is HttpRequestException) throw (HttpRequestException)error;
-            throw new HttpRequestException("HTTP/HTTPS 的系统代理和直连均无法建立连接", error);
+            try
+            {
+                HostFailureSnapshot cachedFailure;
+                if (genericHost && _persistentHostFailures.TryGetValue(hostKey, out cachedFailure))
+                {
+                    var cachedResponse = new HttpResponseMessage((HttpStatusCode)cachedFailure.StatusCode)
+                    {
+                        Content = new StringContent(""),
+                        RequestMessage = new HttpRequestMessage(HttpMethod.Get, uri)
+                    };
+                    return new TransportOutcome
+                    {
+                        Response = cachedResponse,
+                        PersistentHostFailure = true,
+                        RouteSummary = cachedFailure.RouteSummary
+                    };
+                }
+
+                HttpResponseMessage retainedResponse = null;
+                int retainedQuality = Int32.MinValue;
+                int attempts = 0;
+                int gatewayResponses = 0;
+                bool sawNonGatewayResponse = false;
+                var errors = new List<Exception>();
+                var observations = new List<string>();
+
+                foreach (Uri candidate in candidates)
+                {
+                    foreach (HttpClient client in new[] { _client, _directClient })
+                    {
+                        attempts++;
+                        string route = Object.ReferenceEquals(client, _client) ? "系统网络" : "直连";
+                        route += candidate.Scheme == Uri.UriSchemeHttps ? "HTTPS" : "HTTP";
+                        SendAttempt attempt = await TrySendClientAsync(client, candidate, token);
+                        if (attempt.Response != null)
+                        {
+                            int code = (int)attempt.Response.StatusCode;
+                            observations.Add(route + "=" + code);
+                            if (code == 502 || code == 503 || code == 504) gatewayResponses++;
+                            else sawNonGatewayResponse = true;
+
+                            int quality = ResponseQuality(attempt.Response);
+                            if (quality > retainedQuality)
+                            {
+                                if (retainedResponse != null) retainedResponse.Dispose();
+                                retainedResponse = attempt.Response;
+                                retainedQuality = quality;
+                            }
+                            else attempt.Response.Dispose();
+
+                            // A readable response is authoritative. Error responses still need
+                            // the alternate route so a proxy error cannot hide a direct result.
+                            if (code >= 200 && code < 400)
+                            {
+                                return new TransportOutcome
+                                {
+                                    Response = retainedResponse,
+                                    RouteSummary = String.Join("、", observations)
+                                };
+                            }
+                        }
+                        if (attempt.Error != null)
+                        {
+                            errors.Add(attempt.Error);
+                            observations.Add(route + "=" + DescribeTransportError(attempt.Error));
+                        }
+                    }
+                }
+
+                if (retainedResponse != null)
+                {
+                    bool persistentFailure = genericHost && attempts >= 2 && gatewayResponses > 0 && !sawNonGatewayResponse;
+                    string summary = String.Join("、", observations);
+                    if (persistentFailure)
+                    {
+                        int status = (int)retainedResponse.StatusCode;
+                        _persistentHostFailures[hostKey] = new HostFailureSnapshot
+                        {
+                            StatusCode = status,
+                            RouteSummary = summary
+                        };
+                    }
+                    return new TransportOutcome
+                    {
+                        Response = retainedResponse,
+                        PersistentHostFailure = persistentFailure,
+                        RouteSummary = summary
+                    };
+                }
+
+                Exception error = errors.LastOrDefault();
+                if (error is TaskCanceledException) throw (TaskCanceledException)error;
+                if (error is HttpRequestException) throw (HttpRequestException)error;
+                throw new HttpRequestException("HTTP/HTTPS 的系统代理和直连均无法建立连接", error);
+            }
+            finally
+            {
+                if (hostGate != null) hostGate.Release();
+            }
+        }
+
+        internal static int ResponseQuality(HttpResponseMessage response)
+        {
+            if (response == null) return Int32.MinValue;
+            int code = (int)response.StatusCode;
+            if (code >= 200 && code < 400) return 1000;
+            if (code == 404 || code == 410) return 900;
+            if (code == 451) return 850;
+            if (code >= 400 && code < 500) return 700;
+            if (code >= 500 && code < 600) return 300;
+            return 100;
+        }
+
+        private static string DescribeTransportError(Exception error)
+        {
+            if (error is TaskCanceledException) return "超时";
+            string message = error == null ? "连接失败" : (error.GetBaseException().Message ?? "连接失败");
+            string lower = message.ToLowerInvariant();
+            if (lower.Contains("certificate") || lower.Contains("证书") || lower.Contains("ssl") || lower.Contains("tls")) return "证书失败";
+            if (lower.Contains("timed out") || lower.Contains("超时")) return "超时";
+            if (lower.Contains("forcibly closed") || lower.Contains("强迫关闭") || lower.Contains("closed")) return "连接关闭";
+            return "连接失败";
+        }
+
+        private static bool IsGenericWebMediaTransportHost(Uri uri)
+        {
+            if (uri == null || uri.IsLoopback) return false;
+            string host = (uri.Host ?? "").ToLowerInvariant();
+            if (String.IsNullOrWhiteSpace(host)) return false;
+            string[] platformHosts =
+            {
+                "baidu.com", "baidu.com.cn", "yoojia.com", "toutiao.com", "weibo.com", "weibo.cn",
+                "bilibili.com", "b23.tv", "douyin.com", "iesdouyin.com", "zhihu.com", "xueqiu.com",
+                "kuaishou.com", "gifshow.com", "xiaohongshu.com", "xhslink.com", "qq.com", "sina.com.cn",
+                "eastmoney.com", "10jqka.com.cn", "dongchedi.com", "dcdapp.com"
+            };
+            return !platformHosts.Any(item => host == item || host.EndsWith("." + item, StringComparison.Ordinal));
         }
 
         private static async Task<SendAttempt> TrySendClientAsync(HttpClient client, Uri uri, CancellationToken token)
@@ -4436,6 +4808,12 @@ namespace LinkDispositionChecker
             string second = NormalizePlatformHost(secondHost);
             if (first.Length > 0 && String.Equals(first, second, StringComparison.OrdinalIgnoreCase)) return true;
             return PlatformRules.AreSamePlatform(firstHost, secondHost);
+        }
+
+        internal static bool IsAuthoritativeTargetHttpRemoval(Uri original, Uri final)
+        {
+            if (original == null || final == null || LooksLikeLogin(final.AbsoluteUri)) return false;
+            return SamePlatformHost(original.Host, final.Host);
         }
 
         private static string NormalizePlatformHost(string host)
@@ -5357,7 +5735,8 @@ namespace LinkDispositionChecker
                     }
                     try
                     {
-                        RenderedPageData rendered = await ReadFastRenderedPageAsync(_browser, pendingItem.OriginalUrl, _cancellation.Token);
+                        RenderedPageData rendered = await ReadFastRenderedPageAsync(_browser, pendingItem.OriginalUrl,
+                            pendingItem, _cancellation.Token);
                         if (IsZhihuSecurityPage(pendingItem, rendered))
                         {
                             pendingItem.Verdict = "人工复核";
@@ -5433,6 +5812,12 @@ namespace LinkDispositionChecker
 
         internal static async Task<RenderedPageData> ReadFastRenderedPageAsync(WebView2 browser, string url, CancellationToken token)
         {
+            return await ReadFastRenderedPageAsync(browser, url, null, token);
+        }
+
+        internal static async Task<RenderedPageData> ReadFastRenderedPageAsync(WebView2 browser, string url,
+            CheckResult item, CancellationToken token)
+        {
             var completion = new TaskCompletionSource<bool>();
             EventHandler<CoreWebView2NavigationCompletedEventArgs> handler = null;
             handler = delegate(object sender, CoreWebView2NavigationCompletedEventArgs args)
@@ -5442,7 +5827,10 @@ namespace LinkDispositionChecker
             };
             browser.CoreWebView2.NavigationCompleted += handler;
             browser.CoreWebView2.Navigate(url);
-            Task finished = await Task.WhenAny(completion.Task, Task.Delay(6500, token));
+            DeepPlatformProfile profile = GetDeepPlatformProfile(url);
+            bool dynamicHost = IsFastDynamicHost(url);
+            int navigationTimeout = dynamicHost ? Math.Max(9000, profile.NavigationTimeoutMilliseconds) : 6500;
+            Task finished = await Task.WhenAny(completion.Task, Task.Delay(navigationTimeout, token));
             browser.CoreWebView2.NavigationCompleted -= handler;
             if (finished != completion.Task)
             {
@@ -5450,14 +5838,31 @@ namespace LinkDispositionChecker
                 return new RenderedPageData { Url = url };
             }
 
-            int wait = IsFastDynamicHost(url) ? 1100 : 500;
-            await Task.Delay(wait, token);
-            RenderedPageData latest = await ReadPageAsync(browser, token);
-            if ((latest.Text ?? "").Length < 80)
+            int minimumWait = dynamicHost ? Math.Max(2400, profile.MinimumWaitMilliseconds) : 600;
+            int maximumWait = dynamicHost ? Math.Max(6800, profile.MaximumWaitMilliseconds) : 2600;
+            var watch = Stopwatch.StartNew();
+            RenderedPageData latest = new RenderedPageData { Url = url };
+            string lastSignature = "";
+            int stableSamples = 0;
+            var observed = new List<string>();
+            while (watch.ElapsedMilliseconds < maximumWait)
             {
-                await Task.Delay(350, token);
+                await Task.Delay(400, token);
                 latest = await ReadPageAsync(browser, token);
+                if (!String.IsNullOrWhiteSpace(latest.Url) && !observed.Contains(latest.Url, StringComparer.OrdinalIgnoreCase))
+                    observed.Add(latest.Url);
+                string text = latest.Text ?? "";
+                string signature = (latest.Url ?? "") + "\n" + (latest.Title ?? "") + "\n" + text.Length + "\n" +
+                    (text.Length > 500 ? text.Substring(0, 250) + text.Substring(text.Length - 250) : text);
+                if (String.Equals(signature, lastSignature, StringComparison.Ordinal)) stableSamples++;
+                else { lastSignature = signature; stableSamples = 0; }
+
+                DeepDecision decision = item == null ? null : Checker.ClassifyRenderedPage(item, latest);
+                if (watch.ElapsedMilliseconds < minimumWait) continue;
+                if (decision != null && decision.Resolved && stableSamples >= 1) break;
+                if (stableSamples >= 3 && (text.Length >= 80 || (decision != null && decision.NeedsVerification))) break;
             }
+            latest.ObservedUrls = String.Join(" -> ", observed);
             return latest;
         }
 
@@ -5468,7 +5873,8 @@ namespace LinkDispositionChecker
             string host = uri.Host.ToLowerInvariant();
             return host.Contains("zhihu.com") || host.Contains("toutiao.com") || host.Contains("weibo.com") ||
                 host.Contains("xueqiu.com") || host.Contains("douyin.com") || host.Contains("dongchedi.com") ||
-                host.Contains("yoojia.com") || host.Contains("baidu.com") || host.Contains("xiaohongshu.com");
+                host.Contains("yoojia.com") || host.Contains("baidu.com") || host.Contains("xiaohongshu.com") ||
+                host.Contains("bilibili.com") || host.Contains("b23.tv");
         }
 
         internal static bool ApplyFastRenderedPage(CheckResult item, RenderedPageData page)
@@ -5512,9 +5918,9 @@ namespace LinkDispositionChecker
             item.StatusCode = code.ToString();
             if (code == 404 || code == 410)
             {
-                item.Verdict = "已失效";
-                item.Evidence = "Edge 快速核验确认服务器返回 HTTP " + code;
-                return true;
+                item.Verdict = "人工复核";
+                item.Evidence = "Edge 快速请求返回 HTTP " + code + "，但该接口不提供最终跳转地址；需由平台接口或渲染页确认是否属于目标内容";
+                return false;
             }
             if (code == 401 || code == 403 || code == 407 || code == 429)
             {
@@ -5630,15 +6036,29 @@ namespace LinkDispositionChecker
         {
             Uri original;
             if (item == null || !Uri.TryCreate(item.OriginalUrl, UriKind.Absolute, out original)) return false;
+            Uri final;
+            if (Uri.TryCreate(item.FinalUrl, UriKind.Absolute, out final) &&
+                !String.Equals(final.AbsoluteUri, original.AbsoluteUri, StringComparison.OrdinalIgnoreCase))
+            {
+                bool finalResolved = await TryApplyEdgePlatformProbeForUriAsync(core, item, final, token);
+                if (finalResolved) return true;
+            }
+            return await TryApplyEdgePlatformProbeForUriAsync(core, item, original, token);
+        }
+
+        private static async Task<bool> TryApplyEdgePlatformProbeForUriAsync(CoreWebView2 core, CheckResult item,
+            Uri original, CancellationToken token)
+        {
             string host = original.Host.ToLowerInvariant();
             Match identity;
             if (host.EndsWith("douyin.com", StringComparison.Ordinal) || host.EndsWith("iesdouyin.com", StringComparison.Ordinal))
             {
-                identity = Regex.Match(original.AbsolutePath ?? "", @"/(?:share/)?video/([0-9]{12,})", RegexOptions.IgnoreCase);
+                identity = Regex.Match(original.AbsolutePath ?? "", @"/(?:share/)?(?:video|note|article)/([0-9]{12,})", RegexOptions.IgnoreCase);
                 if (identity.Success)
                 {
                     string id = identity.Groups[1].Value;
-                    string probeUrl = "https://www.iesdouyin.com/share/video/" + id + "/";
+                    bool noteLike = Regex.IsMatch(original.AbsolutePath ?? "", @"/(?:note|article)/", RegexOptions.IgnoreCase);
+                    string probeUrl = "https://www.iesdouyin.com/share/" + (noteLike ? "note/" : "video/") + id + "/";
                     RenderedPageData probe = await ReadEdgePageWithUserAgentAsync(core, probeUrl,
                         "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 Chrome/124 Mobile Safari/537.36", 4500, token);
                     string body = probe == null ? "" : (probe.Html ?? "");
@@ -5659,7 +6079,7 @@ namespace LinkDispositionChecker
                         return true;
                     }
                     if (probe != null && targetItem && itemListEmpty && filter.Success &&
-                        !String.IsNullOrWhiteSpace(filter.Groups[1].Value))
+                        Checker.IsDouyinRemovalFilterReason(filter.Groups[1].Value))
                     {
                         item.Verdict = "已失效";
                         item.StatusCode = "200";
@@ -6058,6 +6478,7 @@ namespace LinkDispositionChecker
         private string _excelPath;
         private CancellationTokenSource _cancellation;
         private bool _running;
+        private bool _closeRequested;
         private int _animationFrame;
         private Stopwatch _runWatch;
         private int _runCompleted;
@@ -6128,6 +6549,7 @@ namespace LinkDispositionChecker
                 _input.Clear(); _excelPath = null; _excelPlans.Clear(); _importJobs.Clear(); _allRows.Clear(); _rows.Clear();
                 RecalculateCounters();
                 _deepReview.Enabled = false; _export.Text = "导出结果"; _progressText.Text = "尚未开始"; UpdateStats();
+                SessionStore.Clear(); RefreshResumeButton();
             };
             side.Controls.Add(_import); side.Controls.Add(_resume); side.Controls.Add(_clear);
             inputPanel.Controls.Add(inputLabel); inputPanel.Controls.Add(_input); inputPanel.Controls.Add(side);
@@ -6222,7 +6644,16 @@ namespace LinkDispositionChecker
                     int index = Interlocked.Increment(ref nextJob);
                     if (index >= pendingJobs.Count) break;
                     CheckJob job = pendingJobs[index];
-                    var item = await checker.CheckAsync(job.Url, job.Number, job.ExpectedTitle, job.ExpectedExcerpt, job.ExpectedAuthor, job.Platform, job.ContentType, false, _cancellation.Token);
+                    CheckResult item;
+                    try
+                    {
+                        item = await CheckJobWithWatchdogAsync(checker, job, _cancellation.Token);
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception ex)
+                    {
+                        item = CreateSkippedCheckResult(job, "异常", "单条核验异常，已跳过并继续后续任务：" + FriendlyException(ex));
+                    }
                     item.SourceSheet = job.SourceSheet; item.SourceRow = job.SourceRow;
                     _uiResults.Enqueue(item);
                     Interlocked.Increment(ref _runCompleted);
@@ -6259,6 +6690,57 @@ namespace LinkDispositionChecker
                     MessageBox.Show(completionMessage, "已完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
             }
+        }
+
+        private static async Task<CheckResult> CheckJobWithWatchdogAsync(Checker checker, CheckJob job,
+            CancellationToken batchToken)
+        {
+            const int hardLimitMilliseconds = 75000;
+            using (var singleToken = CancellationTokenSource.CreateLinkedTokenSource(batchToken))
+            {
+                Task<CheckResult> operation = checker.CheckAsync(job.Url, job.Number, job.ExpectedTitle,
+                    job.ExpectedExcerpt, job.ExpectedAuthor, job.Platform, job.ContentType, false, singleToken.Token);
+                Task limit = Task.Delay(hardLimitMilliseconds, batchToken);
+                Task finished = await Task.WhenAny(operation, limit);
+                if (finished == operation) return await operation;
+                batchToken.ThrowIfCancellationRequested();
+
+                singleToken.Cancel();
+                Task observeFault = operation.ContinueWith(completed =>
+                {
+                    Exception ignored = completed.Exception;
+                }, TaskContinuationOptions.OnlyOnFaulted);
+                return CreateSkippedCheckResult(job, "单条超时",
+                    "单条核验超过 75 秒仍未完成，已保留待复核并继续后续任务；可稍后从断点重试该条");
+            }
+        }
+
+        private static CheckResult CreateSkippedCheckResult(CheckJob job, string status, string evidence)
+        {
+            return new CheckResult
+            {
+                Number = job.Number,
+                Verdict = "人工复核",
+                StatusCode = status,
+                Title = "",
+                OriginalUrl = job.Url,
+                FinalUrl = job.Url,
+                Evidence = evidence,
+                CheckedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
+                Duration = status == "单条超时" ? "75.0s" : "0.0s",
+                ExpectedTitle = job.ExpectedTitle ?? "",
+                ExpectedExcerpt = job.ExpectedExcerpt ?? "",
+                ExpectedAuthor = job.ExpectedAuthor ?? "",
+                Platform = job.Platform ?? "",
+                ContentType = job.ContentType ?? ""
+            };
+        }
+
+        private static string FriendlyException(Exception ex)
+        {
+            if (ex == null) return "未知异常";
+            string message = ex.GetBaseException().Message ?? ex.Message ?? "未知异常";
+            return message.Length <= 180 ? message : message.Substring(0, 180);
         }
 
         private void PrepareEdgeCompatibilityJobs(List<CheckJob> jobs, bool preserveExisting)
@@ -6476,12 +6958,14 @@ namespace LinkDispositionChecker
                 var validKeys = new HashSet<string>(restoredJobs.Select(job => job.Key), StringComparer.OrdinalIgnoreCase);
                 _allRows.RemoveAll(item => !validKeys.Contains(ResultKey(item)));
                 if (engineChanged)
-                    _allRows.RemoveAll(item => item.Verdict != "已失效" && item.Verdict != "仍可访问");
+                {
+                    _allRows.RemoveAll(item => ShouldDiscardResultForEngineUpgrade(item, session.EngineVersion));
+                }
                 ApplyFilter(); UpdateStats();
                 _deepReview.Enabled = _allRows.Count > 0;
                 int total = restoredJobs.Count;
                 _progressText.Text = "已恢复上次进度：" + _allRows.Count + " / " + total + " 条" +
-                    (engineChanged ? "；规则已升级，将自动重跑旧版待复核项" : "");
+                    (engineChanged ? "；规则已升级，将按 3.11.0 重新核验全部旧版结论" : "");
                 if (_allRows.Count < total) await StartChecksAsync(true);
                 else MessageBox.Show("上次快速核验已全部完成。\n\n可手动开始深度复核，或直接查看和导出结果。", "进度已恢复", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
@@ -6491,10 +6975,58 @@ namespace LinkDispositionChecker
             }
         }
 
-        private void MainFormClosing(object sender, FormClosingEventArgs e)
+        private async void MainFormClosing(object sender, FormClosingEventArgs e)
         {
-            if (_running && _cancellation != null) _cancellation.Cancel();
+            if (_closeRequested) return;
+            if (_running)
+            {
+                e.Cancel = true;
+                _closeRequested = true;
+                Enabled = false;
+                _progressText.Text = "正在停止并保存最后一批结果……";
+                if (_cancellation != null) _cancellation.Cancel();
+                while (_running)
+                {
+                    FlushUiResults(Int32.MaxValue);
+                    await Task.Delay(80);
+                }
+                FlushUiResults(Int32.MaxValue);
+                SaveSessionSafe();
+                BeginInvoke(new Action(Close));
+                return;
+            }
+            FlushUiResults(Int32.MaxValue);
             if (_input.TextLength > 0 || _allRows.Count > 0) SaveSessionSafe();
+        }
+
+        internal static bool IsLegacyTransportResult(CheckResult item)
+        {
+            if (item == null) return false;
+            string status = item.StatusCode ?? "";
+            string evidence = item.Evidence ?? "";
+            bool badTransportConclusion =
+                evidence.IndexOf("多路线复测仍持续无法访问", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                evidence.IndexOf("按链接当前失效处理", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                evidence.IndexOf("站点当前整体不可访问", StringComparison.OrdinalIgnoreCase) >= 0;
+            if (String.Equals(item.Verdict, "已失效", StringComparison.OrdinalIgnoreCase))
+                return badTransportConclusion;
+            return status == "502" || status == "503" || status == "504" || status == "超时" ||
+                status == "连接失败" || status == "单条超时" || status == "异常" || badTransportConclusion;
+        }
+
+        internal static bool ShouldDiscardResultForEngineUpgrade(CheckResult item, string previousEngineVersion)
+        {
+            if (item == null) return false;
+            if (item.Verdict != "已失效" && item.Verdict != "仍可访问") return true;
+            if (IsEngineOlderThan(previousEngineVersion, 3, 11, 0)) return true;
+            return IsEngineOlderThan(previousEngineVersion, 3, 10, 8) && IsLegacyTransportResult(item);
+        }
+
+        internal static bool IsEngineOlderThan(string version, int major, int minor, int patch)
+        {
+            Version current;
+            if (!Version.TryParse(version ?? "", out current)) return true;
+            return current < new Version(major, minor, patch);
         }
 
         private static List<string> ExtractUrls(string text)
@@ -6641,9 +7173,7 @@ namespace LinkDispositionChecker
 
         private static string ResultKey(CheckResult result)
         {
-            return result != null && !String.IsNullOrEmpty(result.SourceSheet) && result.SourceRow > 0
-                ? result.SourceSheet + "\n" + result.SourceRow
-                : (result == null ? "" : result.OriginalUrl ?? "");
+            return result == null ? "" : CheckIdentity.Create(result.SourceSheet, result.SourceRow, result.OriginalUrl);
         }
 
         private void ApplyFilter()
@@ -6733,9 +7263,27 @@ namespace LinkDispositionChecker
 
         private static Encoding DetectFileEncoding(string path)
         {
-            byte[] mark = new byte[3]; using (var stream = File.OpenRead(path)) { stream.Read(mark, 0, 3); }
-            if (mark[0] == 0xEF && mark[1] == 0xBB && mark[2] == 0xBF) return Encoding.UTF8;
+            byte[] bytes;
+            using (var stream = File.OpenRead(path))
+            {
+                int length = (int)Math.Min(stream.Length, 262144L);
+                bytes = new byte[length];
+                stream.Read(bytes, 0, length);
+            }
+            if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) return Encoding.UTF8;
+            if (LooksLikeUtf8(bytes)) return new UTF8Encoding(false, true);
             return Encoding.Default;
+        }
+
+        private static bool LooksLikeUtf8(byte[] bytes)
+        {
+            if (bytes == null || bytes.Length == 0) return true;
+            try
+            {
+                string decoded = new UTF8Encoding(false, true).GetString(bytes);
+                return decoded.Any(character => character > 127) || bytes.All(value => value < 128);
+            }
+            catch (DecoderFallbackException) { return false; }
         }
 
         private void ExportClick(object sender, EventArgs e)

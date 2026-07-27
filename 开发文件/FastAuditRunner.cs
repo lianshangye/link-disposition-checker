@@ -37,10 +37,10 @@ internal static class FastAuditRunner
         var results = new ConcurrentBag<CheckResult>();
         int next = -1;
         int complete = 0;
-        int workers = Math.Min(24, Math.Max(1, jobs.Count));
+        int workers = Math.Min(12, Math.Max(1, jobs.Count));
+        var checker = new Checker(900000);
         var tasks = Enumerable.Range(0, workers).Select(async ignored =>
         {
-            var checker = new Checker(900000);
             while (true)
             {
                 int index = Interlocked.Increment(ref next);

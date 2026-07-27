@@ -17,12 +17,70 @@ internal static class RegressionTests
 
     public static int Main()
     {
+        var persistentGatewayFailure = new CheckResult { StatusCode = "502" };
+        Checker.ApplyUnresolvedServerFailure(persistentGatewayFailure, 502, true,
+            "系统网络HTTP=502、直连HTTP=超时、系统网络HTTPS=连接失败、直连HTTPS=超时");
+        bool transportBoundaryPassed = persistentGatewayFailure.Verdict == "暂时异常" &&
+            persistentGatewayFailure.Evidence.Contains("不能证明内容已删除") &&
+            MainForm.IsLegacyTransportResult(new CheckResult
+            {
+                Verdict = "已失效",
+                StatusCode = "502",
+                Evidence = "目标页经多路线复测仍持续无法访问；按链接当前失效处理"
+            }) &&
+            !MainForm.IsLegacyTransportResult(new CheckResult
+            {
+                Verdict = "已失效",
+                StatusCode = "200",
+                Evidence = "官方详情接口明确返回目标内容已删除"
+            }) &&
+            !MainForm.IsLegacyTransportResult(new CheckResult
+            {
+                Verdict = "已失效",
+                StatusCode = "502",
+                Evidence = "官方详情接口明确返回目标内容已删除"
+            });
+        Console.WriteLine((transportBoundaryPassed ? "PASS " : "FAIL ") + "网络不可达不能作为目标内容失效证据");
+        if (!transportBoundaryPassed) _failures++;
+
+        bool migrationPassed = MainForm.ShouldDiscardResultForEngineUpgrade(new CheckResult
+            {
+                Verdict = "已失效", StatusCode = "502", Evidence = "站点当前整体不可访问"
+            }, "3.10.7") &&
+            MainForm.ShouldDiscardResultForEngineUpgrade(new CheckResult
+            {
+                Verdict = "人工复核", StatusCode = "200", Evidence = "页面外壳无法确认"
+            }, "3.10.7") &&
+            MainForm.ShouldDiscardResultForEngineUpgrade(new CheckResult
+            {
+                Verdict = "已失效", StatusCode = "200", Evidence = "官方详情接口明确返回目标内容已删除"
+            }, "3.10.7") &&
+            MainForm.ShouldDiscardResultForEngineUpgrade(new CheckResult
+            {
+                Verdict = "仍可访问", StatusCode = "200", Evidence = "目标正文仍在"
+            }, "3.10.7") &&
+            !MainForm.ShouldDiscardResultForEngineUpgrade(new CheckResult
+            {
+                Verdict = "仍可访问", StatusCode = "200", Evidence = "目标正文仍在"
+            }, "3.11.0");
+        Console.WriteLine((migrationPassed ? "PASS " : "FAIL ") + "3.11 升级重跑旧结论且保留同版本确定结果");
+        if (!migrationPassed) _failures++;
+
         bool baijiaIdPassed = Checker.ExtractBaiduArticleId(new Uri("https://baijiahao.baidu.com/s?id=1870762825559558263&wfr=spider&for=pc")) == "1870762825559558263";
         bool dtNidPassed = Checker.ExtractBaiduArticleNid(new Uri("https://mbd.baidu.com/newspage/data/dtlandingwise?nid=dt_5277434666597158759")) == "dt_5277434666597158759";
         bool baiduPublicUrlPassed = Checker.BuildBaiduPublicArticleUrl("5277434666597158759").Contains("news_5277434666597158759");
         bool yoojiaIdPassed = Checker.ExtractBaiduArticleId(new Uri("https://www.yoojia.com/article/9455543928563677004.html")) == "9455543928563677004";
-        Console.WriteLine(((baijiaIdPassed && dtNidPassed && baiduPublicUrlPassed && yoojiaIdPassed) ? "PASS " : "FAIL ") + "百度百家号 s?id、dt_ 编号及公开页识别");
-        if (!baijiaIdPassed || !dtNidPassed || !baiduPublicUrlPassed || !yoojiaIdPassed) _failures++;
+        bool encodedContextPassed = Checker.ExtractBaiduArticleId(new Uri("https://mbd.baidu.com/newspage/data/landingshare?context=%7B%22nid%22%3A%22news_9058105229909621762%22%2C%22sourceFrom%22%3A%22bjh%22%7D")) == "9058105229909621762";
+        Console.WriteLine(((baijiaIdPassed && dtNidPassed && baiduPublicUrlPassed && yoojiaIdPassed && encodedContextPassed) ? "PASS " : "FAIL ") + "百度百家号 s?id、dt_ 编号及公开页识别");
+        if (!baijiaIdPassed || !dtNidPassed || !baiduPublicUrlPassed || !yoojiaIdPassed || !encodedContextPassed) _failures++;
+
+        bool douyinFilterPassed = !Checker.IsDouyinRemovalFilterReason("long_article_low_version") &&
+            !Checker.IsDouyinRemovalFilterReason("client_not_support") &&
+            Checker.IsDouyinRemovalFilterReason("status_deleted") &&
+            Checker.IsDouyinRemovalFilterReason("status_self_see") &&
+            Checker.IsDouyinRemovalFilterReason("status_audit_not_pass");
+        Console.WriteLine((douyinFilterPassed ? "PASS " : "FAIL ") + "抖音兼容提示与作品失效原因分离");
+        if (!douyinFilterPassed) _failures++;
 
         string yicheForum;
         string yicheThreadId;

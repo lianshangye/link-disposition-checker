@@ -1,5 +1,7 @@
 using System;
 using System.Net;
+using System.Net.Http;
+using System.Reflection;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -14,6 +16,12 @@ internal static class NetworkFallbackTests
 
     private static async Task<int> RunAsync()
     {
+        MethodInfo quality = typeof(Checker).GetMethod("ResponseQuality", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+        bool responseSelectionPassed = quality != null &&
+            (int)quality.Invoke(null, new object[] { new HttpResponseMessage(HttpStatusCode.Forbidden) }) >
+            (int)quality.Invoke(null, new object[] { new HttpResponseMessage(HttpStatusCode.BadGateway) });
+        Console.WriteLine((responseSelectionPassed ? "PASS" : "FAIL") + " later HTTP 403 outranks earlier proxy 502");
+
         const string url = "http://127.0.0.1:18767/original-http";
         var listener = new HttpListener();
         listener.Prefixes.Add("http://127.0.0.1:18767/");
@@ -37,7 +45,7 @@ internal static class NetworkFallbackTests
             bool passed = result.StatusCode == "200" && result.FinalUrl == url && result.Verdict == "仍可访问";
             Console.WriteLine((passed ? "PASS" : "FAIL") + " HTTP original route => " +
                 result.StatusCode + " / " + result.FinalUrl + " / " + result.Verdict);
-            return passed ? 0 : 1;
+            return passed && responseSelectionPassed ? 0 : 1;
         }
         finally
         {

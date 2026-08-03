@@ -981,6 +981,66 @@ internal static class RegressionTests
                 MainHtml = "<div class='empty-state'>抱歉，该文章已被删除</div>"
             }));
 
+        Expect("知乎页面标题明确作者删除", "已失效", Checker.ClassifyRenderedPage(
+            new CheckResult
+            {
+                OriginalUrl = "https://www.zhihu.com/question/2006945324976056152/answer/2007788604982858132",
+                FinalUrl = "https://www.zhihu.com/question/2006945324976056152/answer/2007788604982858132",
+                ExpectedTitle = "如何看待长城汽车董事长魏建军"
+            },
+            new RenderedPageData
+            {
+                Url = "https://www.zhihu.com/question/2006945324976056152/answer/2007788604982858132",
+                Title = "抱歉，该内容已被作者删除 - 知乎",
+                Text = "抱歉，该内容已被作者删除",
+                Html = "<main>抱歉，该内容已被作者删除</main>"
+            }));
+
+        Expect("雪球页面标题明确原帖删除", "已失效", Checker.ClassifyRenderedPage(
+            new CheckResult
+            {
+                OriginalUrl = "https://xueqiu.com/2037102031/377574152",
+                FinalUrl = "https://xueqiu.com/2037102031/377574152",
+                ExpectedTitle = "长城汽车相关讨论"
+            },
+            new RenderedPageData
+            {
+                Url = "https://xueqiu.com/2037102031/377574152",
+                Title = "原帖已被作者删除 - 雪球",
+                Text = "原帖已被作者删除",
+                Html = "<main>原帖已被作者删除</main>"
+            }));
+
+        Expect("腾讯视频错误页明确视频不见", "已失效", Checker.ClassifyRenderedPage(
+            new CheckResult
+            {
+                OriginalUrl = "https://v.qq.com/x/page/q3195ftx5t4.html",
+                FinalUrl = "https://v.qq.com/error.html",
+                ExpectedTitle = "你觉得这车怎么样？"
+            },
+            new RenderedPageData
+            {
+                Url = "https://v.qq.com/error.html",
+                Title = "那条视频不见了-腾讯视频",
+                Text = "那条视频不见了",
+                Html = "<main class='empty-state'>那条视频不见了</main>"
+            }));
+
+        Expect("腾讯新闻错误页明确作者删除", "已失效", Checker.ClassifyRenderedPage(
+            new CheckResult
+            {
+                OriginalUrl = "https://kandianshare.html5.qq.com/v2/news/2282553879446387010",
+                FinalUrl = "https://newsa.html5.qq.com/v1/share-article?docId=2282553879446387010",
+                ExpectedTitle = "华山论剑｜魏建军亲自代言"
+            },
+            new RenderedPageData
+            {
+                Url = "https://newsa.html5.qq.com/v1/share-article?docId=2282553879446387010",
+                Title = "文章打开失败",
+                Text = "该文章已被作者删除",
+                Html = "<div class='ArticleGoneWrap-d19'><h1>文章打开失败</h1><p>该文章已被作者删除</p></div>"
+            }));
+
         Expect("推荐流不是确定下架", "人工复核", Checker.ClassifyRenderedPage(
             new CheckResult
             {

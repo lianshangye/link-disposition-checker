@@ -1693,15 +1693,16 @@ namespace LinkDispositionChecker
     {
         private static readonly string[] RemovedSignals = new[]
         {
-            "该内容已删除", "内容已被删除", "内容已删除", "原文已删除", "作者已删除", "视频已删除", "该文章已被删除", "抱歉，该文章已被删除",
+            "该内容已删除", "内容已被删除", "内容已删除", "原文已删除", "作者已删除", "视频已删除", "该文章已被删除", "该文章已被作者删除", "抱歉，该文章已被删除",
             "该内容已经删除", "内容已经删除", "该文章已删除", "该文章已经删除", "文章已经删除",
             "该视频已经删除", "视频已经删除", "该帖子已删除", "帖子已删除", "该笔记已被删除", "笔记已删除",
             "该内容已下架", "内容已下架", "视频已下架", "商品已下架", "该内容不存在", "内容不存在",
             "文章不存在", "页面不存在", "页面已不存在", "页面被删除", "链接已失效", "该链接已失效",
             "此内容因违规无法查看", "因违规无法查看", "根据相关法律法规和政策", "已被屏蔽",
             "微博不存在或暂无查看权限", "抱歉，此微博已被删除", "当前内容不可访问",
+            "原帖已被作者删除", "该帖已被作者删除", "帖子已被作者删除", "该内容已被作者删除",
             "您访问的页面找不到了", "抱歉，页面找不到了", "该作品不存在", "作品不存在",
-            "视频不存在", "视频已下线", "该视频已下线", "内容不见了", "页面不见了",
+            "视频不存在", "视频已下线", "该视频已下线", "内容不见了", "页面不见了", "那条视频不见了",
             "该文章已不存在", "文章没有找到哦", "出错了！文章没有找到哦", "出错了文章没有找到哦",
             "当前内容不适合展示，无法查看", "抱歉，你访问的内容不存在", "你访问的内容不存在",
             "没有知识存在的荒原",
@@ -7394,6 +7395,9 @@ namespace LinkDispositionChecker
                 host.Contains("jianshu.com") || host.Contains("360kuai.com") || host.Contains("ahnews.com.cn") ||
                 host.Contains("ciccwm.com") || host.Contains("shangyexinzhi.com") || host.Contains("10jqka.com.cn") ||
                 host.Contains("mp.weixin.qq.com") || host.Contains("weixin.qq.com") || host.Contains("kuaishou.com") ||
+                host.Contains("ishare.ifeng.com") || host.Contains("finance.sina.com.cn") || host.Contains("guba.sina.com.cn") ||
+                host.Contains("news.m.yiche.com") || host.Contains("kandianshare.html5.qq.com") || host.Contains("v.qq.com") ||
+                host.Contains("wap.eastmoney.com") || host.Contains("3g.k.sohu.com") ||
                 platform.Contains("头条") || platform.Contains("百家号") || platform.Contains("有驾") ||
                 platform.Contains("微博") || platform.Contains("雪球") || platform.Contains("哔哩") || platform.Contains("抖音") || platform.Contains("懂车帝") ||
                 platform.Contains("b站") || platform.Contains("知乎") || platform.Contains("简书") || platform.Contains("快资讯") ||

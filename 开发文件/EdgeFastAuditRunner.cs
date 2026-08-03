@@ -159,12 +159,21 @@ internal sealed class EdgeFastAuditForm : Form
             }
             using (var writer = new StreamWriter(_output, false, new UTF8Encoding(true)))
             {
-                writer.WriteLine("序号,核验结果,HTTP状态,平台,内容类型,发文作者,页面标题,原链接,最终地址,判定依据");
+                writer.WriteLine("序号,核验结果,内容状态,公开可访问性,合同验收建议,证据等级,供应商行动,AI判断,AI置信度,AI模型,HTTP状态,平台,内容类型,发文作者,页面标题,原链接,最终地址,判定依据,追证阶段,取证线路,站点对照,基础设施,来源工作表,来源行号,核验时间,单条耗时,任务开始时间,任务完成时间,任务总耗时");
                 foreach (CheckResult result in results)
                 {
                     result.Verdict = Checker.NormalizeVisibleVerdict(result.Verdict);
-                    writer.WriteLine(String.Join(",", new[] { result.Number.ToString(), Csv(result.Verdict), Csv(result.StatusCode),
-                        Csv(result.Platform), Csv(result.ContentType), Csv(result.ExpectedAuthor), Csv(result.Title), Csv(result.OriginalUrl), Csv(result.FinalUrl), Csv(result.Evidence) }));
+                    ContractAcceptanceView view = ContractAcceptanceClassifier.Evaluate(result);
+                    writer.WriteLine(String.Join(",", new[]
+                    {
+                        result.Number.ToString(), Csv(result.Verdict), Csv(view.ContentStatus), Csv(view.PublicReachability),
+                        Csv(view.AcceptanceRecommendation), Csv(view.EvidenceGrade), Csv(view.SupplierAction), Csv(result.AiDecision),
+                        Csv(result.AiReviewed ? result.AiConfidence.ToString("P0") : ""), Csv(result.AiModel), Csv(result.StatusCode),
+                        Csv(result.Platform), Csv(result.ContentType), Csv(result.ExpectedAuthor), Csv(result.Title), Csv(result.OriginalUrl),
+                        Csv(result.FinalUrl), Csv(result.Evidence), Csv(result.EvidenceStage), Csv(result.AcquisitionAttempts),
+                        Csv(result.SiteHealth), Csv(result.InfrastructureKey), Csv(result.SourceSheet), result.SourceRow.ToString(),
+                        Csv(result.CheckedAt), Csv(result.Duration), Csv(result.TaskStartedAt), Csv(result.TaskCompletedAt), Csv(result.TaskElapsed)
+                    }));
                 }
             }
             Console.WriteLine("removed=" + results.Count(item => item.Verdict == "已失效") +

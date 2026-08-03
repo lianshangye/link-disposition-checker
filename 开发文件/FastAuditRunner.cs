@@ -157,11 +157,21 @@ internal static class FastAuditRunner
         {
             Dictionary<int, CheckResult> recovered = checkpointStore.Load(jobs,
                 message => Console.WriteLine("CHECKPOINT_WARNING=" + message));
+            bool retryUnresolved = String.Equals(Environment.GetEnvironmentVariable("FAST_AUDIT_RETRY_UNRESOLVED"), "1", StringComparison.OrdinalIgnoreCase);
+            int checkpointRecords = recovered.Count;
+            if (retryUnresolved)
+            {
+                recovered = recovered.Where(item => item.Value != null &&
+                    (item.Value.Verdict == "已失效" || item.Value.Verdict == "仍可访问"))
+                    .ToDictionary(item => item.Key, item => item.Value);
+            }
             foreach (CheckResult result in recovered.Values) results.Add(result);
             int complete = recovered.Count;
             List<CheckJob> pending = jobs.Where(job => !recovered.ContainsKey(job.Number)).ToList();
             Console.WriteLine("CHECKPOINT_ENABLED=" + (resumeEnabled ? "1" : "0"));
+            Console.WriteLine("CHECKPOINT_RECORDS=" + checkpointRecords);
             Console.WriteLine("CHECKPOINT_RECOVERED=" + recovered.Count);
+            Console.WriteLine("CHECKPOINT_RETRY_UNRESOLVED=" + (retryUnresolved ? "1" : "0"));
 
             Console.WriteLine("PHASE=register-infrastructure");
             Dictionary<string, int> infrastructures = pending.Count == 0

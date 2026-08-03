@@ -8,6 +8,7 @@ param(
     [int]$Workers = 6,
     [double]$MaximumUnresolvedRate = 0.05,
     [switch]$Resume,
+    [switch]$RetryUnresolved,
     [switch]$RebuildInput
 )
 
@@ -43,6 +44,7 @@ try {
         ReportOnly = $true
     }
     if ($Resume) { $runParameters.Resume = $true }
+    if ($RetryUnresolved) { $runParameters.RetryUnresolved = $true }
     & (Join-Path $PSScriptRoot 'Run-RepresentativeValidation.ps1') @runParameters
 }
 finally { $env:FAST_AUDIT_WORKERS = $oldWorkers }

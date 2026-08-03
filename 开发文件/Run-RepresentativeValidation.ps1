@@ -4,6 +4,7 @@
     [double]$MinimumResolvedRate = 0.95,
     [switch]$FixedRegression,
     [switch]$Resume,
+    [switch]$RetryUnresolved,
     [switch]$ReportOnly
 )
 
@@ -11,7 +12,12 @@ $ErrorActionPreference = 'Stop'
 $oldFastAuditNumbers = $env:FAST_AUDIT_NUMBERS
 $oldFastAuditWorkers = $env:FAST_AUDIT_WORKERS
 $oldFastAuditResume = $env:FAST_AUDIT_RESUME
+$oldFastAuditRetryUnresolved = $env:FAST_AUDIT_RETRY_UNRESOLVED
 if ($Resume) { $env:FAST_AUDIT_RESUME = '1' }
+if ($RetryUnresolved) {
+    $env:FAST_AUDIT_RESUME = '1'
+    $env:FAST_AUDIT_RETRY_UNRESOLVED = '1'
+}
 $validationMutex = New-Object Threading.Mutex($false, 'Local\LinkDispositionCheckerRepresentativeValidation')
 $validationLockTaken = $false
 try {
@@ -74,7 +80,7 @@ try {
 
     $arguments = '"' + $InputCsv + '" "' + $OutputCsv + '"'
 $runnerEnvironment = @{}
-foreach ($name in @('FAST_AUDIT_NUMBERS','FAST_AUDIT_WORKERS','FAST_AUDIT_RESUME')) {
+foreach ($name in @('FAST_AUDIT_NUMBERS','FAST_AUDIT_WORKERS','FAST_AUDIT_RESUME','FAST_AUDIT_RETRY_UNRESOLVED')) {
     $value = [Environment]::GetEnvironmentVariable($name)
     if (-not [String]::IsNullOrWhiteSpace($value)) { $runnerEnvironment[$name] = $value }
 }
@@ -128,6 +134,7 @@ finally {
     $env:FAST_AUDIT_NUMBERS = $oldFastAuditNumbers
     $env:FAST_AUDIT_WORKERS = $oldFastAuditWorkers
     $env:FAST_AUDIT_RESUME = $oldFastAuditResume
+    $env:FAST_AUDIT_RETRY_UNRESOLVED = $oldFastAuditRetryUnresolved
     if (Test-Path -LiteralPath $runDirectory) {
         Remove-Item -LiteralPath $runDirectory -Recurse -Force -ErrorAction SilentlyContinue
     }

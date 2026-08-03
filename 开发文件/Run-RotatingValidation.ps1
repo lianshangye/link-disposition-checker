@@ -9,7 +9,8 @@
     [string]$ResultCsv = '',
     [string]$HistoryCsv = '',
     [double]$MinimumResolvedRate = 0.95,
-    [switch]$BuildOnly
+    [switch]$BuildOnly,
+    [switch]$Resume
 )
 
 $ErrorActionPreference = 'Stop'
@@ -43,5 +44,10 @@ if ($BuildOnly) {
     exit 0
 }
 
-& (Join-Path $PSScriptRoot 'Run-RepresentativeValidation.ps1') -InputCsv $SampleCsv `
-    -OutputCsv $ResultCsv -MinimumResolvedRate $MinimumResolvedRate
+$runParameters = @{
+    InputCsv = $SampleCsv
+    OutputCsv = $ResultCsv
+    MinimumResolvedRate = $MinimumResolvedRate
+}
+if ($Resume) { $runParameters.Resume = $true }
+& (Join-Path $PSScriptRoot 'Run-RepresentativeValidation.ps1') @runParameters

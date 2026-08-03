@@ -11,6 +11,7 @@ $aiSource = Join-Path $PSScriptRoot 'AiReview.cs'
 $logSource = Join-Path $PSScriptRoot 'RunLogging.cs'
 $acceptanceSource = Join-Path $PSScriptRoot 'AcceptanceEvidence.cs'
 $chinaEyeballSource = Join-Path $PSScriptRoot 'ChinaEyeballEvidence.cs'
+$checkpointSource = Join-Path $PSScriptRoot 'AuditCheckpointStore.cs'
 $dependencyRoot = Join-Path $PSScriptRoot 'dependencies'
 $webViewCore = Join-Path $dependencyRoot 'Microsoft.Web.WebView2.Core.dll'
 $webViewForms = Join-Path $dependencyRoot 'Microsoft.Web.WebView2.WinForms.dll'
@@ -48,14 +49,16 @@ function Invoke-Test([string]$Name, [string]$TestSource, [string]$MainClass,
         '/optimize+',
         ('/out:' + $executable),
         ('/main:' + $MainClass)
-    ) + $references + @($source, $aiSource, $logSource, $acceptanceSource, $chinaEyeballSource, (Join-Path $PSScriptRoot $TestSource))
+    ) + $references + @($source, $aiSource, $logSource, $acceptanceSource, $chinaEyeballSource, $checkpointSource, (Join-Path $PSScriptRoot $TestSource))
     & $Compiler @compilerArguments
     if ($LASTEXITCODE -ne 0) { throw "$Name compilation failed." }
+    $resolvedArguments = @()
     foreach ($argument in $Arguments) {
         if ([String]::IsNullOrWhiteSpace($argument)) { continue }
         if (-not (Test-Path -LiteralPath $argument)) { throw "$Name input disappeared before launch: $argument" }
+        $resolvedArguments += [IO.Path]::GetFullPath($argument)
     }
-    $argumentLine = ($Arguments | ForEach-Object { '"' + ([string]$_).Replace('"', '\"') + '"' }) -join ' '
+    $argumentLine = ($resolvedArguments | ForEach-Object { '"' + ([string]$_).Replace('"', '\"') + '"' }) -join ' '
     $startParameters = @{
         FilePath = $executable
         WorkingDirectory = $runDirectory

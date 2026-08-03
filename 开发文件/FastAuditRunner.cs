@@ -147,43 +147,56 @@ internal static class FastAuditRunner
         if (!String.IsNullOrWhiteSpace(outputDirectory)) Directory.CreateDirectory(outputDirectory);
 
         Console.WriteLine("INPUT_JOBS=" + jobs.Count);
-        Console.WriteLine("PHASE=register-infrastructure");
-        Dictionary<string, int> infrastructures =
-            await Checker.RegisterInfrastructureAsync(jobs, CancellationToken.None);
-        Console.WriteLine("INFRASTRUCTURES=" + infrastructures.Count);
-        Console.WriteLine("SHARED_INFRASTRUCTURES=" + infrastructures.Count(item => item.Value > 1));
-
+        bool resumeEnabled = String.Equals(Environment.GetEnvironmentVariable("FAST_AUDIT_RESUME"), "1", StringComparison.OrdinalIgnoreCase);
+        string inputSha256 = AuditCheckpointStore.ComputeInputSha256(input);
         var results = new ConcurrentBag<CheckResult>();
         var restrictions = new PlatformRestrictionController(3);
         var infrastructureRestrictions = new InfrastructureRestrictionController(2);
         var checker = new Checker(900000);
-        int complete = 0;
-        int configuredWorkers;
-        if (!Int32.TryParse(Environment.GetEnvironmentVariable("FAST_AUDIT_WORKERS"), out configuredWorkers))
-            configuredWorkers = 6;
-
-        // Run the same formal pass as the desktop application. A separate
-        // preflight sample duplicates requests and makes the validation runner
-        // report a different execution path from the product.
-        List<CheckJob> pending = jobs.ToList();
-        int workerCount = Math.Min(Math.Max(1, configuredWorkers), Math.Max(1, pending.Count));
-        Console.WriteLine("PHASE=check,WORKERS=" + workerCount + ",PENDING=" + pending.Count);
-
-        int next = -1;
-        var tasks = Enumerable.Range(0, workerCount).Select(async ignored =>
+        using (var checkpointStore = new AuditCheckpointStore(output, inputSha256, resumeEnabled))
         {
-            while (true)
+            Dictionary<int, CheckResult> recovered = checkpointStore.Load(jobs,
+                message => Console.WriteLine("CHECKPOINT_WARNING=" + message));
+            foreach (CheckResult result in recovered.Values) results.Add(result);
+            int complete = recovered.Count;
+            List<CheckJob> pending = jobs.Where(job => !recovered.ContainsKey(job.Number)).ToList();
+            Console.WriteLine("CHECKPOINT_ENABLED=" + (resumeEnabled ? "1" : "0"));
+            Console.WriteLine("CHECKPOINT_RECOVERED=" + recovered.Count);
+
+            Console.WriteLine("PHASE=register-infrastructure");
+            Dictionary<string, int> infrastructures = pending.Count == 0
+                ? new Dictionary<string, int>()
+                : await Checker.RegisterInfrastructureAsync(pending, CancellationToken.None);
+            Console.WriteLine("INFRASTRUCTURES=" + infrastructures.Count);
+            Console.WriteLine("SHARED_INFRASTRUCTURES=" + infrastructures.Count(item => item.Value > 1));
+
+            int configuredWorkers;
+            if (!Int32.TryParse(Environment.GetEnvironmentVariable("FAST_AUDIT_WORKERS"), out configuredWorkers))
+                configuredWorkers = 6;
+
+            // Run the same formal pass as the desktop application. A separate
+            // preflight sample duplicates requests and makes the validation runner
+            // report a different execution path from the product.
+            int workerCount = Math.Min(Math.Max(1, configuredWorkers), Math.Max(1, pending.Count));
+            Console.WriteLine("PHASE=check,WORKERS=" + workerCount + ",PENDING=" + pending.Count);
+
+            int next = -1;
+            var tasks = Enumerable.Range(0, workerCount).Select(async ignored =>
             {
-                int index = Interlocked.Increment(ref next);
-                if (index >= pending.Count) break;
-                CheckResult result = await CheckOne(checker, pending[index], restrictions, infrastructureRestrictions);
-                results.Add(result);
-                int done = Interlocked.Increment(ref complete);
-                if (done % 25 == 0 || done == jobs.Count)
-                    Console.WriteLine("PROGRESS=" + done + "/" + jobs.Count);
-            }
-        }).ToArray();
-        await Task.WhenAll(tasks);
+                while (true)
+                {
+                    int index = Interlocked.Increment(ref next);
+                    if (index >= pending.Count) break;
+                    CheckResult result = await CheckOne(checker, pending[index], restrictions, infrastructureRestrictions);
+                    checkpointStore.Append(result);
+                    results.Add(result);
+                    int done = Interlocked.Increment(ref complete);
+                    if (done % 25 == 0 || done == jobs.Count)
+                        Console.WriteLine("PROGRESS=" + done + "/" + jobs.Count);
+                }
+            }).ToArray();
+            await Task.WhenAll(tasks);
+        }
 
         List<CheckResult> ordered = results.OrderBy(item => item.Number).ToList();
         // The validation runner represents the product's quick stage. Do not
@@ -202,7 +215,7 @@ internal static class FastAuditRunner
         }
         using (var writer = new StreamWriter(output, false, new UTF8Encoding(true)))
         {
-            writer.WriteLine("序号,核验结果,内容状态,公开可访问性,合同验收建议,证据等级,供应商行动,AI判断,AI置信度,AI模型,HTTP状态,平台,内容类型,发文作者,页面标题,原链接,最终地址,判定依据,追证阶段,取证线路,站点对照,基础设施,核验时间,单条耗时,任务开始时间,任务完成时间,任务总耗时");
+            writer.WriteLine("序号,核验结果,内容状态,公开可访问性,合同验收建议,证据等级,供应商行动,AI判断,AI置信度,AI模型,HTTP状态,平台,内容类型,发文作者,页面标题,原链接,最终地址,判定依据,追证阶段,取证线路,站点对照,基础设施,来源工作表,来源行号,核验时间,单条耗时,任务开始时间,任务完成时间,任务总耗时");
             foreach (CheckResult result in ordered)
             {
                 ContractAcceptanceView view = ContractAcceptanceClassifier.Evaluate(result);
@@ -230,6 +243,8 @@ internal static class FastAuditRunner
                     Csv(result.AcquisitionAttempts),
                     Csv(result.SiteHealth),
                     Csv(result.InfrastructureKey),
+                    Csv(result.SourceSheet),
+                    result.SourceRow.ToString(),
                     Csv(result.CheckedAt), Csv(result.Duration), Csv(result.TaskStartedAt),
                     Csv(result.TaskCompletedAt), Csv(result.TaskElapsed)
                 }));

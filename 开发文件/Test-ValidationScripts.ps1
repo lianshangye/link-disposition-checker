@@ -51,6 +51,22 @@ try {
     }
     Write-Host 'PASS exactly 5% unresolved fails; only a rate below 5% passes.'
 
+    $fullResult = Join-Path $root 'full-result.csv'
+    $boundaryRows = for ($i = 1; $i -le 20; $i++) {
+        [pscustomobject]@{ 序号 = $i; 核验结果 = if ($i -eq 20) { '人工复核' } else { '仍可访问' }; 来源工作表 = '原始数据' }
+    }
+    $boundaryRows | Export-Csv -LiteralPath $fullResult -NoTypeInformation -Encoding UTF8
+    $fullBoundaryRejected = $false
+    try {
+        & (Join-Path $PSScriptRoot 'Measure-FullValidation.ps1') -ResultCsv $fullResult -OriginalSheet '原始数据'
+    }
+    catch { $fullBoundaryRejected = $true }
+    $passingRows = @($boundaryRows) + [pscustomobject]@{ 序号 = 21; 核验结果 = '已失效'; 来源工作表 = '原始数据' }
+    $passingRows | Export-Csv -LiteralPath $fullResult -NoTypeInformation -Encoding UTF8
+    & (Join-Path $PSScriptRoot 'Measure-FullValidation.ps1') -ResultCsv $fullResult -OriginalSheet '原始数据'
+    if (-not $fullBoundaryRejected) { throw 'Full validation gate accepted exactly 5% unresolved.' }
+    Write-Host 'PASS full-data gate reports the original subset and enforces the strict below-5% boundary.'
+
     $sourceList = Join-Path (Join-Path $PSScriptRoot 'test-data') 'rotating-validation-sources.txt'
     if (Test-Path -LiteralPath $sourceList) {
         $inputs = @(Get-Content -LiteralPath $sourceList -Encoding UTF8 |

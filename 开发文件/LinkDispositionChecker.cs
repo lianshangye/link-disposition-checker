@@ -9600,6 +9600,8 @@ namespace LinkDispositionChecker
             int authorColumn = FindCsvColumn(headers, new[] { "账号昵称", "作者", "发文作者", "发布账号", "发布人", "发布者", "账号名称", "昵称", "账号", "author" });
             int platformColumn = FindCsvColumn(headers, new[] { "平台", "平台名称", "发布平台", "来源平台", "platform" });
             int contentTypeColumn = FindCsvColumn(headers, new[] { "内容类型", "信息类型", "媒体类型", "类型", "contenttype", "type" });
+            int sourceSheetColumn = FindCsvColumn(headers, new[] { "来源工作表", "源工作表", "sourcesheet" });
+            int sourceRowColumn = FindCsvColumn(headers, new[] { "来源行号", "源行号", "sourcerow" });
 
             var jobs = new List<CheckJob>();
             for (int rowIndex = 1; rowIndex < rows.Count; rowIndex++)
@@ -9608,6 +9610,10 @@ namespace LinkDispositionChecker
                 string url = CsvValue(row, linkColumn).Trim();
                 Uri uri;
                 if (!Uri.TryCreate(url, UriKind.Absolute, out uri) || (uri.Scheme != "http" && uri.Scheme != "https")) continue;
+                int sourceRow;
+                if (!Int32.TryParse(CsvValue(row, sourceRowColumn).Trim(), out sourceRow) || sourceRow <= 0)
+                    sourceRow = rowIndex + 1;
+                string sourceSheet = CsvValue(row, sourceSheetColumn).Trim();
                 jobs.Add(new CheckJob
                 {
                     Number = jobs.Count + 1,
@@ -9619,8 +9625,10 @@ namespace LinkDispositionChecker
                     ContentType = String.IsNullOrWhiteSpace(CsvValue(row, contentTypeColumn))
                         ? Checker.InferContentType(CsvValue(row, platformColumn), url, CsvValue(row, titleColumn))
                         : CsvValue(row, contentTypeColumn),
-                    SourceSheet = String.IsNullOrWhiteSpace(sourceName) ? "CSV" : sourceName,
-                    SourceRow = rowIndex + 1
+                    SourceSheet = String.IsNullOrWhiteSpace(sourceSheet)
+                        ? (String.IsNullOrWhiteSpace(sourceName) ? "CSV" : sourceName)
+                        : sourceSheet,
+                    SourceRow = sourceRow
                 });
             }
             return jobs;

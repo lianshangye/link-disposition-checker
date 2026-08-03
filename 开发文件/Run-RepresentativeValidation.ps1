@@ -2,12 +2,16 @@
     [string]$InputCsv = '',
     [string]$OutputCsv = '',
     [double]$MinimumResolvedRate = 0.95,
-    [switch]$FixedRegression
+    [switch]$FixedRegression,
+    [switch]$Resume,
+    [switch]$ReportOnly
 )
 
 $ErrorActionPreference = 'Stop'
 $oldFastAuditNumbers = $env:FAST_AUDIT_NUMBERS
 $oldFastAuditWorkers = $env:FAST_AUDIT_WORKERS
+$oldFastAuditResume = $env:FAST_AUDIT_RESUME
+if ($Resume) { $env:FAST_AUDIT_RESUME = '1' }
 $validationMutex = New-Object Threading.Mutex($false, 'Local\LinkDispositionCheckerRepresentativeValidation')
 $validationLockTaken = $false
 try {
@@ -46,6 +50,7 @@ $logSource = Join-Path $PSScriptRoot 'RunLogging.cs'
 $acceptanceSource = Join-Path $PSScriptRoot 'AcceptanceEvidence.cs'
 $chinaEyeballSource = Join-Path $PSScriptRoot 'ChinaEyeballEvidence.cs'
 $runnerSource = Join-Path $PSScriptRoot 'FastAuditRunner.cs'
+$checkpointSource = Join-Path $PSScriptRoot 'AuditCheckpointStore.cs'
 $dependencyRoot = Join-Path $PSScriptRoot 'dependencies'
 $webViewCore = Join-Path $dependencyRoot 'Microsoft.Web.WebView2.Core.dll'
 $webViewForms = Join-Path $dependencyRoot 'Microsoft.Web.WebView2.WinForms.dll'
@@ -64,12 +69,12 @@ try {
         /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll `
         /reference:System.Windows.Forms.dll /reference:System.Net.Http.dll /reference:System.Web.Extensions.dll /reference:System.Security.dll `
         /reference:Microsoft.CSharp.dll /reference:System.Xml.Linq.dll /reference:System.IO.Compression.dll `
-        /reference:System.IO.Compression.FileSystem.dll /reference:$webViewCore /reference:$webViewForms $source $aiSource $logSource $acceptanceSource $chinaEyeballSource $runnerSource
+        /reference:System.IO.Compression.FileSystem.dll /reference:$webViewCore /reference:$webViewForms $source $aiSource $logSource $acceptanceSource $chinaEyeballSource $checkpointSource $runnerSource
     if ($LASTEXITCODE -ne 0) { throw 'Representative runner compilation failed.' }
 
     $arguments = '"' + $InputCsv + '" "' + $OutputCsv + '"'
 $runnerEnvironment = @{}
-foreach ($name in @('FAST_AUDIT_NUMBERS','FAST_AUDIT_WORKERS')) {
+foreach ($name in @('FAST_AUDIT_NUMBERS','FAST_AUDIT_WORKERS','FAST_AUDIT_RESUME')) {
     $value = [Environment]::GetEnvironmentVariable($name)
     if (-not [String]::IsNullOrWhiteSpace($value)) { $runnerEnvironment[$name] = $value }
 }
@@ -106,17 +111,23 @@ $process = Start-Process -FilePath $runner -ArgumentList $arguments -WorkingDire
     Write-Host "OUTPUT=$OutputCsv"
     # Historical disposition is useful for finding conflicts, but it is not current release truth.
     & (Join-Path $PSScriptRoot 'Compare-HumanValidation.ps1') -InputCsv $InputCsv -OutputCsv $OutputCsv
-    $strictUnresolvedGate = $minimumResolvedRateDecimal -gt 0
-    if ($resolvedRate -lt $minimumResolvedRateDecimal -or
-        ($strictUnresolvedGate -and $unresolvedRate -ge ([decimal]1 - $minimumResolvedRateDecimal))) {
-        throw ("Coverage failed: resolved {0:0.00}% (target >= {1:0.00}%), unresolved {2:0.00}% (target < {3:0.00}%)." -f `
-            (100 * $resolvedRate), (100 * $MinimumResolvedRate), (100 * $unresolvedRate), (100 * (1.0 - $MinimumResolvedRate)))
+    if ($ReportOnly) {
+        Write-Host 'COVERAGE_GATE=NOT_RUN'
     }
-    Write-Host 'COVERAGE_GATE=PASSED'
+    else {
+        $strictUnresolvedGate = $minimumResolvedRateDecimal -gt 0
+        if ($resolvedRate -lt $minimumResolvedRateDecimal -or
+            ($strictUnresolvedGate -and $unresolvedRate -ge ([decimal]1 - $minimumResolvedRateDecimal))) {
+            throw ("Coverage failed: resolved {0:0.00}% (target >= {1:0.00}%), unresolved {2:0.00}% (target < {3:0.00}%)." -f `
+                (100 * $resolvedRate), (100 * $MinimumResolvedRate), (100 * $unresolvedRate), (100 * (1.0 - $MinimumResolvedRate)))
+        }
+        Write-Host 'COVERAGE_GATE=PASSED'
+    }
 }
 finally {
     $env:FAST_AUDIT_NUMBERS = $oldFastAuditNumbers
     $env:FAST_AUDIT_WORKERS = $oldFastAuditWorkers
+    $env:FAST_AUDIT_RESUME = $oldFastAuditResume
     if (Test-Path -LiteralPath $runDirectory) {
         Remove-Item -LiteralPath $runDirectory -Recurse -Force -ErrorAction SilentlyContinue
     }

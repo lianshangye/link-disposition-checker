@@ -1011,6 +1011,37 @@ internal static class RegressionTests
                 Html = "<main><h1>当前无法使用此页面</h1><p>HTTP ERROR 502</p></main>"
             }));
 
+        string checkpointDirectory = Path.Combine(Path.GetTempPath(), "LinkCheckerCheckpointTest_" + Guid.NewGuid().ToString("N"));
+        bool checkpointPassed = false;
+        try
+        {
+            Directory.CreateDirectory(checkpointDirectory);
+            string outputPath = Path.Combine(checkpointDirectory, "result.csv");
+            var jobs = new List<CheckJob>
+            {
+                new CheckJob { Number = 1, Url = "https://example.com/one" },
+                new CheckJob { Number = 2, Url = "https://example.com/two" }
+            };
+            using (var store = new AuditCheckpointStore(outputPath, "INPUT-A", true))
+                store.Append(new CheckResult { Number = 1, OriginalUrl = jobs[0].Url, Verdict = "仍可访问" });
+            File.AppendAllText(outputPath + ".checkpoint.jsonl", "{incomplete\r\n", new System.Text.UTF8Encoding(false));
+            Dictionary<int, CheckResult> recovered;
+            using (var store = new AuditCheckpointStore(outputPath, "INPUT-A", true))
+                recovered = store.Load(jobs, ignored => { });
+            bool mismatchRejected = false;
+            try { using (var ignored = new AuditCheckpointStore(outputPath, "INPUT-B", true)) { } }
+            catch (InvalidDataException) { mismatchRejected = true; }
+            using (var reset = new AuditCheckpointStore(outputPath, "INPUT-A", false)) { }
+            checkpointPassed = recovered.Count == 1 && recovered[1].Verdict == "仍可访问" && mismatchRejected &&
+                !File.Exists(outputPath + ".checkpoint.jsonl") && !File.Exists(outputPath + ".checkpoint.json");
+        }
+        finally
+        {
+            try { Directory.Delete(checkpointDirectory, true); } catch { }
+        }
+        Console.WriteLine((checkpointPassed ? "PASS " : "FAIL ") + "全量核验检查点逐条恢复、坏尾行容错和输入隔离");
+        if (!checkpointPassed) _failures++;
+
         return _failures == 0 ? 0 : 1;
     }
 }

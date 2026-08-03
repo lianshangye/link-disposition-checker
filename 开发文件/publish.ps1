@@ -1,4 +1,4 @@
-﻿param(
+param(
     [string]$CsvPath = '',
     [string]$ExcelPath = '',
     [string]$GroundTruthCsv = ''
@@ -6,13 +6,13 @@
 
 $ErrorActionPreference = 'Stop'
 & (Join-Path $PSScriptRoot 'Run-CoreTests.ps1') -CsvPath $CsvPath -ExcelPath $ExcelPath
-$releaseStatus = '候选版（准确性待当期人工真值验收）'
+$releaseStatus = 'Candidate build (current human truth required)'
 if (-not [String]::IsNullOrWhiteSpace($GroundTruthCsv)) {
     & (Join-Path $PSScriptRoot 'Run-ReleaseValidation.ps1') -GroundTruthCsv $GroundTruthCsv
-    $releaseStatus = '正式版（已通过当期人工真值门槛）'
+    $releaseStatus = 'Release build (current human truth passed)'
 }
 else {
-    Write-Warning '未提供当期人工真值。本次包可以使用，但只能作为候选版，不能宣称准确率已经验收。'
+    Write-Warning "No current human truth was supplied; publishing a candidate package only."
 }
 & (Join-Path $PSScriptRoot 'build.ps1')
 
@@ -56,11 +56,11 @@ Copy-Item -LiteralPath (Join-Path $buildOutputDirectory 'StartupCheck.exe') -Des
 Copy-Item -LiteralPath (Join-Path $buildOutputDirectory 'NetworkDiagnostics.exe') -Destination $staging -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot $diagnosticLauncherName) -Destination (Join-Path $staging $publishedDiagnosticLauncherName) -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot $diagnosticLinksName) -Destination $staging -Force
-[IO.File]::WriteAllLines((Join-Path $staging '版本状态.txt'), @(
-    '链接失效核验工具 4.4.2',
-    ('打包时间：' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')),
-    ('发布状态：' + $releaseStatus),
-    '说明：候选版表示结构和回归测试通过，但尚未取得足量当期人工真值，不能宣称准确率已经验收。'
+[IO.File]::WriteAllLines((Join-Path $staging 'VersionStatus.txt'), @(
+    'Link checker 4.5.5',
+    ('Package time: ' + (Get-Date -Format "yyyy-MM-dd HH:mm:ss")),
+    ('Release status: ' + $releaseStatus),
+    'Candidate package: core tests passed; current human truth is still required for accuracy acceptance.'
 ), (New-Object Text.UTF8Encoding($true)))
 
 try {

@@ -53,9 +53,9 @@ internal static class ReliabilityTests
             Expect("快速请求缺少最终跳转地址时 404 不直接判失效",
                 !fast404Resolved && fast404.Verdict == "人工复核");
 
-            Expect("4.4.2 升级会重跑旧版确定结论", MainForm.ShouldDiscardResultForEngineUpgrade(
+            Expect("4.5.1 仍会重跑早于4.4.2的旧版确定结论", MainForm.ShouldDiscardResultForEngineUpgrade(
                 new CheckResult { Verdict = "仍可访问", StatusCode = "200" }, "4.4.1"));
-            Expect("4.4.2 当前版本保留确定结论", !MainForm.ShouldDiscardResultForEngineUpgrade(
+            Expect("4.5.1 保留4.4.2后的确定结论", !MainForm.ShouldDiscardResultForEngineUpgrade(
                 new CheckResult { Verdict = "仍可访问", StatusCode = "200" }, "4.4.2"));
         }
         catch (Exception ex)

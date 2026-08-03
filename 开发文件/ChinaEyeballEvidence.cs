@@ -51,16 +51,18 @@ namespace LinkDispositionChecker
         {
             if (result == null || target == null || !NetworkRestrictionCircuitBreaker.IsTransientRestriction(result))
                 return false;
-            string infrastructure = (result.InfrastructureKey ?? "").Trim();
-            if (String.Equals(infrastructure, "IP 119.28.42.49", StringComparison.OrdinalIgnoreCase))
-                return true;
-            string platform = (result.Platform ?? "").Trim();
-            bool genericPlatform = String.IsNullOrWhiteSpace(platform) ||
-                platform == "网媒" || platform == "未知" || platform == "未知平台";
-            if (!genericPlatform) return false;
-            string evidence = (result.Evidence ?? "") + " " + (result.StatusCode ?? "");
-            return Regex.IsMatch(evidence, @"(?:\b502\b|bad\s+gateway|http\s+error\s+502)",
-                RegexOptions.IgnoreCase);
+            // Public Globalping/China-eyeball probes have a shared hourly
+            // quota. They are a last-resort diagnostic, not a default step for
+            // every generic 403/502 row. Keep the quick stage deterministic and
+            // avoid consuming the quota before platform-specific evidence has
+            // had a chance to run.
+            // Globalping's anonymous China-eyeball pool is shared by all users
+            // and has a small hourly quota. Infrastructure matching alone is
+            // not enough: one CDN/IP can host many unrelated sites, so probing
+            // every transient row exhausts the quota and inflates "unfinished".
+            // Keep this diagnostic explicitly opt-in.
+            return String.Equals(Environment.GetEnvironmentVariable("LINK_CHECKER_ALLOW_CHINA_EYEBALL"), "1",
+                StringComparison.OrdinalIgnoreCase);
         }
 
         internal static bool IsChinaEyeballChallenge(int statusCode, string body, string cookieHeader)

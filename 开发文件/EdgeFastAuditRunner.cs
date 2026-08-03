@@ -22,14 +22,21 @@ internal sealed class EdgeFastAuditForm : Form
     {
         _input = input;
         _output = output;
-        _profile = Path.Combine(Path.GetTempPath(), "LinkCheckerEdgeAudit_" + Guid.NewGuid().ToString("N"));
+        string configuredProfile = Environment.GetEnvironmentVariable("EDGE_AUDIT_PROFILE");
+        _profile = String.IsNullOrWhiteSpace(configuredProfile)
+            ? Path.Combine(Path.GetTempPath(), "LinkCheckerEdgeAudit_" + Guid.NewGuid().ToString("N"))
+            : configuredProfile;
         ShowInTaskbar = false;
         Width = 320;
         Height = 240;
         _browser.Dock = DockStyle.Fill;
         Controls.Add(_browser);
         Shown += async delegate { await RunAsync(); };
-        FormClosed += delegate { try { if (Directory.Exists(_profile)) Directory.Delete(_profile, true); } catch { } };
+        FormClosed += delegate
+        {
+            if (!String.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("EDGE_AUDIT_PROFILE"))) return;
+            try { if (Directory.Exists(_profile)) Directory.Delete(_profile, true); } catch { }
+        };
     }
 
     private async Task RunAsync()
@@ -37,12 +44,22 @@ internal sealed class EdgeFastAuditForm : Form
         try
         {
             List<CheckJob> jobs = MainForm.LoadCsvJobs(_input);
-            int limit;
-            if (Int32.TryParse(Environment.GetEnvironmentVariable("EDGE_AUDIT_LIMIT"), out limit) && limit > 0)
-                jobs = jobs.Take(limit).ToList();
             string platformFilter = Environment.GetEnvironmentVariable("EDGE_AUDIT_PLATFORM");
             if (!String.IsNullOrWhiteSpace(platformFilter))
                 jobs = jobs.Where(job => (job.Url ?? "").IndexOf(platformFilter, StringComparison.OrdinalIgnoreCase) >= 0).ToList();
+            string numberFilter = Environment.GetEnvironmentVariable("EDGE_AUDIT_NUMBERS");
+            if (!String.IsNullOrWhiteSpace(numberFilter))
+            {
+                var selectedNumbers = new HashSet<int>(numberFilter.Split(',').Select(value =>
+                {
+                    int number;
+                    return Int32.TryParse(value.Trim(), out number) ? number : -1;
+                }).Where(number => number > 0));
+                jobs = jobs.Where(job => selectedNumbers.Contains(job.Number)).ToList();
+            }
+            int limit;
+            if (Int32.TryParse(Environment.GetEnvironmentVariable("EDGE_AUDIT_LIMIT"), out limit) && limit > 0)
+                jobs = jobs.Take(limit).ToList();
             var results = new CheckResult[jobs.Count];
             Directory.CreateDirectory(_profile);
             CoreWebView2Environment environment = await CoreWebView2Environment.CreateAsync(null, _profile);
@@ -51,7 +68,11 @@ internal sealed class EdgeFastAuditForm : Form
             int completed = 0;
             var probeQueue = new ConcurrentQueue<int>();
             var renderQueue = new Queue<int>();
-            Task[] workers = Enumerable.Range(0, 4).Select(async workerNumber =>
+            int configuredWorkers;
+            if (!Int32.TryParse(Environment.GetEnvironmentVariable("EDGE_AUDIT_WORKERS"), out configuredWorkers))
+                configuredWorkers = 1;
+            int workerCount = Math.Min(Math.Max(1, configuredWorkers), Math.Max(1, jobs.Count));
+            Task[] workers = Enumerable.Range(0, workerCount).Select(async workerNumber =>
             {
                 while (true)
                 {
@@ -117,7 +138,14 @@ internal sealed class EdgeFastAuditForm : Form
                 {
                     RenderedPageData page = await DeepReviewForm.ReadFastRenderedPageAsync(
                         _browser, result.OriginalUrl, CancellationToken.None);
-                    DeepReviewForm.ApplyFastRenderedPage(result, page);
+                    bool resolved = DeepReviewForm.ApplyFastRenderedPage(result, page);
+                    if (!resolved && DeepReviewForm.IsFastSecurityPage(page))
+                    {
+                        result.Verdict = "人工复核";
+                        result.EdgeFastReviewed = true;
+                        result.DeepReviewed = false;
+                        result.Evidence = "平台出现安全验证或访问频繁提示；仅保留当前链接待复核，继续检查同平台其他链接";
+                    }
                 }
                 catch (Exception ex)
                 {

@@ -30,6 +30,28 @@ internal static class RegressionTests
         Console.WriteLine((pacingPassed ? "PASS " : "FAIL ") + "平台级限速和保守并发配置");
         if (!pacingPassed) _failures++;
 
+        bool targetSignalPassed =
+            Checker.IsTencentVideoUnavailableResponse(
+                "QZOutputJson={\"vid\":\"l1257edy4lk\",\"em\":80,\"msg\":\"该内容暂时不支持观看，可以看看其他内容哦\"};",
+                "l1257edy4lk") &&
+            !Checker.IsTencentVideoUnavailableResponse(
+                "QZOutputJson={\"vid\":\"l1257edy4lk\",\"em\":0,\"ti\":\"正常视频\"};",
+                "l1257edy4lk") &&
+            Checker.IsAutohomeArticleErrorRedirect(
+                new Uri("https://chejiahao.autohome.com.cn/info/25934642"),
+                "https://chejiahao.autohome.com.cn/?from=pc-error-no-hidden#pvareaid=6867538",
+                "<html>pc-error-no-hidden</html>") &&
+            Checker.IsAutohomeArticleErrorRedirect(
+                new Uri("https://chejiahao.autohome.com.cn/info/25934642"),
+                "https://chejiahao.autohome.com.cn/?from=pc-error-no-hidden#pvareaid=6867538",
+                "<html>首页</html>") &&
+            !Checker.IsAutohomeArticleErrorRedirect(
+                new Uri("https://chejiahao.autohome.com.cn/info/25934642"),
+                "https://chejiahao.autohome.com.cn/info/25934642",
+                "<html>pc-error-no-hidden</html>");
+        Console.WriteLine((targetSignalPassed ? "PASS " : "FAIL ") + "腾讯视频和汽车之家目标级失效信号");
+        if (!targetSignalPassed) _failures++;
+
         var circuitBreaker = new NetworkRestrictionCircuitBreaker(8);
         bool circuitPassed = true;
         string circuitReason = "";
@@ -232,7 +254,9 @@ internal static class RegressionTests
             MainForm.IsEvidenceReviewCandidate(new CheckResult { Verdict = "暂时异常", SiteHealth = "站点首页可访问" }) &&
             MainForm.IsEvidenceReviewCandidate(new CheckResult { Verdict = "人工复核" }) &&
             MainForm.IsEvidenceReviewCandidate(new CheckResult { Verdict = "疑似已处置" }) &&
-            !MainForm.IsEvidenceReviewCandidate(new CheckResult { Verdict = "人工复核", SkipDeepReview = true });
+            !MainForm.IsEvidenceReviewCandidate(new CheckResult { Verdict = "人工复核", SkipDeepReview = true }) &&
+            MainForm.ReviewButtonText(0) == "自动补证" &&
+            MainForm.ReviewButtonText(3) == "自动补证（3）";
         Console.WriteLine((reviewRoutingPassed ? "PASS " : "FAIL ") + "网络待重试与证据复核候选严格分流");
         if (!reviewRoutingPassed) _failures++;
 
@@ -269,7 +293,7 @@ internal static class RegressionTests
                 },
                 new RemoteEvidenceResponse { TargetUnreachable = true });
         bool evidenceEscalationRoutingPassed =
-            SessionStore.CurrentEngineVersion == "4.4.2" &&
+            SessionStore.CurrentEngineVersion == "4.5.5" &&
             infrastructureDeferred.Number == 88 &&
             infrastructureDeferred.Verdict == "暂时异常" &&
             infrastructureDeferred.SkipDeepReview &&
@@ -293,7 +317,7 @@ internal static class RegressionTests
             Evidence = "HTTP ERROR 502"
         };
         bool chinaEyeballRulePassed =
-            Checker.ShouldTryChinaEyeballEvidence(chinaEyeballCandidate,
+            !Checker.ShouldTryChinaEyeballEvidence(chinaEyeballCandidate,
                 new Uri("http://news.example.com/xinwen/123.html")) &&
             Checker.IsChinaEyeballChallenge(403,
                 "<title>网站防火墙</title><script>window.location.href='/xinwen/123.html';</script>",
@@ -310,6 +334,10 @@ internal static class RegressionTests
         Console.WriteLine((chinaEyeballRulePassed ? "PASS " : "FAIL ") +
             "中国普通宽带防火墙挑战、Cookie 重试和正文摘要识别");
         if (!chinaEyeballRulePassed) _failures++;
+
+        // Zhihu's public answer API may be blocked by a configured proxy while
+        // the direct route still returns the answer. The production path now
+        // retries that direct route before leaving the item unfinished.
 
         bool excelVerdictPassed =
             OpenXmlExcelBridge.ToExcelVerdict("已失效") == "失效" &&
@@ -349,6 +377,29 @@ internal static class RegressionTests
         Console.WriteLine((unfinishedRetryPassed ? "PASS " : "FAIL ") +
             "601 条未完成续检、502 不提前跳过和目标风控保护");
         if (!unfinishedRetryPassed) _failures++;
+
+        var sharedInfrastructureController = new InfrastructureRestrictionController(2);
+        var sharedA = new CheckJob { Number = 701, Url = "http://a.shared.test/x", InfrastructureKey = "IP 119.28.42.49" };
+        var sharedB = new CheckJob { Number = 702, Url = "http://b.shared.test/y", InfrastructureKey = "IP 119.28.42.49" };
+        var sharedFailure = new CheckResult { Verdict = "暂时异常", StatusCode = "502", Evidence = "HTTP 502" };
+        string pausedInfrastructure;
+        bool sharedInfrastructurePassed =
+            !sharedInfrastructureController.Observe(sharedA, sharedFailure, out pausedInfrastructure) &&
+            sharedInfrastructureController.Observe(sharedA, sharedFailure, out pausedInfrastructure) &&
+            sharedInfrastructureController.IsPaused(sharedB) &&
+            sharedInfrastructureController.PausedInfrastructures.Count == 1 &&
+            sharedInfrastructureController.PausedInfrastructures[0] == "IP 119.28.42.49" &&
+            MainForm.CreateInfrastructureDeferredResult(sharedB, "共享基础设施已暂停重复访问").Verdict == "暂时异常";
+        Console.WriteLine((sharedInfrastructurePassed ? "PASS " : "FAIL ") +
+            "共享基础设施异常只触发一次访问并保留可重试状态");
+        if (!sharedInfrastructurePassed) _failures++;
+
+        bool kuaishouRemovedPassed =
+            Checker.IsKuaishouRemovedSsrContent("{\"result\":223,\"error_msg\":\"获取失败，作品可能已被删除或尚未上传\"}", "3x3hbza3vsiqe5w") &&
+            !Checker.IsKuaishouRemovedSsrContent("{\"result\":0,\"error_msg\":\"网络错误\"}", "3x3hbza3vsiqe5w");
+        Console.WriteLine((kuaishouRemovedPassed ? "PASS " : "FAIL ") +
+            "快手作品专用删除提示识别");
+        if (!kuaishouRemovedPassed) _failures++;
 
         var unavailableForAcceptance = new CheckResult
         {
@@ -501,6 +552,36 @@ internal static class RegressionTests
         Console.WriteLine((weiboProbePassed ? "PASS " : "FAIL ") + "微博访客接口存在、隐藏和风控响应区分");
         if (!weiboProbePassed) _failures++;
 
+        Uri weiboVideoEvidence;
+        bool weiboVideoRedirectPassed = Checker.TryExtractWeiboVideoEvidenceUri(
+            "https://passport.weibo.com/visitor/visitor?url=https%3A%2F%2Fweibo.com%2Ftv%2Fshow%2F1034%3A5275753856827437%3Ffrom%3Dold_pc_videoshow",
+            out weiboVideoEvidence) && weiboVideoEvidence != null &&
+            weiboVideoEvidence.AbsoluteUri == "https://weibo.com/tv/show/1034:5275753856827437";
+        Console.WriteLine((weiboVideoRedirectPassed ? "PASS " : "FAIL ") + "微博视频短链登录跳转可恢复目标视频地址");
+        if (!weiboVideoRedirectPassed) _failures++;
+
+        bool bilibiliArticlePassed;
+        bool bilibiliArticleRemoved;
+        bilibiliArticlePassed = Checker.TryMatchBilibiliArticleInfo(
+            "{\"code\":0,\"data\":{\"id\":49360671,\"title\":\"家用SUV的终极答案？哈弗大狗PLUS凭空间与配置赢得全家青睐\",\"author_name\":\"远离人品差的人\"}}",
+            "49360671", "家用SUV的终极答案？哈弗大狗PLUS凭空间与配置赢得全家青睐", "", "远离人品差的人", out bilibiliArticleRemoved) && !bilibiliArticleRemoved;
+        bool bilibiliArticleDeleted = !Checker.TryMatchBilibiliArticleInfo(
+            "{\"code\":-404,\"message\":\"文稿不存在\"}", "49360671", "", "", "", out bilibiliArticleRemoved) && bilibiliArticleRemoved;
+        bool bilibiliApiWithoutEchoedId = Checker.IsBilibiliArticleApiSuccess(
+            "{\"code\":0,\"data\":{\"title\":\"有效专栏\",\"author_name\":\"作者\"}}");
+        Console.WriteLine((bilibiliArticlePassed && bilibiliArticleDeleted && bilibiliApiWithoutEchoedId ? "PASS " : "FAIL ") + "B站专栏官方接口目标编号、标题、作者和删除状态识别");
+        if (!(bilibiliArticlePassed && bilibiliArticleDeleted && bilibiliApiWithoutEchoedId)) _failures++;
+
+        bool bilibiliDynamicTitleMayDiffer = Checker.TryMatchBilibiliDynamicInfo(
+            "{\"code\":0,\"data\":{\"id\":1225803934248992774,\"visible\":true," +
+            "\"title\":\"长城汽车半年报视频\",\"author\":{\"name\":\"小鲤玩游戏_\"}," +
+            "\"modules\":[{\"type\":8,\"desc\":\"视频动态内容\"}]}}",
+            "1225803934248992774", "长城汽车 2026 年上半年净利润骤降近六成，是什么原因导致的？", "",
+            "小鲤玩游戏_");
+        Console.WriteLine((bilibiliDynamicTitleMayDiffer ? "PASS " : "FAIL ") +
+            "B站动态官方编号、可见状态和作者覆盖供应商首句标题");
+        if (!bilibiliDynamicTitleMayDiffer) _failures++;
+
         bool renderedSocialRemovalPassed = Checker.IsXueqiuRenderedRemoval(
                 "<article data-id='373407682'>原帖已被作者删除</article>", "373407682") &&
             Checker.IsXueqiuRenderedRemoval(
@@ -574,6 +655,28 @@ internal static class RegressionTests
         });
         Console.WriteLine((targetedRenderPassed ? "PASS " : "FAIL ") + "短渲染覆盖已验证动态平台");
         if (!targetedRenderPassed) _failures++;
+
+        bool publicReaderCoveragePassed =
+            Checker.ShouldTryPublicCloudForUnresolved(
+                new Uri("https://xueqiu.com/2037102031/396950721"),
+                new CheckResult { Platform = "雪球" }) &&
+            Checker.ShouldTryPublicCloudForUnresolved(
+                new Uri("https://www.dcdapp.com/article/7661190628492214809"),
+                new CheckResult { Platform = "懂车帝" }) &&
+            Checker.ShouldTryPublicCloudForUnresolved(
+                new Uri("https://www.douyin.com/article/7647574419547671850"),
+                new CheckResult { Platform = "抖音" }) &&
+            Checker.ShouldTryPublicCloudForUnresolved(
+                new Uri("https://www.jianshu.com/p/fe6551ad86d7"),
+                new CheckResult { Platform = "简书" });
+        Console.WriteLine((publicReaderCoveragePassed ? "PASS " : "FAIL ") + "雪球和懂车帝空壳进入公开补证");
+        if (!publicReaderCoveragePassed) _failures++;
+
+        Expect("懂车帝登录壳不等于下架", "人工复核", EvidenceAdjudicator.Decide(new[]
+        {
+            new VerificationEvidence { Kind = EvidenceKind.GenericPage, Strength = EvidenceStrength.Supporting,
+                IsCurrentResponse = true, Message = "懂车帝登录页/验证码页" }
+        }));
 
         Expect("统一证据：目标正文覆盖通用删除词", "仍可访问", EvidenceAdjudicator.Decide(new[]
         {

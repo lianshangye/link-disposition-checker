@@ -1,0 +1,24 @@
+name: Windows build and tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare WebView2 SDK and build
+        shell: powershell
+        run: .\prepare-runtime.ps1
+
+      - name: Run core regression tests
+        shell: powershell
+        run: .\开发文件\Run-CoreTests.ps1 -RegressionOnly
+
+      - name: Test validation contracts
+        shell: powershell
+        run: .\开发文件\Test-ValidationScripts.ps1

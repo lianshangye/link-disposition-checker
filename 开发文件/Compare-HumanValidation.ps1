@@ -10,7 +10,7 @@
     [int]$MaximumLabelAgeDays = 7,
     [double]$MaximumFalseInvalidRate = 0.02,
     [double]$MaximumFalseAliveRate = 0.02,
-    [double]$ReviewRateTarget = 0.20
+    [double]$ReviewRateTarget = 0.05
 )
 
 $ErrorActionPreference = 'Stop'
@@ -166,4 +166,5 @@ if ($platforms.Count -lt $MinimumPlatforms) { throw "Current platform coverage i
 if ($domainFamilies.Count -lt $MinimumDomainFamilies) { throw "Current domain-family coverage is too small: $($domainFamilies.Count) < $MinimumDomainFamilies." }
 if ($falseInvalidRate -gt $MaximumFalseInvalidRate) { throw 'False-invalid rate exceeds the release threshold.' }
 if ($falseAliveRate -gt $MaximumFalseAliveRate) { throw 'False-alive rate exceeds the release threshold.' }
+if ($reviewRate -ge $ReviewRateTarget) { throw 'Unresolved rate does not meet the below-5% release threshold.' }
 Write-Host 'RELEASE_GATE=PASSED'

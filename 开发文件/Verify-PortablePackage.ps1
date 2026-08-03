@@ -1,9 +1,11 @@
-param(
+﻿param(
     [string]$ZipPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
+$expectedDisplayVersion = '4.5.5'
+$expectedFileVersion = $expectedDisplayVersion + '.0'
 if ([String]::IsNullOrWhiteSpace($ZipPath)) {
     $ZipPath = Get-ChildItem -LiteralPath $projectRoot -Recurse -Filter '*.zip' |
         Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
@@ -52,8 +54,11 @@ try {
 
     $x64 = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $root 'x64\LinkChecker.exe'))
     $x86 = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $root 'x86\LinkChecker.exe'))
-    if ($x64.FileVersion -ne '4.4.2.0' -or $x86.FileVersion -ne '4.4.2.0') {
-        throw "Unexpected executable versions: x64=$($x64.FileVersion), x86=$($x86.FileVersion)"
+    $startup = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $root 'StartupCheck.exe'))
+    if ($x64.FileVersion -ne $expectedFileVersion -or
+        $x86.FileVersion -ne $expectedFileVersion -or
+        $startup.FileVersion -ne $expectedFileVersion) {
+        throw "Unexpected executable versions: x64=$($x64.FileVersion), x86=$($x86.FileVersion), startup=$($startup.FileVersion)"
     }
     $sourceRules = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $projectRoot 'platform-rules.json')).Hash
     foreach ($architecture in @('x64', 'x86')) {
@@ -70,8 +75,8 @@ try {
     $readme = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $root $readmeName)
     $logic = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $root $logicName)
     if (
-        $readme -notmatch '4\.4\.2' -or
-        $logic -notmatch '4\.4\.2' -or
+        $readme -notmatch ('当前版本：' + [regex]::Escape($expectedDisplayVersion)) -or
+        $logic -notmatch ('适用版本：' + [regex]::Escape($expectedDisplayVersion)) -or
         $readme -notmatch 'Globalping' -or
         $logic -notmatch 'HTTP 404' -or
         $readme.Length -lt 500 -or
@@ -85,6 +90,7 @@ try {
     Write-Host "PACKAGE_FILES=$fileCount"
     Write-Host "X64_VERSION=$($x64.FileVersion)"
     Write-Host "X86_VERSION=$($x86.FileVersion)"
+    Write-Host "STARTUP_VERSION=$($startup.FileVersion)"
     Write-Host "ZIP_BYTES=$((Get-Item -LiteralPath $ZipPath).Length)"
     Write-Host "ZIP_SHA256=$zipHash"
     Write-Host "STARTUP_CHECK_REPORT=$report"

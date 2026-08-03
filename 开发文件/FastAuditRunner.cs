@@ -6,6 +6,7 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Windows.Forms;
 using LinkDispositionChecker;
 
 internal static class FastAuditRunner
@@ -34,33 +35,35 @@ internal static class FastAuditRunner
     private static async Task<CheckResult> CheckOne(
         Checker checker,
         CheckJob job,
-        PlatformRestrictionController restrictions)
+        PlatformRestrictionController restrictions,
+        InfrastructureRestrictionController infrastructureRestrictions)
     {
         CheckResult result;
-        if (restrictions.IsPaused(job))
-        {
-            result = MainForm.CreateInfrastructureDeferredResult(
-                job,
-                PlatformRestrictionController.DisplayLabel(job, BatchPreflightPlanner.PlatformKey(job)),
-                restrictions.IsPubliclyUnavailable(job));
-        }
-        else
-        {
-            result = await checker.CheckAsync(
-                job.Url,
-                job.Number,
-                job.ExpectedTitle,
-                job.ExpectedExcerpt,
-                job.ExpectedAuthor,
-                job.Platform,
-                job.ContentType,
-                false,
-                CancellationToken.None);
-            if (NetworkRestrictionCircuitBreaker.IsTransientRestriction(result))
-                result = await checker.EscalateEvidenceAsync(result, CancellationToken.None);
-            string pausedPlatform;
-            restrictions.Observe(job, result, out pausedPlatform);
-        }
+        // Every row gets its own full evidence attempt.  A platform or shared-IP
+        // circuit breaker may record a warning, but it must never turn the
+        // remainder of a real batch into synthetic "unfinished" rows before
+        // their target URLs have been checked.
+        // The fast stage is HTTP/API only. Browser rendering is an explicit
+        // user action and must never be started implicitly or mixed into the
+        // fast-stage coverage metric.
+        bool quickBrowser = false;
+        result = await checker.CheckAsync(
+            job.Url,
+            job.Number,
+            job.ExpectedTitle,
+            job.ExpectedExcerpt,
+            job.ExpectedAuthor,
+            job.Platform,
+            job.ContentType,
+            quickBrowser,
+            CancellationToken.None);
+        // Do not escalate to public-cloud/remote/browser evidence here. Those
+        // are the explicit deep-review action; including them would make the
+        // fast-stage metric depend on external quotas and multi-second waits.
+        string pausedPlatform;
+        restrictions.Observe(job, result, out pausedPlatform);
+        string pausedInfrastructure;
+        infrastructureRestrictions.Observe(job, result, out pausedInfrastructure);
 
         result.Verdict = Checker.NormalizeVisibleVerdict(result.Verdict);
         result.SourceSheet = job.SourceSheet;
@@ -72,6 +75,56 @@ internal static class FastAuditRunner
 
     private static async Task<int> Run(string input, string output)
     {
+        string oldQuickPass = Environment.GetEnvironmentVariable("LINK_CHECKER_QUICK_PASS");
+        Environment.SetEnvironmentVariable("LINK_CHECKER_QUICK_PASS", "1");
+        try
+        {
+            return await RunCore(input, output);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("LINK_CHECKER_QUICK_PASS", oldQuickPass);
+        }
+    }
+
+    private static void RunBrowserFastStage(List<CheckResult> ordered)
+    {
+        List<CheckResult> candidates = ordered.Where(item =>
+            MainForm.IsFastEvidenceReviewCandidate(item)).ToList();
+        Console.WriteLine("PHASE=browser-fast,PENDING=" + candidates.Count);
+        if (candidates.Count == 0) return;
+
+        Exception browserError = null;
+        var thread = new Thread(delegate()
+        {
+            try
+            {
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                using (var form = new DeepReviewForm(candidates, item =>
+                {
+                    ContractAcceptanceClassifier.Apply(item);
+                }, true, true))
+                {
+                    form.ShowDialog();
+                }
+            }
+            catch (Exception ex) { browserError = ex; }
+        });
+        thread.IsBackground = false;
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        if (browserError != null)
+            Console.WriteLine("BROWSER_FAST_ERROR=" + browserError.Message.Replace("\r", " ").Replace("\n", " "));
+        Console.WriteLine("BROWSER_FAST_RESOLVED=" + candidates.Count(item =>
+            item.Verdict == "已失效" || item.Verdict == "仍可访问"));
+    }
+
+    private static async Task<int> RunCore(string input, string output)
+    {
+        DateTime taskStartedAt = DateTime.Now;
+        var taskWatch = System.Diagnostics.Stopwatch.StartNew();
         List<CheckJob> jobs = MainForm.LoadCsvJobs(input);
         string numberFilter = Environment.GetEnvironmentVariable("FAST_AUDIT_NUMBERS");
         if (!String.IsNullOrWhiteSpace(numberFilter))
@@ -102,31 +155,17 @@ internal static class FastAuditRunner
 
         var results = new ConcurrentBag<CheckResult>();
         var restrictions = new PlatformRestrictionController(3);
+        var infrastructureRestrictions = new InfrastructureRestrictionController(2);
         var checker = new Checker(900000);
         int complete = 0;
-
-        // 与桌面版一致，先对分散基础设施进行小规模预检，再进入并发核验。
-        List<CheckJob> samples = jobs.Count >= 20
-            ? BatchPreflightPlanner.SelectSamples(jobs, 8, 2)
-            : new List<CheckJob>();
-        var sampledKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var observations = new List<KeyValuePair<CheckJob, CheckResult>>();
-        foreach (CheckJob job in samples)
-        {
-            CheckResult result = await CheckOne(checker, job, restrictions);
-            results.Add(result);
-            sampledKeys.Add(job.Key);
-            observations.Add(new KeyValuePair<CheckJob, CheckResult>(job, result));
-            int done = Interlocked.Increment(ref complete);
-            Console.WriteLine("PREFLIGHT=" + done + "/" + jobs.Count + ",VERDICT=" + result.Verdict +
-                ",STATUS=" + result.StatusCode + ",INFRA=" + result.InfrastructureKey);
-            if (BatchPreflightPlanner.Analyze(observations).RequiresDecision) break;
-        }
-
-        List<CheckJob> pending = jobs.Where(job => !sampledKeys.Contains(job.Key)).ToList();
         int configuredWorkers;
         if (!Int32.TryParse(Environment.GetEnvironmentVariable("FAST_AUDIT_WORKERS"), out configuredWorkers))
             configuredWorkers = 6;
+
+        // Run the same formal pass as the desktop application. A separate
+        // preflight sample duplicates requests and makes the validation runner
+        // report a different execution path from the product.
+        List<CheckJob> pending = jobs.ToList();
         int workerCount = Math.Min(Math.Max(1, configuredWorkers), Math.Max(1, pending.Count));
         Console.WriteLine("PHASE=check,WORKERS=" + workerCount + ",PENDING=" + pending.Count);
 
@@ -137,7 +176,7 @@ internal static class FastAuditRunner
             {
                 int index = Interlocked.Increment(ref next);
                 if (index >= pending.Count) break;
-                CheckResult result = await CheckOne(checker, pending[index], restrictions);
+                CheckResult result = await CheckOne(checker, pending[index], restrictions, infrastructureRestrictions);
                 results.Add(result);
                 int done = Interlocked.Increment(ref complete);
                 if (done % 25 == 0 || done == jobs.Count)
@@ -147,9 +186,23 @@ internal static class FastAuditRunner
         await Task.WhenAll(tasks);
 
         List<CheckResult> ordered = results.OrderBy(item => item.Number).ToList();
+        // The validation runner represents the product's quick stage. Do not
+        // silently launch WebView2 here; browser evidence is an explicit user
+        // action in the desktop application and must not be mixed into the
+        // quick-stage coverage metric.
+        Console.WriteLine("PHASE=browser-fast,SKIPPED=manual-only");
+        taskWatch.Stop();
+        DateTime taskCompletedAt = DateTime.Now;
+        string taskElapsed = taskWatch.Elapsed.ToString(@"hh\:mm\:ss");
+        foreach (CheckResult result in ordered)
+        {
+            result.TaskStartedAt = taskStartedAt.ToString("yyyy-MM-dd HH:mm:ss");
+            result.TaskCompletedAt = taskCompletedAt.ToString("yyyy-MM-dd HH:mm:ss");
+            result.TaskElapsed = taskElapsed;
+        }
         using (var writer = new StreamWriter(output, false, new UTF8Encoding(true)))
         {
-            writer.WriteLine("序号,核验结果,内容状态,公开可访问性,合同验收建议,证据等级,供应商行动,AI判断,AI置信度,AI模型,HTTP状态,平台,内容类型,发文作者,页面标题,原链接,最终地址,判定依据,追证阶段,取证线路,站点对照,基础设施,核验时间,耗时");
+            writer.WriteLine("序号,核验结果,内容状态,公开可访问性,合同验收建议,证据等级,供应商行动,AI判断,AI置信度,AI模型,HTTP状态,平台,内容类型,发文作者,页面标题,原链接,最终地址,判定依据,追证阶段,取证线路,站点对照,基础设施,核验时间,单条耗时,任务开始时间,任务完成时间,任务总耗时");
             foreach (CheckResult result in ordered)
             {
                 ContractAcceptanceView view = ContractAcceptanceClassifier.Evaluate(result);
@@ -177,8 +230,8 @@ internal static class FastAuditRunner
                     Csv(result.AcquisitionAttempts),
                     Csv(result.SiteHealth),
                     Csv(result.InfrastructureKey),
-                    Csv(result.CheckedAt),
-                    Csv(result.Duration)
+                    Csv(result.CheckedAt), Csv(result.Duration), Csv(result.TaskStartedAt),
+                    Csv(result.TaskCompletedAt), Csv(result.TaskElapsed)
                 }));
             }
         }
@@ -199,6 +252,9 @@ internal static class FastAuditRunner
         Console.WriteLine("REVIEW=" + review);
         Console.WriteLine("CONTENT_RESOLVED=" + contentResolved);
         Console.WriteLine("CONTENT_RESOLVED_RATE=" + contentResolvedRate.ToString("0.00") + "%");
+        Console.WriteLine("TASK_STARTED_AT=" + taskStartedAt.ToString("yyyy-MM-dd HH:mm:ss"));
+        Console.WriteLine("TASK_COMPLETED_AT=" + taskCompletedAt.ToString("yyyy-MM-dd HH:mm:ss"));
+        Console.WriteLine("TASK_ELAPSED=" + taskElapsed);
         Console.WriteLine("CONTRACT_PENDING=" + (ordered.Count - contentResolved));
         Console.WriteLine("PAUSED_GROUPS=" + restrictions.PausedPlatforms.Count);
         Console.WriteLine("OUTPUT=" + output);

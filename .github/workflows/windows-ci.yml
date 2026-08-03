@@ -9,16 +9,16 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Prepare WebView2 SDK and build
-        shell: powershell
+        shell: pwsh
         run: .\prepare-runtime.ps1
 
       - name: Run core regression tests
-        shell: powershell
+        shell: pwsh
         run: .\开发文件\Run-CoreTests.ps1 -RegressionOnly
 
       - name: Test validation contracts
-        shell: powershell
+        shell: pwsh
         run: .\开发文件\Test-ValidationScripts.ps1

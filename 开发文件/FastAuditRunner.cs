@@ -218,7 +218,11 @@ internal static class FastAuditRunner
                 // contain long 502/timeout waits; letting them monopolize all
                 // workers delays coverage of the untouched portion of a full
                 // workbook. They remain queued immediately after fresh rows.
-                pending = PrioritizeFreshJobs(pending, unresolvedCheckpointNumbers);
+                List<CheckJob> fresh = pending.Where(job => !unresolvedCheckpointNumbers.Contains(job.Number)).ToList();
+                List<CheckJob> historical = pending.Where(job => unresolvedCheckpointNumbers.Contains(job.Number)).ToList();
+                pending = InterleavePendingJobs(fresh)
+                    .Concat(InterleavePendingJobs(historical))
+                    .ToList();
                 Console.WriteLine("PENDING_FRESH_FIRST=1,HISTORICAL_UNRESOLVED=" + unresolvedCheckpointNumbers.Count);
             }
             Console.WriteLine("PENDING_INTERLEAVED=1");

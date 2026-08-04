@@ -12,6 +12,7 @@ $logSource = Join-Path $PSScriptRoot 'RunLogging.cs'
 $acceptanceSource = Join-Path $PSScriptRoot 'AcceptanceEvidence.cs'
 $chinaEyeballSource = Join-Path $PSScriptRoot 'ChinaEyeballEvidence.cs'
 $checkpointSource = Join-Path $PSScriptRoot 'AuditCheckpointStore.cs'
+$fastAuditSource = Join-Path $PSScriptRoot 'FastAuditRunner.cs'
 $dependencyRoot = Join-Path $PSScriptRoot 'dependencies'
 $webViewCore = Join-Path $dependencyRoot 'Microsoft.Web.WebView2.Core.dll'
 $webViewForms = Join-Path $dependencyRoot 'Microsoft.Web.WebView2.WinForms.dll'
@@ -49,7 +50,7 @@ function Invoke-Test([string]$Name, [string]$TestSource, [string]$MainClass,
         '/optimize+',
         ('/out:' + $executable),
         ('/main:' + $MainClass)
-    ) + $references + @($source, $aiSource, $logSource, $acceptanceSource, $chinaEyeballSource, $checkpointSource, (Join-Path $PSScriptRoot $TestSource))
+    ) + $references + @($source, $aiSource, $logSource, $acceptanceSource, $chinaEyeballSource, $checkpointSource, $fastAuditSource, (Join-Path $PSScriptRoot $TestSource))
     & $Compiler @compilerArguments
     if ($LASTEXITCODE -ne 0) { throw "$Name compilation failed." }
     $resolvedArguments = @()

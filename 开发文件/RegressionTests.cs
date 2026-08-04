@@ -130,6 +130,21 @@ internal static class RegressionTests
         Console.WriteLine((preflightPassed ? "PASS " : "FAIL ") + "跨平台小样本预检和 502 不提前跳过");
         if (!preflightPassed) _failures++;
 
+        var groupedPending = new List<CheckJob>
+        {
+            new CheckJob { Number = 1, Url = "https://a.example/1", Platform = "平台A", InfrastructureKey = "IP-A" },
+            new CheckJob { Number = 2, Url = "https://a.example/2", Platform = "平台A", InfrastructureKey = "IP-A" },
+            new CheckJob { Number = 3, Url = "https://a.example/3", Platform = "平台A", InfrastructureKey = "IP-A" },
+            new CheckJob { Number = 4, Url = "https://b.example/1", Platform = "平台B", InfrastructureKey = "IP-B" },
+            new CheckJob { Number = 5, Url = "https://b.example/2", Platform = "平台B", InfrastructureKey = "IP-B" },
+            new CheckJob { Number = 6, Url = "https://c.example/1", Platform = "平台C", InfrastructureKey = "IP-C" }
+        };
+        List<CheckJob> interleaved = FastAuditRunner.InterleavePendingJobs(groupedPending);
+        bool interleavePassed = interleaved.Select(job => job.Number).SequenceEqual(new[] { 1, 4, 6, 2, 5, 3 }) &&
+            interleaved.Select(job => job.Number).Distinct().Count() == groupedPending.Count;
+        Console.WriteLine((interleavePassed ? "PASS " : "FAIL ") + "全量核验按共享线路轮询交错且组内顺序稳定");
+        if (!interleavePassed) _failures++;
+
         bool aiUrlPassed =
             YunwuAiClient.NormalizeBaseUrl("https://yunwu.ai") == "https://yunwu.ai/v1" &&
             YunwuAiClient.NormalizeBaseUrl("https://yunwu.ai/v1/") == "https://yunwu.ai/v1" &&

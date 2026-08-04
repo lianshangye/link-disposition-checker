@@ -11,6 +11,25 @@ using LinkDispositionChecker;
 
 internal static class FastAuditRunner
 {
+    internal static List<CheckJob> InterleavePendingJobs(IEnumerable<CheckJob> jobs)
+    {
+        var queues = (jobs ?? Enumerable.Empty<CheckJob>())
+            .Where(job => job != null)
+            .GroupBy(job => String.IsNullOrWhiteSpace(job.InfrastructureKey)
+                ? BatchPreflightPlanner.PlatformKey(job) : job.InfrastructureKey,
+                StringComparer.OrdinalIgnoreCase)
+            .Select(group => new Queue<CheckJob>(group.OrderBy(job => job.Number)))
+            .OrderByDescending(queue => queue.Count)
+            .ToList();
+        var ordered = new List<CheckJob>();
+        while (queues.Any(queue => queue.Count > 0))
+        {
+            foreach (Queue<CheckJob> queue in queues)
+                if (queue.Count > 0) ordered.Add(queue.Dequeue());
+        }
+        return ordered;
+    }
+
     private static string Csv(string value)
     {
         return "\"" + (value ?? "").Replace("\"", "\"\"").Replace("\r", " ").Replace("\n", " ") + "\"";
@@ -179,6 +198,8 @@ internal static class FastAuditRunner
                 : await Checker.RegisterInfrastructureAsync(pending, CancellationToken.None);
             Console.WriteLine("INFRASTRUCTURES=" + infrastructures.Count);
             Console.WriteLine("SHARED_INFRASTRUCTURES=" + infrastructures.Count(item => item.Value > 1));
+            pending = InterleavePendingJobs(pending);
+            Console.WriteLine("PENDING_INTERLEAVED=1");
 
             int configuredWorkers;
             if (!Int32.TryParse(Environment.GetEnvironmentVariable("FAST_AUDIT_WORKERS"), out configuredWorkers))

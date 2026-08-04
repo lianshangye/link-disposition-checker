@@ -30,6 +30,16 @@ internal static class FastAuditRunner
         return ordered;
     }
 
+    internal static List<CheckJob> PrioritizeFreshJobs(IEnumerable<CheckJob> jobs, ISet<int> historicalUnresolved)
+    {
+        var historical = historicalUnresolved ?? new HashSet<int>();
+        return (jobs ?? Enumerable.Empty<CheckJob>())
+            .Where(job => job != null)
+            .OrderBy(job => historical.Contains(job.Number) ? 1 : 0)
+            .ThenBy(job => job.Number)
+            .ToList();
+    }
+
     private static string Csv(string value)
     {
         return "\"" + (value ?? "").Replace("\"", "\"\"").Replace("\r", " ").Replace("\n", " ") + "\"";
@@ -178,6 +188,9 @@ internal static class FastAuditRunner
                 message => Console.WriteLine("CHECKPOINT_WARNING=" + message));
             bool retryUnresolved = String.Equals(Environment.GetEnvironmentVariable("FAST_AUDIT_RETRY_UNRESOLVED"), "1", StringComparison.OrdinalIgnoreCase);
             int checkpointRecords = recovered.Count;
+            var unresolvedCheckpointNumbers = new HashSet<int>(recovered
+                .Where(item => item.Value != null && item.Value.Verdict != "已失效" && item.Value.Verdict != "仍可访问")
+                .Select(item => item.Key));
             if (retryUnresolved)
             {
                 recovered = recovered.Where(item => item.Value != null &&
@@ -199,6 +212,15 @@ internal static class FastAuditRunner
             Console.WriteLine("INFRASTRUCTURES=" + infrastructures.Count);
             Console.WriteLine("SHARED_INFRASTRUCTURES=" + infrastructures.Count(item => item.Value > 1));
             pending = InterleavePendingJobs(pending);
+            if (retryUnresolved && unresolvedCheckpointNumbers.Count > 0)
+            {
+                // Finish never-seen rows first. Historical unresolved rows can
+                // contain long 502/timeout waits; letting them monopolize all
+                // workers delays coverage of the untouched portion of a full
+                // workbook. They remain queued immediately after fresh rows.
+                pending = PrioritizeFreshJobs(pending, unresolvedCheckpointNumbers);
+                Console.WriteLine("PENDING_FRESH_FIRST=1,HISTORICAL_UNRESOLVED=" + unresolvedCheckpointNumbers.Count);
+            }
             Console.WriteLine("PENDING_INTERLEAVED=1");
 
             int configuredWorkers;

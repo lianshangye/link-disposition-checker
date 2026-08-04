@@ -145,6 +145,13 @@ internal static class RegressionTests
         Console.WriteLine((interleavePassed ? "PASS " : "FAIL ") + "全量核验按共享线路轮询交错且组内顺序稳定");
         if (!interleavePassed) _failures++;
 
+        var historicalUnresolved = new HashSet<int>(new[] { 2, 5 });
+        List<CheckJob> freshFirst = FastAuditRunner.PrioritizeFreshJobs(groupedPending, historicalUnresolved);
+        bool freshFirstPassed = freshFirst.Take(4).All(job => !historicalUnresolved.Contains(job.Number)) &&
+            freshFirst.Skip(4).All(job => historicalUnresolved.Contains(job.Number));
+        Console.WriteLine((freshFirstPassed ? "PASS " : "FAIL ") + "续跑先覆盖从未核验任务再处理历史未完成");
+        if (!freshFirstPassed) _failures++;
+
         bool aiUrlPassed =
             YunwuAiClient.NormalizeBaseUrl("https://yunwu.ai") == "https://yunwu.ai/v1" &&
             YunwuAiClient.NormalizeBaseUrl("https://yunwu.ai/v1/") == "https://yunwu.ai/v1" &&

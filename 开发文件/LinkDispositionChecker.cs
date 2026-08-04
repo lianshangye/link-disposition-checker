@@ -2182,6 +2182,22 @@ namespace LinkDispositionChecker
                     }
                     else if (code == 401 || code == 403 || code == 407)
                     {
+                        // In quick mode, generic web-media rows frequently hit a
+                        // proxy/WAF 403 even though the public article is readable
+                        // from an independent route.  Try one bounded reader only
+                        // when it can return target-level evidence; a login page,
+                        // empty shell, or failed reader remains unfinished.
+                        if (code == 403 && ShouldTryQuickPublicCloudOnTransportFailure(uri, result, code.ToString()))
+                        {
+                            RemoteEvidenceResponse quickCloud = await TryPublicCloudEvidenceAsync(uri, token);
+                            if (ApplyRemoteEvidence(result, quickCloud, "public-cloud-reader",
+                                result.EvidenceTrail ?? new List<VerificationEvidence>(), uri))
+                            {
+                                watch.Stop();
+                                result.Duration = watch.Elapsed.TotalSeconds.ToString("0.0") + "s";
+                                return result;
+                            }
+                        }
                         // A restricted web response is not deletion evidence. For
                         // platforms with a stable public reader, make one bounded
                         // independent read before leaving the row unfinished. This
@@ -2234,6 +2250,17 @@ namespace LinkDispositionChecker
                     }
                     else if (code >= 500)
                     {
+                        if (ShouldTryQuickPublicCloudOnTransportFailure(uri, result, code.ToString()))
+                        {
+                            RemoteEvidenceResponse quickCloud = await TryPublicCloudEvidenceAsync(uri, token);
+                            if (ApplyRemoteEvidence(result, quickCloud, "public-cloud-reader",
+                                result.EvidenceTrail ?? new List<VerificationEvidence>(), uri))
+                            {
+                                watch.Stop();
+                                result.Duration = watch.Elapsed.TotalSeconds.ToString("0.0") + "s";
+                                return result;
+                            }
+                        }
                         bool browserResolved = false;
                         if (allowBrowserFallback && !String.IsNullOrWhiteSpace(expectedTitle) &&
                             !String.Equals(Environment.GetEnvironmentVariable("LINK_CHECKER_QUICK_PASS"), "1",
@@ -2372,12 +2399,34 @@ namespace LinkDispositionChecker
             catch (TaskCanceledException)
             {
                 if (token.IsCancellationRequested) throw;
+                if (ShouldTryQuickPublicCloudOnTransportFailure(uri, result, "超时"))
+                {
+                    RemoteEvidenceResponse quickCloud = TryPublicCloudEvidenceAsync(uri, token).GetAwaiter().GetResult();
+                    if (ApplyRemoteEvidence(result, quickCloud, "public-cloud-reader",
+                        result.EvidenceTrail ?? new List<VerificationEvidence>(), uri))
+                    {
+                        watch.Stop();
+                        result.Duration = watch.Elapsed.TotalSeconds.ToString("0.0") + "s";
+                        return result;
+                    }
+                }
                 result.Verdict = "暂时异常";
                 result.StatusCode = "超时";
                 result.Evidence = "18 秒内未响应，建议稍后重试";
             }
             catch (HttpRequestException ex)
             {
+                if (ShouldTryQuickPublicCloudOnTransportFailure(uri, result, "连接失败"))
+                {
+                    RemoteEvidenceResponse quickCloud = TryPublicCloudEvidenceAsync(uri, token).GetAwaiter().GetResult();
+                    if (ApplyRemoteEvidence(result, quickCloud, "public-cloud-reader",
+                        result.EvidenceTrail ?? new List<VerificationEvidence>(), uri))
+                    {
+                        watch.Stop();
+                        result.Duration = watch.Elapsed.TotalSeconds.ToString("0.0") + "s";
+                        return result;
+                    }
+                }
                 result.Verdict = "暂时异常";
                 result.StatusCode = "连接失败";
                 result.Evidence = FriendlyError(ex);
@@ -5857,6 +5906,20 @@ namespace LinkDispositionChecker
                 platform.IndexOf("爱咖", StringComparison.OrdinalIgnoreCase) >= 0 ||
                 platform.IndexOf("雪球", StringComparison.OrdinalIgnoreCase) >= 0 ||
                 platform.IndexOf("懂车帝", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        internal static bool ShouldTryQuickPublicCloudOnTransportFailure(Uri uri, CheckResult result, string status)
+        {
+            if (uri == null || result == null ||
+                !String.Equals(Environment.GetEnvironmentVariable("LINK_CHECKER_QUICK_PASS"), "1",
+                    StringComparison.OrdinalIgnoreCase)) return false;
+            int code;
+            bool transport = Int32.TryParse(status, out code)
+                ? (code == 401 || code == 403 || code == 407 || code >= 500)
+                : String.Equals(status, "超时", StringComparison.OrdinalIgnoreCase) ||
+                  String.Equals(status, "连接失败", StringComparison.OrdinalIgnoreCase);
+            if (!transport) return false;
+            return IsGenericWebMedia(result.Platform) || ShouldTryPublicCloudForUnresolved(uri, result);
         }
 
         private static bool IsGenericWebMedia(string platform)

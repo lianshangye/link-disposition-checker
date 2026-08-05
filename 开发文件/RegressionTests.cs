@@ -1018,6 +1018,26 @@ internal static class RegressionTests
                 Html = "<main>抱歉，该内容已被作者删除</main>"
             }));
 
+        bool zhihuJinaEmptyStatePassed = Checker.IsZhihuRemovedEmptyState(
+            new CheckResult
+            {
+                OriginalUrl = "https://www.zhihu.com/question/2006945324976056152/answer/2008169169355573210"
+            },
+            "https://www.zhihu.com/question/2006945324976056152/answer/2008169169355573210",
+            "你似乎来到了没有知识存在的荒原 - 知乎",
+            "这里没有知识存在的荒原");
+        bool zhihuJinaShellRejected = !Checker.IsZhihuRemovedEmptyState(
+            new CheckResult
+            {
+                OriginalUrl = "https://www.zhihu.com/question/2006945324976056152/answer/2008169169355573210"
+            },
+            "https://www.zhihu.com/",
+            "知乎 - 有问题，就会有答案",
+            "登录知乎，浏览更多优质内容。");
+        Console.WriteLine((zhihuJinaEmptyStatePassed && zhihuJinaShellRejected ? "PASS " : "FAIL ") +
+            "知乎公开阅读器空状态按回答目标判失效且拒绝通用壳");
+        if (!zhihuJinaEmptyStatePassed || !zhihuJinaShellRejected) _failures++;
+
         Expect("雪球页面标题明确原帖删除", "已失效", Checker.ClassifyRenderedPage(
             new CheckResult
             {

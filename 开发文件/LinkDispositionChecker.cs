@@ -5537,7 +5537,7 @@ namespace LinkDispositionChecker
             };
         }
 
-        private static bool IsZhihuRemovedEmptyState(CheckResult result, string currentUrl, string title, string visible)
+        internal static bool IsZhihuRemovedEmptyState(CheckResult result, string currentUrl, string title, string visible)
         {
             Uri original;
             if (result == null || !Uri.TryCreate(result.OriginalUrl, UriKind.Absolute, out original) ||
@@ -6296,6 +6296,9 @@ namespace LinkDispositionChecker
                 bool explicitRemoteRemoval = Regex.IsMatch(remoteText,
                     "原帖已被作者删除|帖子已被作者删除|该帖子不存在|该帖已删除|内容不存在|文章不存在|页面不存在",
                     RegexOptions.IgnoreCase);
+                bool zhihuRemoteEmptyState = String.Equals(result.Platform, "知乎", StringComparison.OrdinalIgnoreCase) &&
+                    Regex.IsMatch(remoteText, "没有知识存在的荒原|该回答不存在|回答不存在|资源不存在",
+                        RegexOptions.IgnoreCase);
                 if (Uri.TryCreate(remoteUrl, UriKind.Absolute, out remoteUri) &&
                     String.Equals(remoteUri.Host, requested.Host, StringComparison.OrdinalIgnoreCase) &&
                     String.Equals(remoteUri.AbsolutePath.TrimEnd('/'), requested.AbsolutePath.TrimEnd('/'),
@@ -6323,6 +6326,30 @@ namespace LinkDispositionChecker
                 if (Uri.TryCreate(remoteUrl, UriKind.Absolute, out remoteUri) &&
                     String.Equals(remoteUri.Host, requested.Host, StringComparison.OrdinalIgnoreCase) &&
                     String.Equals(remoteUri.AbsolutePath.TrimEnd('/'), requested.AbsolutePath.TrimEnd('/'),
+                        StringComparison.OrdinalIgnoreCase) && zhihuRemoteEmptyState &&
+                    (requested.AbsolutePath.IndexOf("/answer/", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                     requested.AbsolutePath.IndexOf("/pin/", StringComparison.OrdinalIgnoreCase) >= 0))
+                {
+                    result.Verdict = "已失效";
+                    result.StatusCode = remote.Status.ToString();
+                    result.FinalUrl = remoteUrl;
+                    result.Title = remote.Title ?? "";
+                    result.Evidence = source + "确认知乎目标回答页面明确显示内容不存在（没有知识存在的荒原）";
+                    trail.Add(new VerificationEvidence
+                    {
+                        Kind = EvidenceKind.TargetRemovalExplicit,
+                        Strength = EvidenceStrength.Conclusive,
+                        Source = source,
+                        Platform = result.Platform,
+                        Message = result.Evidence,
+                        FinalUrl = result.FinalUrl,
+                        IsCurrentResponse = true
+                    });
+                    return true;
+                }
+                if (Uri.TryCreate(remoteUrl, UriKind.Absolute, out remoteUri) &&
+                    String.Equals(remoteUri.Host, requested.Host, StringComparison.OrdinalIgnoreCase) &&
+                    String.Equals(remoteUri.AbsolutePath.TrimEnd('/'), requested.AbsolutePath.TrimEnd('/'),
                         StringComparison.OrdinalIgnoreCase) &&
                     !explicitRemoteRemoval &&
                     MatchesExpectedContent(result.ExpectedTitle, result.ExpectedExcerpt, remoteText) &&
@@ -6334,6 +6361,39 @@ namespace LinkDispositionChecker
                     result.FinalUrl = remoteUrl;
                     result.Title = remote.Title ?? "";
                     result.Evidence = source + "确认：独立公开读取返回与导入目标严格匹配的标题/正文";
+                    trail.Add(new VerificationEvidence
+                    {
+                        Kind = EvidenceKind.TargetContentPresent,
+                        Strength = EvidenceStrength.Strong,
+                        Source = source,
+                        Platform = result.Platform,
+                        Message = result.Evidence,
+                        FinalUrl = result.FinalUrl,
+                        IsCurrentResponse = true
+                    });
+                    return true;
+                }
+                // Social posts frequently expose a rewritten or generic title
+                // through normalized readers. Same-host/path plus the imported
+                // author and a substantial body is still target-level proof;
+                // do not use this fallback for generic web pages.
+                bool socialReaderPresence =
+                    (String.Equals(result.Platform, "雪球", StringComparison.OrdinalIgnoreCase) ||
+                     String.Equals(result.Platform, "知乎", StringComparison.OrdinalIgnoreCase)) &&
+                    !explicitRemoteRemoval && !zhihuRemoteEmptyState &&
+                    !String.IsNullOrWhiteSpace(result.ExpectedAuthor) &&
+                    MatchesExpectedAuthor(result.ExpectedAuthor, remoteText) &&
+                    CleanText(remoteText, 12000).Length >= 180;
+                if (Uri.TryCreate(remoteUrl, UriKind.Absolute, out remoteUri) &&
+                    String.Equals(remoteUri.Host, requested.Host, StringComparison.OrdinalIgnoreCase) &&
+                    String.Equals(remoteUri.AbsolutePath.TrimEnd('/'), requested.AbsolutePath.TrimEnd('/'),
+                        StringComparison.OrdinalIgnoreCase) && socialReaderPresence)
+                {
+                    result.Verdict = "仍可访问";
+                    result.StatusCode = remote.Status.ToString();
+                    result.FinalUrl = remoteUrl;
+                    result.Title = remote.Title ?? "";
+                    result.Evidence = source + "确认：独立公开读取返回同路径目标正文及发文作者";
                     trail.Add(new VerificationEvidence
                     {
                         Kind = EvidenceKind.TargetContentPresent,

@@ -1093,6 +1093,24 @@ internal static class RegressionTests
                 Html = "<main><h1>当前无法使用此页面</h1><p>HTTP ERROR 502</p></main>"
             }));
 
+        string signedWechatUrl = "http://wxapp.tc.qq.com/251/20302/stodownload?encfilekey=test&token=test&sign=test&svrnonce=123";
+        bool expiredWechatPassed = Checker.IsExpiredWechatResourceResponse(400, "video/mp4", signedWechatUrl) &&
+            !Checker.IsExpiredWechatResourceResponse(400, "text/html", signedWechatUrl) &&
+            !Checker.IsExpiredWechatResourceResponse(200, "video/mp4", signedWechatUrl) &&
+            !Checker.IsExpiredWechatResourceResponse(502, "video/mp4", signedWechatUrl);
+        Console.WriteLine((expiredWechatPassed ? "PASS " : "FAIL ") + "微信视频号临时资源失效判定边界");
+        if (!expiredWechatPassed) _failures++;
+
+        string oldQuickPass = Environment.GetEnvironmentVariable("LINK_CHECKER_QUICK_PASS");
+        Environment.SetEnvironmentVariable("LINK_CHECKER_QUICK_PASS", "1");
+        bool broadCloudPassed = Checker.ShouldTryQuickPublicCloudOnTransportFailure(
+            new Uri("https://example.org/article/123"), new CheckResult { Platform = "普通网媒" }, "502") &&
+            !Checker.ShouldTryQuickPublicCloudOnTransportFailure(
+                new Uri("https://wxapp.tc.qq.com/251/20302/stodownload?token=x"), new CheckResult { Platform = "微信视频号" }, "502");
+        Environment.SetEnvironmentVariable("LINK_CHECKER_QUICK_PASS", oldQuickPass);
+        Console.WriteLine((broadCloudPassed ? "PASS " : "FAIL ") + "快速线路失败覆盖普通公开网页且排除签名媒体资源");
+        if (!broadCloudPassed) _failures++;
+
         string checkpointDirectory = Path.Combine(Path.GetTempPath(), "LinkCheckerCheckpointTest_" + Guid.NewGuid().ToString("N"));
         bool checkpointPassed = false;
         try

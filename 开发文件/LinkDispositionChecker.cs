@@ -1917,6 +1917,47 @@ namespace LinkDispositionChecker
             public string FinalUrl;
         }
 
+        internal sealed class WechatResourceProbe
+        {
+            public int StatusCode;
+            public string ContentType;
+            public bool Expired;
+            public bool Reachable;
+        }
+
+        internal static bool IsExpiredWechatResourceResponse(int statusCode, string contentType, string url)
+        {
+            string mediaType = (contentType ?? "").Trim().ToLowerInvariant();
+            string source = (url ?? "").ToLowerInvariant();
+            bool signed = source.Contains("encfilekey=") && source.Contains("token=") &&
+                source.Contains("sign=") && source.Contains("svrnonce=");
+            return statusCode == 400 && mediaType == "video/mp4" && signed;
+        }
+
+        private async Task<WechatResourceProbe> ProbeWechatResourceAsync(Uri uri, CancellationToken token)
+        {
+            if (uri == null) return null;
+            try
+            {
+                await WaitForRequestSlotAsync(uri, token);
+                using (HttpResponseMessage response = await _directClient.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, token))
+                {
+                    string contentType = response.Content.Headers.ContentType == null ? "" :
+                        (response.Content.Headers.ContentType.MediaType ?? "");
+                    int statusCode = (int)response.StatusCode;
+                    return new WechatResourceProbe
+                    {
+                        StatusCode = statusCode,
+                        ContentType = contentType,
+                        Expired = IsExpiredWechatResourceResponse(statusCode, contentType, uri.AbsoluteUri),
+                        Reachable = statusCode >= 200 && statusCode < 300 &&
+                            contentType.StartsWith("video/", StringComparison.OrdinalIgnoreCase)
+                    };
+                }
+            }
+            catch { return null; }
+        }
+
         private sealed class SendAttempt
         {
             public HttpResponseMessage Response;
@@ -2030,6 +2071,37 @@ namespace LinkDispositionChecker
 
             if (IsWechatChannel(uri))
             {
+                WechatResourceProbe wechatProbe = await ProbeWechatResourceAsync(uri, token);
+                if (wechatProbe != null && wechatProbe.Expired)
+                {
+                    result.Verdict = "已失效";
+                    result.StatusCode = wechatProbe.StatusCode.ToString();
+                    result.ContentType = wechatProbe.ContentType;
+                    result.Evidence = "微信视频号当前临时下载资源返回 HTTP 400 且类型为 video/mp4，签名凭证已失效；仅证明当前资源链接失效，不等同于原视频作品被删除";
+                    result.ContentStatus = "当前资源链接失效（原作品状态未知）";
+                    result.PublicReachability = "当前下载资源不可访问";
+                    result.AcceptanceRecommendation = "可计入链接失效；原作品删除需另行核验";
+                    result.EvidenceGrade = "B级—当前资源明确失效";
+                    result.SkipDeepReview = true;
+                    watch.Stop();
+                    result.Duration = watch.Elapsed.TotalSeconds.ToString("0.0") + "s";
+                    return result;
+                }
+                if (wechatProbe != null && wechatProbe.Reachable)
+                {
+                    result.Verdict = "浠嶅彲璁块棶";
+                    result.StatusCode = wechatProbe.StatusCode.ToString();
+                    result.ContentType = wechatProbe.ContentType;
+                    result.Evidence = "微信视频号当前临时下载资源可读取（仅证明当前资源可访问，不等同于稳定公开详情页）";
+                    result.ContentStatus = "当前资源可访问（原作品页面状态未知）";
+                    result.PublicReachability = "当前下载资源可访问";
+                    result.AcceptanceRecommendation = "可计入当前资源可访问；原作品状态需按详情页核验";
+                    result.EvidenceGrade = "C级—当前资源可访问";
+                    result.SkipDeepReview = true;
+                    watch.Stop();
+                    result.Duration = watch.Elapsed.TotalSeconds.ToString("0.0") + "s";
+                    return result;
+                }
                 // Temporary video-download URLs commonly return HTTP 400 after
                 // the signed URL expires. That transport response is not proof
                 // that the video was removed; let the normal evidence path keep
@@ -2557,6 +2629,22 @@ namespace LinkDispositionChecker
                         return ProbeOutcome(EvidenceKind.TargetRemovalExplicit, EvidenceStrength.Strong,
                             "public-cloud-reader", "懂车帝", "", "懂车帝独立公开读取线路明确提示目标内容不存在或已删除", dcdCloud.FinalUrl, true);
                 }
+                // Jina can expose a cached target article even when the live
+                // DCD page is a login shell.  A cache hit is accepted only when
+                // the imported title/excerpt (and author, when supplied) match;
+                // a generic login shell remains unresolved.
+                if (String.Equals(Environment.GetEnvironmentVariable("LINK_CHECKER_QUICK_PASS"), "1",
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    RemoteEvidenceResponse cachedDcd = await TryPublicCloudEvidenceAsync(original, token);
+                    string cachedText = WebUtility.HtmlDecode(cachedDcd == null ? "" :
+                        (cachedDcd.Title ?? "") + " " + (cachedDcd.Text ?? ""));
+                    if (cachedDcd != null && String.IsNullOrWhiteSpace(cachedDcd.Error) && cachedDcd.Status == 200 &&
+                        MatchesExpectedContent(expectedTitle, expectedExcerpt, cachedText) &&
+                        (String.IsNullOrWhiteSpace(expectedAuthor) || MatchesExpectedAuthor(expectedAuthor, cachedText)))
+                        return ProbeOutcome(EvidenceKind.TargetContentPresent, EvidenceStrength.Strong,
+                            "public-cloud-reader", "懂车帝", "", "懂车帝公开缓存返回匹配目标标题/正文/作者", cachedDcd.FinalUrl, true);
+                }
                 return null;
             }
             if (host.EndsWith("jianshu.com", StringComparison.Ordinal))
@@ -2807,6 +2895,18 @@ namespace LinkDispositionChecker
                         string cloudText = WebUtility.HtmlDecode((cloud == null ? "" :
                             ((cloud.Title ?? "") + " " + (cloud.Text ?? ""))));
                         bool cloudIdMatch = cloudText.IndexOf(id, StringComparison.OrdinalIgnoreCase) >= 0;
+                        Uri cloudFinal;
+                        bool cloudSameTarget = cloud != null && Uri.TryCreate(cloud.FinalUrl, UriKind.Absolute, out cloudFinal) &&
+                            String.Equals(cloudFinal.Host, original.Host, StringComparison.OrdinalIgnoreCase) &&
+                            String.Equals(cloudFinal.AbsolutePath.TrimEnd('/'), original.AbsolutePath.TrimEnd('/'),
+                                StringComparison.OrdinalIgnoreCase);
+                        if (cloud != null && String.IsNullOrWhiteSpace(cloud.Error) && cloud.Status == 200 &&
+                            cloudSameTarget && Regex.IsMatch(cloudText,
+                                "原帖已被作者删除|帖子已被作者删除|该帖子不存在|该帖已删除",
+                                RegexOptions.IgnoreCase))
+                            return ProbeOutcome(EvidenceKind.TargetRemovalExplicit, EvidenceStrength.Conclusive,
+                                "public-cloud-reader", "雪球", id,
+                                "雪球独立公开读取线路确认目标页明确提示原帖已被作者删除", cloud.FinalUrl, true);
                         if (cloud != null && String.IsNullOrWhiteSpace(cloud.Error) && cloud.Status == 200 &&
                             cloudIdMatch && Regex.IsMatch(cloudText,
                                 "原帖已被作者删除|帖子已被作者删除|该帖子不存在|该帖已删除",
@@ -4452,8 +4552,8 @@ namespace LinkDispositionChecker
         {
             string source = html ?? "";
             if (Regex.IsMatch(source, "当前内容不适合展示[，,]?无法查看", RegexOptions.IgnoreCase)) return true;
-            return !String.IsNullOrWhiteSpace(id) && source.IndexOf(id, StringComparison.OrdinalIgnoreCase) >= 0 &&
-                Regex.IsMatch(source, "原帖已被作者删除|该帖已被作者删除", RegexOptions.IgnoreCase);
+            return Regex.IsMatch(source, "原帖已被作者删除|该帖已被作者删除", RegexOptions.IgnoreCase) &&
+                (String.IsNullOrWhiteSpace(id) || source.IndexOf(id, StringComparison.OrdinalIgnoreCase) >= 0);
         }
 
         internal static bool IsWeiboRenderedUnavailable(string html, string id)
@@ -5751,6 +5851,72 @@ namespace LinkDispositionChecker
             if (probe.Status < 200 || probe.Status >= 400 || String.IsNullOrWhiteSpace(probe.Body)) return false;
             RenderedPageData page = BuildRenderedPageData(probe.Body,
                 String.IsNullOrWhiteSpace(probe.FinalUrl) ? requested.AbsoluteUri : probe.FinalUrl);
+            Uri pageUri;
+            bool sameTargetPath = Uri.TryCreate(page.Url, UriKind.Absolute, out pageUri) &&
+                String.Equals(pageUri.Host, requested.Host, StringComparison.OrdinalIgnoreCase) &&
+                String.Equals(pageUri.AbsolutePath.TrimEnd('/'), requested.AbsolutePath.TrimEnd('/'),
+                    StringComparison.OrdinalIgnoreCase);
+            string remoteVisibleForRemoval = ExtractVisibleText(probe.Body ?? "");
+            if (sameTargetPath && String.Equals(result.Platform, "雪球", StringComparison.OrdinalIgnoreCase) &&
+                Regex.IsMatch((page.Title ?? "") + " " + remoteVisibleForRemoval,
+                    "原帖已被作者删除|帖子已被作者删除|该帖子不存在|该帖已删除",
+                    RegexOptions.IgnoreCase))
+            {
+                result.Verdict = "已失效";
+                result.StatusCode = probe.Status.ToString();
+                result.FinalUrl = page.Url;
+                result.Title = page.Title;
+                result.Evidence = source + "确认雪球目标页明确提示原帖已被作者删除";
+                trail.Add(new VerificationEvidence
+                {
+                    Kind = EvidenceKind.TargetRemovalExplicit,
+                    Strength = EvidenceStrength.Conclusive,
+                    Source = source,
+                    Platform = result.Platform,
+                    Message = result.Evidence,
+                    FinalUrl = result.FinalUrl,
+                    IsCurrentResponse = true
+                });
+                return true;
+            }
+            // Jina's normalized Markdown can be a valid target-specific
+            // response even when it has no article HTML tags.  Accept a strict
+            // title/excerpt match from the requested host/path as strong
+            // evidence; author matching remains mandatory when the source row
+            // supplies an author.  This does not accept generic login shells.
+            if (source.IndexOf("public-cloud-reader", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                string normalizedRemote = WebUtility.HtmlDecode((page.Title ?? "") + " " +
+                    (page.MainText ?? "") + " " + (page.Text ?? ""));
+                if (MatchesExpectedContent(result.ExpectedTitle, result.ExpectedExcerpt, normalizedRemote) &&
+                    (String.IsNullOrWhiteSpace(result.ExpectedAuthor) ||
+                     MatchesExpectedAuthor(result.ExpectedAuthor, normalizedRemote)))
+                {
+                    Uri remoteUri;
+                    if (Uri.TryCreate(page.Url, UriKind.Absolute, out remoteUri) &&
+                        String.Equals(remoteUri.Host, requested.Host, StringComparison.OrdinalIgnoreCase) &&
+                        String.Equals(remoteUri.AbsolutePath.TrimEnd('/'), requested.AbsolutePath.TrimEnd('/'),
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        result.Verdict = "仍可访问";
+                        result.StatusCode = probe.Status.ToString();
+                        result.FinalUrl = page.Url;
+                        result.Title = page.Title;
+                        result.Evidence = source + "确认：公开读取返回与导入标题/正文严格匹配的目标内容";
+                        trail.Add(new VerificationEvidence
+                        {
+                            Kind = EvidenceKind.TargetContentPresent,
+                            Strength = EvidenceStrength.Strong,
+                            Source = source,
+                            Platform = result.Platform,
+                            Message = result.Evidence,
+                            FinalUrl = result.FinalUrl,
+                            IsCurrentResponse = true
+                        });
+                        return true;
+                    }
+                }
+            }
             // Public readers often strip the target id from their markdown,
             // while preserving a platform-specific empty-state message.  The
             // message is still target-level evidence when it comes from the
@@ -5919,7 +6085,25 @@ namespace LinkDispositionChecker
                 : String.Equals(status, "超时", StringComparison.OrdinalIgnoreCase) ||
                   String.Equals(status, "连接失败", StringComparison.OrdinalIgnoreCase);
             if (!transport) return false;
-            return IsGenericWebMedia(result.Platform) || ShouldTryPublicCloudForUnresolved(uri, result);
+            // In the quick stage a transport failure is a route failure, not
+            // target evidence.  Give every ordinary public HTTP(S) page one
+            // bounded independent-reader attempt; restricting this to a small
+            // platform allow-list left many real articles unresolved when the
+            // local proxy/DNS path returned 502 or failed to resolve.  Local
+            // test endpoints and signed media resources remain excluded.
+            return IsGenericWebMedia(result.Platform) || ShouldTryPublicCloudForUnresolved(uri, result) ||
+                IsBroadPublicCloudCandidate(uri);
+        }
+
+        private static bool IsBroadPublicCloudCandidate(Uri uri)
+        {
+            if (uri == null || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)) return false;
+            string host = (uri.Host ?? "").Trim().ToLowerInvariant();
+            if (host.Length == 0 || host == "localhost" || host == "127.0.0.1" || host == "::1") return false;
+            if (host.EndsWith("channels.weixin.qq.com", StringComparison.Ordinal) ||
+                host.EndsWith("finder.video.qq.com", StringComparison.Ordinal) ||
+                host.EndsWith("wxapp.tc.qq.com", StringComparison.Ordinal)) return false;
+            return true;
         }
 
         private static bool IsGenericWebMedia(string platform)
@@ -6098,6 +6282,71 @@ namespace LinkDispositionChecker
             string source, List<VerificationEvidence> trail, Uri requested)
         {
             if (result == null || remote == null || !String.IsNullOrWhiteSpace(remote.Error)) return false;
+            // Keep a strict fast-path for normalized readers: their Markdown
+            // may not contain HTML/article markers, but the response still
+            // carries the original URL, exact target title and imported
+            // excerpt/author.  This is target-level evidence, unlike a generic
+            // login shell or an index-only hit.
+            if (remote.Status >= 200 && remote.Status < 300 && requested != null)
+            {
+                Uri remoteUri;
+                string remoteUrl = String.IsNullOrWhiteSpace(remote.FinalUrl)
+                    ? requested.AbsoluteUri : remote.FinalUrl;
+                string remoteText = WebUtility.HtmlDecode((remote.Title ?? "") + " " + (remote.Text ?? ""));
+                bool explicitRemoteRemoval = Regex.IsMatch(remoteText,
+                    "原帖已被作者删除|帖子已被作者删除|该帖子不存在|该帖已删除|内容不存在|文章不存在|页面不存在",
+                    RegexOptions.IgnoreCase);
+                if (Uri.TryCreate(remoteUrl, UriKind.Absolute, out remoteUri) &&
+                    String.Equals(remoteUri.Host, requested.Host, StringComparison.OrdinalIgnoreCase) &&
+                    String.Equals(remoteUri.AbsolutePath.TrimEnd('/'), requested.AbsolutePath.TrimEnd('/'),
+                        StringComparison.OrdinalIgnoreCase) &&
+                    String.Equals(result.Platform, "雪球", StringComparison.OrdinalIgnoreCase) &&
+                    explicitRemoteRemoval)
+                {
+                    result.Verdict = "已失效";
+                    result.StatusCode = remote.Status.ToString();
+                    result.FinalUrl = remoteUrl;
+                    result.Title = remote.Title ?? "";
+                    result.Evidence = source + "确认雪球目标页明确提示原帖已被作者删除";
+                    trail.Add(new VerificationEvidence
+                    {
+                        Kind = EvidenceKind.TargetRemovalExplicit,
+                        Strength = EvidenceStrength.Conclusive,
+                        Source = source,
+                        Platform = result.Platform,
+                        Message = result.Evidence,
+                        FinalUrl = result.FinalUrl,
+                        IsCurrentResponse = true
+                    });
+                    return true;
+                }
+                if (Uri.TryCreate(remoteUrl, UriKind.Absolute, out remoteUri) &&
+                    String.Equals(remoteUri.Host, requested.Host, StringComparison.OrdinalIgnoreCase) &&
+                    String.Equals(remoteUri.AbsolutePath.TrimEnd('/'), requested.AbsolutePath.TrimEnd('/'),
+                        StringComparison.OrdinalIgnoreCase) &&
+                    !explicitRemoteRemoval &&
+                    MatchesExpectedContent(result.ExpectedTitle, result.ExpectedExcerpt, remoteText) &&
+                    (String.IsNullOrWhiteSpace(result.ExpectedAuthor) ||
+                     MatchesExpectedAuthor(result.ExpectedAuthor, remoteText)))
+                {
+                    result.Verdict = "仍可访问";
+                    result.StatusCode = remote.Status.ToString();
+                    result.FinalUrl = remoteUrl;
+                    result.Title = remote.Title ?? "";
+                    result.Evidence = source + "确认：独立公开读取返回与导入目标严格匹配的标题/正文";
+                    trail.Add(new VerificationEvidence
+                    {
+                        Kind = EvidenceKind.TargetContentPresent,
+                        Strength = EvidenceStrength.Strong,
+                        Source = source,
+                        Platform = result.Platform,
+                        Message = result.Evidence,
+                        FinalUrl = result.FinalUrl,
+                        IsCurrentResponse = true
+                    });
+                    return true;
+                }
+            }
             string body = !String.IsNullOrWhiteSpace(remote.Html) ? remote.Html :
                 "<title>" + WebUtility.HtmlEncode(remote.Title ?? "") + "</title><main>" +
                 WebUtility.HtmlEncode(remote.Text ?? "") + "</main>";

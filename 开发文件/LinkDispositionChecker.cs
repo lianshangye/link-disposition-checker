@@ -1705,7 +1705,6 @@ namespace LinkDispositionChecker
             "视频不存在", "视频已下线", "该视频已下线", "内容不见了", "页面不见了", "那条视频不见了",
             "该文章已不存在", "文章没有找到哦", "出错了！文章没有找到哦", "出错了文章没有找到哦",
             "当前内容不适合展示，无法查看", "抱歉，你访问的内容不存在", "你访问的内容不存在",
-            "没有知识存在的荒原",
             "this page is no longer available", "the page you requested cannot be found", "this content is no longer available",
             "content has been removed", "post has been removed", "video has been removed", "page not found"
         };
@@ -1999,7 +1998,10 @@ namespace LinkDispositionChecker
             {
                 try
                 {
-                    IWebProxy proxy = WebRequest.GetSystemWebProxy();
+                    string configuredProxy = Environment.GetEnvironmentVariable("LINK_CHECKER_HTTP_PROXY");
+                    IWebProxy proxy = String.IsNullOrWhiteSpace(configuredProxy)
+                        ? WebRequest.GetSystemWebProxy()
+                        : new WebProxy(configuredProxy.Trim());
                     if (proxy != null)
                     {
                         proxy.Credentials = CredentialCache.DefaultCredentials;
@@ -2187,7 +2189,8 @@ namespace LinkDispositionChecker
                     if ((platformProbe == null || !platformProbe.Resolved) && code >= 200 && code < 300 &&
                         ShouldTryPublicCloudForUnresolved(uri, result))
                     {
-                        RemoteEvidenceResponse publicCloud = await TryPublicCloudEvidenceAsync(uri, token);
+                        RemoteEvidenceResponse publicCloud = await TryPublicCloudEvidenceAsync(uri, token,
+                            result.ExpectedTitle, result.ExpectedExcerpt, result.ExpectedAuthor);
                         if (ApplyRemoteEvidence(result, publicCloud, "public-cloud-reader", result.EvidenceTrail ?? new List<VerificationEvidence>()))
                         {
                             platformProbe = new PlatformProbeOutcome
@@ -2261,7 +2264,8 @@ namespace LinkDispositionChecker
                         // empty shell, or failed reader remains unfinished.
                         if (code == 403 && ShouldTryQuickPublicCloudOnTransportFailure(uri, result, code.ToString()))
                         {
-                            RemoteEvidenceResponse quickCloud = await TryPublicCloudEvidenceAsync(uri, token);
+                            RemoteEvidenceResponse quickCloud = await TryPublicCloudEvidenceAsync(uri, token,
+                                result.ExpectedTitle, result.ExpectedExcerpt, result.ExpectedAuthor);
                             if (ApplyRemoteEvidence(result, quickCloud, "public-cloud-reader",
                                 result.EvidenceTrail ?? new List<VerificationEvidence>(), uri))
                             {
@@ -2278,7 +2282,8 @@ namespace LinkDispositionChecker
                         if (platformProbe == null && ShouldTryPublicCloudForUnresolved(uri, result) &&
                             (code == 403 || code == 407))
                         {
-                            RemoteEvidenceResponse restrictedCloud = await TryPublicCloudEvidenceAsync(uri, token);
+                            RemoteEvidenceResponse restrictedCloud = await TryPublicCloudEvidenceAsync(uri, token,
+                                result.ExpectedTitle, result.ExpectedExcerpt, result.ExpectedAuthor);
                             if (ApplyRemoteEvidence(result, restrictedCloud, "public-cloud-reader",
                                 result.EvidenceTrail ?? new List<VerificationEvidence>(), uri))
                             {
@@ -2307,7 +2312,8 @@ namespace LinkDispositionChecker
                         (LooksLikeLogin(result.FinalUrl) ||
                          !String.IsNullOrEmpty(FindSignal((title + " " + visibleForAi).ToLowerInvariant(), RestrictedSignals))))
                     {
-                        RemoteEvidenceResponse restrictedShellCloud = await TryPublicCloudEvidenceAsync(uri, token);
+                        RemoteEvidenceResponse restrictedShellCloud = await TryPublicCloudEvidenceAsync(uri, token,
+                            result.ExpectedTitle, result.ExpectedExcerpt, result.ExpectedAuthor);
                         if (ApplyRemoteEvidence(result, restrictedShellCloud, "public-cloud-reader",
                             result.EvidenceTrail ?? new List<VerificationEvidence>(), uri))
                         {
@@ -2324,7 +2330,8 @@ namespace LinkDispositionChecker
                     {
                         if (ShouldTryQuickPublicCloudOnTransportFailure(uri, result, code.ToString()))
                         {
-                            RemoteEvidenceResponse quickCloud = await TryPublicCloudEvidenceAsync(uri, token);
+                            RemoteEvidenceResponse quickCloud = await TryPublicCloudEvidenceAsync(uri, token,
+                                result.ExpectedTitle, result.ExpectedExcerpt, result.ExpectedAuthor);
                             if (ApplyRemoteEvidence(result, quickCloud, "public-cloud-reader",
                                 result.EvidenceTrail ?? new List<VerificationEvidence>(), uri))
                             {
@@ -2473,7 +2480,8 @@ namespace LinkDispositionChecker
                 if (token.IsCancellationRequested) throw;
                 if (ShouldTryQuickPublicCloudOnTransportFailure(uri, result, "超时"))
                 {
-                    RemoteEvidenceResponse quickCloud = TryPublicCloudEvidenceAsync(uri, token).GetAwaiter().GetResult();
+                    RemoteEvidenceResponse quickCloud = TryPublicCloudEvidenceAsync(uri, token,
+                        result.ExpectedTitle, result.ExpectedExcerpt, result.ExpectedAuthor).GetAwaiter().GetResult();
                     if (ApplyRemoteEvidence(result, quickCloud, "public-cloud-reader",
                         result.EvidenceTrail ?? new List<VerificationEvidence>(), uri))
                     {
@@ -2490,7 +2498,8 @@ namespace LinkDispositionChecker
             {
                 if (ShouldTryQuickPublicCloudOnTransportFailure(uri, result, "连接失败"))
                 {
-                    RemoteEvidenceResponse quickCloud = TryPublicCloudEvidenceAsync(uri, token).GetAwaiter().GetResult();
+                    RemoteEvidenceResponse quickCloud = TryPublicCloudEvidenceAsync(uri, token,
+                        result.ExpectedTitle, result.ExpectedExcerpt, result.ExpectedAuthor).GetAwaiter().GetResult();
                     if (ApplyRemoteEvidence(result, quickCloud, "public-cloud-reader",
                         result.EvidenceTrail ?? new List<VerificationEvidence>(), uri))
                     {
@@ -2820,6 +2829,29 @@ namespace LinkDispositionChecker
                 if (identity.Success)
                 {
                     string id = identity.Groups[1].Value;
+                    string detailUrl = "https://m.gifshow.com/rest/wd/ugH5App/photo/simple/info?kpn=KUAISHOU";
+                    string deviceId = "web_" + Guid.NewGuid().ToString("N");
+                    string detailPayload = new JavaScriptSerializer().Serialize(new
+                    {
+                        fid = "", efid = "", shareToken = "", shareObjectId = "",
+                        shareMethod = "", shareId = "", shareResourceType = "",
+                        shareChannel = "", kpn = "KUAISHOU", subBiz = "",
+                        photoId = id, isLongVideo = false
+                    });
+                    var detailHeaders = new Dictionary<string, string>
+                    {
+                        { "User-Agent", "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 Chrome/124 Mobile Safari/537.36" },
+                        { "Accept", "application/json" },
+                        { "Origin", "https://m.gifshow.com" },
+                        { "Referer", "https://m.gifshow.com/fw/photo/" + id },
+                        { "Cookie", "did=" + deviceId + "; didv=" + deviceId },
+                        { "Content-Type", "application/json" }
+                    };
+                    ProbeResponse detail = await TryPostProbeAsync(detailUrl, detailPayload, detailHeaders, token);
+                    if (detail != null && detail.Status == 200 && IsKuaishouOfficialDetailRemoved(detail.Body))
+                        return ProbeOutcome(EvidenceKind.TargetRemovalExplicit, EvidenceStrength.Conclusive,
+                            "official-h5-api", "快手", id,
+                            "快手官方作品接口明确返回作品不存在或已删除", detailUrl, true);
                     string probeUrl = "https://m.gifshow.com/fw/photo/" + id;
                     var headers = new Dictionary<string, string>
                     {
@@ -2925,7 +2957,8 @@ namespace LinkDispositionChecker
                     if (String.Equals(Environment.GetEnvironmentVariable("LINK_CHECKER_QUICK_PASS"), "1",
                         StringComparison.OrdinalIgnoreCase))
                     {
-                        RemoteEvidenceResponse cloud = await TryPublicCloudEvidenceAsync(original, token);
+                        RemoteEvidenceResponse cloud = await TryPublicCloudEvidenceAsync(original, token,
+                            expectedTitle, expectedExcerpt, expectedAuthor);
                         string cloudText = WebUtility.HtmlDecode((cloud == null ? "" :
                             ((cloud.Title ?? "") + " " + (cloud.Text ?? ""))));
                         bool cloudIdMatch = cloudText.IndexOf(id, StringComparison.OrdinalIgnoreCase) >= 0;
@@ -3770,13 +3803,6 @@ namespace LinkDispositionChecker
                 if ((probe.Status == 404 || probe.Status == 410) && IsZhihuRemovedApiResponse(body))
                     return ProbeOutcome(EvidenceKind.TargetRemovalExplicit, EvidenceStrength.Conclusive,
                         "official-api", "知乎", id, "知乎公开回答接口确认目标回答不存在", probeUrl, true);
-                // Zhihu's public API is frequently blocked with a ZSE/403 response. The
-                // response itself is not deletion evidence, but the blocked API can still
-                // expose a target-specific empty-state phrase. Only accept that phrase;
-                // generic 403/security pages remain unresolved for browser review.
-                if (probe.Status == 403 && IsZhihuRemovedApiResponse(body))
-                    return ProbeOutcome(EvidenceKind.TargetRemovalExplicit, EvidenceStrength.Strong,
-                        "official-api", "知乎", id, "知乎受限公开响应仍明确显示目标回答不存在", probeUrl, true);
                 // A Zhihu anti-bot response is not deletion evidence. Keep the item
                 // unfinished so a later browser pass can use the answer-page redirect.
                 if (probe.Status == 403) return null;
@@ -4310,7 +4336,7 @@ namespace LinkDispositionChecker
         {
             string source = body ?? "";
             if (String.IsNullOrWhiteSpace(source)) return false;
-            if (Regex.IsMatch(source, "没有知识存在的荒原|该回答不存在|回答不存在", RegexOptions.IgnoreCase)) return true;
+            if (Regex.IsMatch(source, "该回答不存在|回答不存在", RegexOptions.IgnoreCase)) return true;
             if (!Regex.IsMatch(source, "资源不存在", RegexOptions.IgnoreCase)) return false;
             return !Regex.IsMatch(source, "need_login|unhuman|安全验证|访问异常|验证码|captcha|security", RegexOptions.IgnoreCase);
         }
@@ -4421,6 +4447,15 @@ namespace LinkDispositionChecker
             bool authorMatch = expectedAuthorKey.Length >= 3 && currentAuthorKey.Length >= 3 &&
                 (expectedAuthorKey.Contains(currentAuthorKey) || currentAuthorKey.Contains(expectedAuthorKey));
             return authorMatch;
+        }
+
+        internal static bool IsKuaishouOfficialDetailRemoved(string json)
+        {
+            string source = json ?? "";
+            int result = ExtractJsonInt(source, "result", Int32.MinValue);
+            string message = ExtractJsonString(source, "error_msg");
+            return result == 205 && Regex.IsMatch(message ?? "", "作品不存在|已经被删除|作品已删除",
+                RegexOptions.IgnoreCase);
         }
 
         internal static bool IsKuaishouRemovedSsrContent(string html, string shortId)
@@ -5232,9 +5267,14 @@ namespace LinkDispositionChecker
                 if (Uri.TryCreate(url, UriKind.Absolute, out pacingUri)) await WaitForRequestSlotAsync(pacingUri, token);
                 using (var request = new HttpRequestMessage(HttpMethod.Post, url))
                 {
-                    request.Content = new StringContent(form ?? "", Encoding.UTF8, "application/x-www-form-urlencoded");
+                    bool jsonContent = headers != null && headers.ContainsKey("Content-Type") &&
+                        String.Equals(headers["Content-Type"], "application/json", StringComparison.OrdinalIgnoreCase);
+                    request.Content = new StringContent(form ?? "", Encoding.UTF8,
+                        jsonContent ? "application/json" : "application/x-www-form-urlencoded");
                     if (headers != null)
-                        foreach (var header in headers) request.Headers.TryAddWithoutValidation(header.Key, header.Value);
+                        foreach (var header in headers)
+                            if (!String.Equals(header.Key, "Content-Type", StringComparison.OrdinalIgnoreCase))
+                                request.Headers.TryAddWithoutValidation(header.Key, header.Value);
                     using (HttpResponseMessage response = await _client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token))
                     {
                         return new ProbeResponse
@@ -5402,13 +5442,13 @@ namespace LinkDispositionChecker
                 };
             }
 
-            // Zhihu's "no knowledge exists" page is a target-specific empty state,
-            // not the generic security/403 page. Keep this check before the generic
-            // login/restriction branch so the known removal page is still resolved.
+            // Zhihu's generic "no knowledge exists" shell is not target-level
+            // evidence: the same live answer can intermittently receive that page.
+            // Only an explicit answer-removal message is accepted here.
             if (IsZhihuRemovedEmptyState(result, currentUrl, title, visible))
             {
                 return DecideEvidence(EvidenceKind.TargetRemovalExplicit, EvidenceStrength.Conclusive,
-                    "rendered-page", "知乎", "", "知乎页面主体明确提示目标回答不存在（没有知识存在的荒原）", currentUrl, true);
+                    "rendered-page", "知乎", "", "知乎页面主体明确提示目标回答不存在", currentUrl, true);
             }
             if (IsTiebaRemovedEmptyState(result, currentUrl, title, visible, html))
             {
@@ -5593,7 +5633,7 @@ namespace LinkDispositionChecker
             if (result == null || !Uri.TryCreate(result.OriginalUrl, UriKind.Absolute, out original) ||
                 !original.Host.EndsWith("zhihu.com", StringComparison.OrdinalIgnoreCase)) return false;
             string combined = (title ?? "") + " " + (visible ?? "");
-            if (!Regex.IsMatch(combined, "没有知识存在的荒原|资源不存在|该回答不存在|回答不存在", RegexOptions.IgnoreCase)) return false;
+            if (!Regex.IsMatch(combined, "该回答不存在|回答不存在", RegexOptions.IgnoreCase)) return false;
             // A security page can contain the word "不存在" in a redirect parameter;
             // require the visible empty-state text and a real answer/pin target.
             return (original.AbsolutePath ?? "").IndexOf("/answer/", StringComparison.OrdinalIgnoreCase) >= 0 ||
@@ -5776,7 +5816,8 @@ namespace LinkDispositionChecker
             }
 
             attempts.Add("公开云取证");
-            RemoteEvidenceResponse publicCloud = await TryPublicCloudEvidenceAsync(original, token);
+            RemoteEvidenceResponse publicCloud = await TryPublicCloudEvidenceAsync(original, token,
+                result.ExpectedTitle, result.ExpectedExcerpt, result.ExpectedAuthor);
             if (ApplyRemoteEvidence(result, publicCloud, "public-cloud-reader", trail))
             {
                 result.AcquisitionAttempts = String.Join(" → ", attempts);
@@ -5967,11 +6008,8 @@ namespace LinkDispositionChecker
                     }
                 }
             }
-            // Public readers often strip the target id from their markdown,
-            // while preserving a platform-specific empty-state message.  The
-            // message is still target-level evidence when it comes from the
-            // requested platform page, so accept it before generic rendering
-            // rules require an id echo.
+            // Accept only platform-specific explicit removal messages. Generic
+            // Zhihu "荒原" shells are deliberately excluded by this helper.
             string remoteVisible = ExtractVisibleText(probe.Body ?? "");
             if (IsRemoteTargetSpecificRemoval(result, remoteVisible, page.Title, probe.FinalUrl))
             {
@@ -6094,7 +6132,7 @@ namespace LinkDispositionChecker
                 return Regex.IsMatch(text, "贴子可能已被删除|帖子可能已被删除|该贴子不存在|该帖子不存在",
                     RegexOptions.IgnoreCase);
             if (platform.IndexOf("知乎", StringComparison.OrdinalIgnoreCase) >= 0)
-                return Regex.IsMatch(text, "没有知识存在的荒原|该问题不存在|该回答不存在|回答不存在",
+                return Regex.IsMatch(text, "该问题不存在|该回答不存在|回答不存在",
                     RegexOptions.IgnoreCase);
             return false;
         }
@@ -6246,6 +6284,12 @@ namespace LinkDispositionChecker
         private async Task<RemoteEvidenceResponse> TryPublicCloudEvidenceAsync(Uri target,
             CancellationToken token)
         {
+            return await TryPublicCloudEvidenceAsync(target, token, "", "", "");
+        }
+
+        private async Task<RemoteEvidenceResponse> TryPublicCloudEvidenceAsync(Uri target,
+            CancellationToken token, string expectedTitle, string expectedExcerpt, string expectedAuthor)
+        {
             await PublicCloudProbeGate.WaitAsync(token);
             try
             {
@@ -6266,7 +6310,8 @@ namespace LinkDispositionChecker
                 RemoteEvidenceResponse alternate = await ReadPublicCloudEvidenceOnceAsync(alternateTarget, token);
                 if (ShouldRetryAlternatePublicReaderEvidence(target, alternate))
                     alternate = await ReadPublicCloudEvidenceOnceAsync(alternateTarget, token);
-                return PreferAlternatePublicReaderEvidence(target, primary, alternate) ? alternate : primary;
+                return SelectPublicReaderEvidence(target, primary, alternate,
+                    expectedTitle, expectedExcerpt, expectedAuthor);
             }
             catch (Exception ex)
             {
@@ -6337,17 +6382,20 @@ namespace LinkDispositionChecker
 
             string text = WebUtility.HtmlDecode((primary == null ? "" :
                 ((primary.Title ?? "") + " " + (primary.Text ?? ""))));
-            bool conclusive = Regex.IsMatch(text,
-                "原帖已被作者删除|帖子已被作者删除|该帖子不存在|该帖已删除|没有知识存在的荒原|该回答不存在|回答不存在",
+            bool xueqiuRemoval = Regex.IsMatch(text,
+                "原帖已被作者删除|帖子已被作者删除|该帖子不存在|该帖已删除",
                 RegexOptions.IgnoreCase);
-            if (conclusive) return false;
+            if (xueqiuRemoval) return false;
+            bool zhihuEmptyState = IsZhihuPublicReaderEmptyState(target, primary);
 
             bool unavailable = primary == null || !String.IsNullOrWhiteSpace(primary.Error) ||
                 primary.Status < 200 || primary.Status >= 300;
             bool genericShell = Regex.IsMatch(primary == null ? "" : (primary.Title ?? ""),
                 @"^\s*(?:雪球\s*[-—]\s*聪明的投资者都在这里|知乎\s*[-—]\s*有问题，?就会有答案)\s*$",
                 RegexOptions.IgnoreCase);
-            if (!unavailable && !genericShell) return false;
+            if (!unavailable && !genericShell && !zhihuEmptyState &&
+                !host.EndsWith("xueqiu.com", StringComparison.Ordinal) &&
+                !host.EndsWith("zhihu.com", StringComparison.Ordinal)) return false;
 
             try
             {
@@ -6369,7 +6417,7 @@ namespace LinkDispositionChecker
                 alternate.Status < 200 || alternate.Status >= 300) return false;
             string alternateText = WebUtility.HtmlDecode((alternate.Title ?? "") + " " + (alternate.Text ?? ""));
             if (Regex.IsMatch(alternateText,
-                "原帖已被作者删除|帖子已被作者删除|该帖子不存在|该帖已删除|没有知识存在的荒原|该回答不存在|回答不存在",
+                "原帖已被作者删除|帖子已被作者删除|该帖子不存在|该帖已删除",
                 RegexOptions.IgnoreCase)) return true;
 
             Uri alternateFinal;
@@ -6381,13 +6429,91 @@ namespace LinkDispositionChecker
             return sameTarget && !genericShell && alternateText.Length >= 160;
         }
 
+        internal static RemoteEvidenceResponse SelectPublicReaderEvidence(Uri requested,
+            RemoteEvidenceResponse primary, RemoteEvidenceResponse alternate)
+        {
+            return SelectPublicReaderEvidence(requested, primary, alternate, "", "", "");
+        }
+
+        internal static RemoteEvidenceResponse SelectPublicReaderEvidence(Uri requested,
+            RemoteEvidenceResponse primary, RemoteEvidenceResponse alternate,
+            string expectedTitle, string expectedExcerpt, string expectedAuthor)
+        {
+            int primaryScore = PublicReaderEvidenceScore(requested, primary,
+                expectedTitle, expectedExcerpt, expectedAuthor);
+            int alternateScore = PublicReaderEvidenceScore(requested, alternate,
+                expectedTitle, expectedExcerpt, expectedAuthor);
+            RemoteEvidenceResponse selected = alternateScore > primaryScore ? alternate : primary;
+            if (IsZhihuPublicReaderEmptyState(requested, selected))
+                return new RemoteEvidenceResponse
+                {
+                    Error = "知乎荒原空状态不是目标删除证据，保留人工复核",
+                    Source = "Jina Reader 双协议公开云取证",
+                    TargetUnreachable = false
+                };
+            return selected ?? new RemoteEvidenceResponse
+            {
+                Error = "公开云双协议均未取得可用响应",
+                Source = "Jina Reader 双协议公开云取证",
+                TargetUnreachable = false
+            };
+        }
+
+        internal static int PublicReaderEvidenceScore(Uri requested, RemoteEvidenceResponse response,
+            string expectedTitle, string expectedExcerpt, string expectedAuthor)
+        {
+            if (response == null || !String.IsNullOrWhiteSpace(response.Error) ||
+                response.Status < 200 || response.Status >= 300) return -1000;
+            Uri final;
+            if (!Uri.TryCreate(response.FinalUrl, UriKind.Absolute, out final) ||
+                !IsSameTargetLocation(requested, final)) return -500;
+            string text = WebUtility.HtmlDecode((response.Title ?? "") + " " + (response.Text ?? ""));
+            if (IsZhihuPublicReaderEmptyState(requested, response)) return -100;
+            if (Regex.IsMatch(text,
+                "原帖已被作者删除|帖子已被作者删除|该帖子不存在|该帖已删除",
+                RegexOptions.IgnoreCase)) return 1000;
+            bool contentMatch = MatchesExpectedContent(expectedTitle, expectedExcerpt, text);
+            bool authorMatch = String.IsNullOrWhiteSpace(expectedAuthor) ||
+                MatchesExpectedAuthor(expectedAuthor, text);
+            if (contentMatch && authorMatch) return 900;
+            if (contentMatch) return 650;
+            if (!String.IsNullOrWhiteSpace(expectedAuthor) && authorMatch && CleanText(text, 12000).Length >= 180)
+                return 450;
+            bool genericShell = Regex.IsMatch(response.Title ?? "",
+                @"^\s*(?:雪球\s*[-—]\s*聪明的投资者都在这里|知乎\s*[-—]\s*有问题，?就会有答案)\s*$",
+                RegexOptions.IgnoreCase);
+            return genericShell ? 0 : Math.Min(300, CleanText(text, 12000).Length);
+        }
+
+        internal static bool IsZhihuPublicReaderEmptyState(Uri requested,
+            RemoteEvidenceResponse response)
+        {
+            if (requested == null || response == null || !String.IsNullOrWhiteSpace(response.Error) ||
+                response.Status < 200 || response.Status >= 300 ||
+                !requested.Host.EndsWith("zhihu.com", StringComparison.OrdinalIgnoreCase)) return false;
+            Uri final;
+            string finalUrl = String.IsNullOrWhiteSpace(response.FinalUrl)
+                ? requested.AbsoluteUri : response.FinalUrl;
+            if (!Uri.TryCreate(finalUrl, UriKind.Absolute, out final) || !IsSameTargetLocation(requested, final))
+                return false;
+            string text = WebUtility.HtmlDecode((response.Title ?? "") + " " + (response.Text ?? ""));
+            return Regex.IsMatch(text, "没有知识存在的荒原",
+                RegexOptions.IgnoreCase);
+        }
+
         internal static bool ShouldRetryAlternatePublicReaderEvidence(Uri requested,
             RemoteEvidenceResponse alternate)
         {
-            if (requested == null || !requested.Host.EndsWith("xueqiu.com", StringComparison.OrdinalIgnoreCase))
-                return false;
+            if (requested == null) return false;
+            bool xueqiu = requested.Host.EndsWith("xueqiu.com", StringComparison.OrdinalIgnoreCase);
+            bool zhihu = requested.Host.EndsWith("zhihu.com", StringComparison.OrdinalIgnoreCase);
+            if (!xueqiu && !zhihu) return false;
             if (alternate == null || !String.IsNullOrWhiteSpace(alternate.Error) ||
                 alternate.Status < 200 || alternate.Status >= 300) return true;
+            if (zhihu)
+                return IsZhihuPublicReaderEmptyState(requested, alternate) ||
+                    Regex.IsMatch(alternate.Title ?? "",
+                        @"^\s*知乎\s*[-—]\s*有问题，?就会有答案\s*$", RegexOptions.IgnoreCase);
             return Regex.IsMatch(alternate.Title ?? "",
                 @"^\s*雪球\s*[-—]\s*聪明的投资者都在这里\s*$", RegexOptions.IgnoreCase);
         }
@@ -6449,28 +6575,6 @@ namespace LinkDispositionChecker
                     result.FinalUrl = remoteUrl;
                     result.Title = remote.Title ?? "";
                     result.Evidence = source + "确认雪球目标页明确提示原帖已被作者删除";
-                    trail.Add(new VerificationEvidence
-                    {
-                        Kind = EvidenceKind.TargetRemovalExplicit,
-                        Strength = EvidenceStrength.Conclusive,
-                        Source = source,
-                        Platform = result.Platform,
-                        Message = result.Evidence,
-                        FinalUrl = result.FinalUrl,
-                        IsCurrentResponse = true
-                    });
-                    return true;
-                }
-                if (Uri.TryCreate(remoteUrl, UriKind.Absolute, out remoteUri) &&
-                    IsSameTargetLocation(requested, remoteUri) && zhihuRemoteEmptyState &&
-                    (requested.AbsolutePath.IndexOf("/answer/", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                     requested.AbsolutePath.IndexOf("/pin/", StringComparison.OrdinalIgnoreCase) >= 0))
-                {
-                    result.Verdict = "已失效";
-                    result.StatusCode = remote.Status.ToString();
-                    result.FinalUrl = remoteUrl;
-                    result.Title = remote.Title ?? "";
-                    result.Evidence = source + "确认知乎目标回答页面明确显示内容不存在（没有知识存在的荒原）";
                     trail.Add(new VerificationEvidence
                     {
                         Kind = EvidenceKind.TargetRemovalExplicit,
@@ -6913,7 +7017,7 @@ namespace LinkDispositionChecker
             string[] provenPhrases =
             {
                 "该文章已不存在", "出错了文章没有找到哦", "您访问的文章走失了", "您访问的页面已经不存在",
-                "微博不存在或暂无查看权限", "抱歉此微博已被删除", "抱歉该文章已被删除", "没有知识存在的荒原", "这里空空如也"
+                "微博不存在或暂无查看权限", "抱歉此微博已被删除", "抱歉该文章已被删除", "这里空空如也"
             };
             bool provenPhrase = provenPhrases.Any(item => normalizedSignal.Contains(NormalizeForMatch(item)) ||
                 start.Contains(NormalizeForMatch(item)) || normalizedTitle.Contains(NormalizeForMatch(item)));

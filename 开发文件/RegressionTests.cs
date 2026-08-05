@@ -566,6 +566,16 @@ internal static class RegressionTests
         Console.WriteLine((kuaishouProbePassed ? "PASS " : "FAIL ") + "快手 SSR 目标作品、公开状态、文案和作者联合识别");
         if (!kuaishouProbePassed) _failures++;
 
+        bool kuaishouOfficialDetailPassed = Checker.IsKuaishouOfficialDetailRemoved(
+                "{\"result\":205,\"error_msg\":\"作品不存在，可能已经被删除。\"}") &&
+            !Checker.IsKuaishouOfficialDetailRemoved(
+                "{\"result\":2,\"error_msg\":null,\"request_id\":\"785909018024059779\"}") &&
+            !Checker.IsKuaishouOfficialDetailRemoved(
+                "{\"result\":205,\"error_msg\":\"请求频繁，请稍后重试\"}");
+        Console.WriteLine((kuaishouOfficialDetailPassed ? "PASS " : "FAIL ") +
+            "快手官方作品接口仅接受明确作品不存在结果");
+        if (!kuaishouOfficialDetailPassed) _failures++;
+
         string weiboReason;
         bool weiboProbePassed = Checker.IsWeiboPresentResponse("{\"ok\":1,\"mblogid\":\"QFX1GphBm\",\"text_raw\":\"目标微博正文\"}", "QFX1GphBm") &&
             Checker.IsWeiboUnavailableResponse("{\"ok\":0,\"message\":\"暂无查看权限\",\"error_code\":20112}", out weiboReason) &&
@@ -1033,7 +1043,7 @@ internal static class RegressionTests
                 Html = "<main>抱歉，该内容已被作者删除</main>"
             }));
 
-        bool zhihuJinaEmptyStatePassed = Checker.IsZhihuRemovedEmptyState(
+        bool zhihuJinaEmptyStateRejected = !Checker.IsZhihuRemovedEmptyState(
             new CheckResult
             {
                 OriginalUrl = "https://www.zhihu.com/question/2006945324976056152/answer/2008169169355573210"
@@ -1049,9 +1059,93 @@ internal static class RegressionTests
             "https://www.zhihu.com/",
             "知乎 - 有问题，就会有答案",
             "登录知乎，浏览更多优质内容。");
-        Console.WriteLine((zhihuJinaEmptyStatePassed && zhihuJinaShellRejected ? "PASS " : "FAIL ") +
-            "知乎公开阅读器空状态按回答目标判失效且拒绝通用壳");
-        if (!zhihuJinaEmptyStatePassed || !zhihuJinaShellRejected) _failures++;
+        Console.WriteLine((zhihuJinaEmptyStateRejected && zhihuJinaShellRejected ? "PASS " : "FAIL ") +
+            "知乎荒原空状态和通用壳均不作为删除证据");
+        if (!zhihuJinaEmptyStateRejected || !zhihuJinaShellRejected) _failures++;
+
+        Expect("知乎荒原空状态保留人工复核", "人工复核", Checker.ClassifyRenderedPage(
+            new CheckResult
+            {
+                OriginalUrl = "https://www.zhihu.com/question/2028756117174464927/answer/2029506602122618584",
+                FinalUrl = "https://www.zhihu.com/question/2028756117174464927/answer/2029506602122618584",
+                ExpectedTitle = "如何看待长城汽车董事长魏建军称专属电动车平台纯属是伪命题",
+                ExpectedExcerpt = "说白了油改电，说的啥都兼容，就是样样通样样松"
+            },
+            new RenderedPageData
+            {
+                Url = "https://www.zhihu.com/question/2028756117174464927/answer/2029506602122618584",
+                Title = "你似乎来到了没有知识存在的荒原 - 知乎",
+                Text = "这里没有知识存在的荒原",
+                Html = "<main>这里没有知识存在的荒原</main>"
+            }));
+
+        Uri zhihuAnswer = new Uri(
+            "https://www.zhihu.com/question/2028756117174464927/answer/2029506602122618584");
+        var zhihuEmpty = new RemoteEvidenceResponse
+        {
+            Status = 200,
+            FinalUrl = zhihuAnswer.AbsoluteUri,
+            Title = "你似乎来到了没有知识存在的荒原 - 知乎",
+            Text = "这里没有知识存在的荒原"
+        };
+        var zhihuPresent = new RemoteEvidenceResponse
+        {
+            Status = 200,
+            FinalUrl = "http://www.zhihu.com/question/2028756117174464927/answer/2029506602122618584",
+            Title = "如何看待长城汽车董事长魏建军称专属电动车平台是伪命题？ - 知乎",
+            Text = "知乎用户 说白了油改电，说的啥都兼容，就是样样通样样松" + new String('正', 180)
+        };
+        RemoteEvidenceResponse zhihuConflictSelected = Checker.SelectPublicReaderEvidence(
+            zhihuAnswer, zhihuEmpty, zhihuPresent);
+        RemoteEvidenceResponse zhihuRepeatedEmptySelected = Checker.SelectPublicReaderEvidence(
+            zhihuAnswer, zhihuEmpty,
+            new RemoteEvidenceResponse
+            {
+                Status = 200,
+                FinalUrl = "http://www.zhihu.com/question/2028756117174464927/answer/2029506602122618584",
+                Title = "你似乎来到了没有知识存在的荒原 - 知乎",
+                Text = "这里没有知识存在的荒原"
+            });
+        RemoteEvidenceResponse zhihuUnconfirmedSelected = Checker.SelectPublicReaderEvidence(
+            zhihuAnswer, zhihuEmpty, new RemoteEvidenceResponse { Error = "HTTP 429" });
+        Uri zhihuAlternate;
+        bool zhihuDualProtocolPassed = Object.ReferenceEquals(zhihuConflictSelected, zhihuPresent) &&
+            !String.IsNullOrWhiteSpace(zhihuRepeatedEmptySelected.Error) &&
+            !String.IsNullOrWhiteSpace(zhihuUnconfirmedSelected.Error) &&
+            Checker.ShouldTryAlternatePublicReaderProtocol(zhihuAnswer, zhihuEmpty, out zhihuAlternate) &&
+            zhihuAlternate != null && zhihuAlternate.Scheme == "http";
+        Console.WriteLine((zhihuDualProtocolPassed ? "PASS " : "FAIL ") +
+            "知乎荒原空状态始终待复核且目标正文优先");
+        if (!zhihuDualProtocolPassed) _failures++;
+
+        var xueqiuGenericReader = new RemoteEvidenceResponse
+        {
+            Status = 200,
+            FinalUrl = "https://xueqiu.com/7751636044/392858968",
+            Title = "雪球 - 聪明的投资者都在这里",
+            Text = new String('荐', 500)
+        };
+        var xueqiuRemovedReader = new RemoteEvidenceResponse
+        {
+            Status = 200,
+            FinalUrl = "http://xueqiu.com/7751636044/392858968",
+            Title = "原帖已被作者删除 - 雪球",
+            Text = "恪简投资 发布于 2026-06-04 原帖已被作者删除"
+        };
+        bool publicReaderQualityPassed = Object.ReferenceEquals(
+            Checker.SelectPublicReaderEvidence(
+                new Uri("https://xueqiu.com/7751636044/392858968"),
+                xueqiuGenericReader, xueqiuRemovedReader,
+                "$长城汽车(02333)$ 饭喂到嘴边", "就是一口不吃", "恪简投资"),
+            xueqiuRemovedReader) &&
+            Object.ReferenceEquals(
+                Checker.SelectPublicReaderEvidence(zhihuAnswer, zhihuPresent, zhihuEmpty,
+                    "如何看待长城汽车董事长魏建军称专属电动车平台是伪命题",
+                    "说白了油改电，说的啥都兼容", "知乎用户"),
+                zhihuPresent);
+        Console.WriteLine((publicReaderQualityPassed ? "PASS " : "FAIL ") +
+            "公开阅读双协议按目标证据质量选择而非响应长度");
+        if (!publicReaderQualityPassed) _failures++;
 
         Uri xueqiuHttps = new Uri("https://xueqiu.com/7751636044/392858968");
         Uri xueqiuHttp;
@@ -1092,8 +1186,20 @@ internal static class RegressionTests
                 new RemoteEvidenceResponse { Status = 200, Title = "雪球-聪明的投资者都在这里" }) &&
             !Checker.ShouldRetryAlternatePublicReaderEvidence(xueqiuHttps,
                 new RemoteEvidenceResponse { Status = 200, Title = "目标正文 - 雪球", Text = new String('正', 200) }) &&
-            !Checker.ShouldRetryAlternatePublicReaderEvidence(
+            Checker.ShouldRetryAlternatePublicReaderEvidence(
                 new Uri("https://www.zhihu.com/question/1/answer/2"),
+                new RemoteEvidenceResponse { Error = "公开云取证服务返回 HTTP 429" }) &&
+            Checker.ShouldRetryAlternatePublicReaderEvidence(
+                new Uri("https://www.zhihu.com/question/1/answer/2"),
+                new RemoteEvidenceResponse
+                {
+                    Status = 200,
+                    FinalUrl = "http://www.zhihu.com/question/1/answer/2",
+                    Title = "你似乎来到了没有知识存在的荒原 - 知乎",
+                    Text = "这里没有知识存在的荒原"
+                }) &&
+            !Checker.ShouldRetryAlternatePublicReaderEvidence(
+                new Uri("https://www.dongchedi.com/article/1234567890123"),
                 new RemoteEvidenceResponse { Error = "公开云取证服务返回 HTTP 429" });
         Console.WriteLine((xueqiuBoundedRetryPassed ? "PASS " : "FAIL ") +
             "雪球备用公开读取仅对瞬时失败或通用壳重试一次");

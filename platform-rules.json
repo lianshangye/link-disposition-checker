@@ -41,8 +41,8 @@
       "MinimumWaitMilliseconds": 1500,
       "MaximumWaitMilliseconds": 4800,
       "NavigationTimeoutMilliseconds": 13000,
-      "Limitation": "回答跳回同一问题且回答编号从最终地址消失可确认失效；登录弹窗本身不能判下架，安全验证时暂停本平台并稍后续跑",
-      "RemovedSignals": ["没有知识存在的荒原"],
+      "Limitation": "回答跳回同一问题且回答编号从最终地址消失，或页面明确提示回答已被作者删除时可确认失效；没有知识存在的荒原、登录弹窗和安全验证本身不能判下架",
+      "RemovedSignals": [],
       "RestrictedSignals": []
     },
     {

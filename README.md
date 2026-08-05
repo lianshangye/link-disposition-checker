@@ -35,6 +35,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\开发文件\Run-Core
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\开发文件\Test-ValidationScripts.ps1'
 ```
 
+如所在网络需要显式 HTTP 代理，可在启动前设置 `LINK_CHECKER_HTTP_PROXY`（例如
+`http://127.0.0.1:7893`）。未设置时使用 Windows 系统代理；代理、403、验证码或通用空壳都不会被当作目标内容已失效。
+
 ## 发布边界
 
 没有足量、近期、人工确认的真值样本时，生成的包只能标记为候选版。轮换样本的确定率用于衡量覆盖能力，不等同于真实准确率，也不能代替人工验收。

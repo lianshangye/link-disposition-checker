@@ -215,6 +215,33 @@ namespace LinkDispositionChecker
             finally { ChinaEyeballProbeGate.Release(); }
         }
 
+        private async Task<RemoteEvidenceResponse> TryChinaEyeballDirectEvidenceAsync(Uri target,
+            CancellationToken token)
+        {
+            if (target == null) return new RemoteEvidenceResponse { Error = "目标地址为空" };
+            await ChinaEyeballProbeGate.WaitAsync(token);
+            try
+            {
+                GlobalpingHttpResult result = await RunGlobalpingHttpAsync(target, "China+eyeball", "", token);
+                string source = BuildGlobalpingSource(result == null ? "" : result.ProbeLabel,
+                    result == null ? "" : result.MeasurementId, "");
+                return result == null
+                    ? new RemoteEvidenceResponse { Error = "中国普通宽带正文测量没有返回结果", Source = source }
+                    : ToRemoteEvidence(result, target, source);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                return new RemoteEvidenceResponse
+                {
+                    Error = "中国普通宽带公开探针调用失败：" + FriendlyError(ex),
+                    Source = "Globalping 中国普通宽带公开探针",
+                    TargetUnreachable = false
+                };
+            }
+            finally { ChinaEyeballProbeGate.Release(); }
+        }
+
         private async Task<ChinaEyeballSession> CreateChinaEyeballSessionAsync(Uri target,
             CancellationToken token)
         {

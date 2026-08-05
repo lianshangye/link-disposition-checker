@@ -2598,6 +2598,8 @@ namespace LinkDispositionChecker
             if (host.EndsWith("dcdapp.com", StringComparison.Ordinal) ||
                 host.EndsWith("dongchedi.com", StringComparison.Ordinal))
             {
+                Match dcdIdentity = Regex.Match(original.AbsolutePath ?? "", @"/article/([0-9]{12,})(?:/|$)",
+                    RegexOptions.IgnoreCase);
                 ProbeResponse dcdProbe = await TryReadProbeAsync(original.AbsoluteUri, null, token);
                 string dcdText = ExtractVisibleText(dcdProbe == null ? "" : dcdProbe.Body);
                 if (Regex.IsMatch(dcdText, "文章不存在|内容不存在|该内容已删除|作品不存在|内容已下线", RegexOptions.IgnoreCase))
@@ -2616,6 +2618,38 @@ namespace LinkDispositionChecker
                 if (String.Equals(Environment.GetEnvironmentVariable("LINK_CHECKER_QUICK_PASS"), "1",
                     StringComparison.OrdinalIgnoreCase) && dcdShell)
                 {
+                    if (dcdIdentity.Success)
+                    {
+                        string dcdId = dcdIdentity.Groups[1].Value;
+                        Uri dcdOfficialUri = new Uri("https://www.dongchedi.com/motor/pc/common/article/detail?group_id=" + dcdId);
+                        var dcdOfficialHeaders = new Dictionary<string, string>
+                        {
+                            { "User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/138 Mobile Safari/537.36" },
+                            { "Accept", "application/json,text/plain,*/*" },
+                            { "Accept-Encoding", "identity" },
+                            { "Referer", "https://www.dongchedi.com/article/" + dcdId }
+                        };
+                        ProbeResponse dcdOfficialProbe = await TryReadProbeAsync(dcdOfficialUri.AbsoluteUri,
+                            dcdOfficialHeaders, token);
+                        string dcdOfficialText = dcdOfficialProbe == null ? "" : (dcdOfficialProbe.Body ?? "");
+                        string dcdOfficialSource = "official-api";
+                        if (!TryMatchDongchediArticleResponse(dcdOfficialText, dcdId,
+                            expectedTitle, expectedExcerpt, expectedAuthor))
+                        {
+                            RemoteEvidenceResponse dcdOfficial = await TryChinaEyeballDirectEvidenceAsync(dcdOfficialUri, token);
+                            dcdOfficialText = dcdOfficial == null || !String.IsNullOrWhiteSpace(dcdOfficial.Error) ||
+                                dcdOfficial.Status != 200 ? "" : (dcdOfficial.Text ?? "");
+                            dcdOfficialSource = "official-api-china-eyeball";
+                        }
+                        if (TryMatchDongchediArticleResponse(dcdOfficialText, dcdId,
+                                expectedTitle, expectedExcerpt, expectedAuthor))
+                            return ProbeOutcome(EvidenceKind.TargetContentPresent, EvidenceStrength.Conclusive,
+                                dcdOfficialSource, "懂车帝", dcdId,
+                                dcdOfficialSource == "official-api"
+                                    ? "懂车帝官方详情接口返回目标编号、可见状态、匹配正文和作者"
+                                    : "懂车帝官方详情接口由中国普通宽带返回目标编号、可见状态、匹配正文和作者",
+                                dcdOfficialUri.AbsoluteUri, true);
+                    }
                     RemoteEvidenceResponse dcdCloud = await TryPublicCloudEvidenceAsync(original, token);
                     string dcdCloudText = WebUtility.HtmlDecode((dcdCloud == null ? "" :
                         (dcdCloud.Title ?? "") + " " + (dcdCloud.Text ?? "")));
@@ -4771,6 +4805,22 @@ namespace LinkDispositionChecker
             return String.IsNullOrWhiteSpace(expectedAuthor) || MatchesExpectedAuthor(expectedAuthor, combined);
         }
 
+        internal static bool TryMatchDongchediArticleResponse(string json, string id, string expectedTitle,
+            string expectedExcerpt, string expectedAuthor)
+        {
+            string source = json ?? "";
+            if (String.IsNullOrWhiteSpace(id) || source.IndexOf(id, StringComparison.OrdinalIgnoreCase) < 0)
+                return false;
+            if (!Regex.IsMatch(source, @"""status""\s*:\s*0(?:\s*[,}])", RegexOptions.IgnoreCase) ||
+                !Regex.IsMatch(source, @"""is_visible""\s*:\s*true", RegexOptions.IgnoreCase)) return false;
+            string title = ExtractJsonStringLong(source, "title", 2000);
+            string content = ExtractJsonStringLong(source, "content", 50000);
+            string author = ExtractJsonStringLong(source, "screen_name", 2000);
+            string combined = title + " " + ExtractVisibleText(content);
+            if (!MatchesExpectedContent(expectedTitle, expectedExcerpt, combined)) return false;
+            return String.IsNullOrWhiteSpace(expectedAuthor) || MatchesExpectedAuthor(expectedAuthor, author);
+        }
+
         internal static bool TryMatchHexunNewsResponse(string json, string id, string expectedTitle, string expectedExcerpt)
         {
             string source = json ?? "";
@@ -6208,7 +6258,32 @@ namespace LinkDispositionChecker
                 if (delay > 0) await Task.Delay(delay, token);
                 lock (PublicCloudProbeTimingSync) _lastPublicCloudProbeStartedUtc = DateTime.UtcNow;
 
-                Uri readerUrl = new Uri("https://r.jina.ai/" + target.AbsoluteUri);
+                RemoteEvidenceResponse primary = await ReadPublicCloudEvidenceOnceAsync(target, token);
+                Uri alternateTarget;
+                if (!ShouldTryAlternatePublicReaderProtocol(target, primary, out alternateTarget))
+                    return primary;
+
+                RemoteEvidenceResponse alternate = await ReadPublicCloudEvidenceOnceAsync(alternateTarget, token);
+                if (ShouldRetryAlternatePublicReaderEvidence(target, alternate))
+                    alternate = await ReadPublicCloudEvidenceOnceAsync(alternateTarget, token);
+                return PreferAlternatePublicReaderEvidence(target, primary, alternate) ? alternate : primary;
+            }
+            catch (Exception ex)
+            {
+                return new RemoteEvidenceResponse
+                {
+                    Error = "公开云取证服务调用失败：" + FriendlyError(ex),
+                    Source = "Jina Reader 公开云取证",
+                    TargetUnreachable = false
+                };
+            }
+            finally { PublicCloudProbeGate.Release(); }
+        }
+
+        private async Task<RemoteEvidenceResponse> ReadPublicCloudEvidenceOnceAsync(Uri target,
+            CancellationToken token)
+        {
+            Uri readerUrl = new Uri("https://r.jina.ai/" + target.AbsoluteUri);
                 using (var request = new HttpRequestMessage(HttpMethod.Get, readerUrl))
                 {
                     request.Headers.TryAddWithoutValidation("x-no-cache", "true");
@@ -6248,17 +6323,82 @@ namespace LinkDispositionChecker
                     };
                 }
                 }
-            }
-            catch (Exception ex)
+        }
+
+        internal static bool ShouldTryAlternatePublicReaderProtocol(Uri target,
+            RemoteEvidenceResponse primary, out Uri alternateTarget)
+        {
+            alternateTarget = null;
+            if (target == null || (target.Scheme != Uri.UriSchemeHttp && target.Scheme != Uri.UriSchemeHttps))
+                return false;
+            string host = (target.Host ?? "").ToLowerInvariant();
+            if (!host.EndsWith("xueqiu.com", StringComparison.Ordinal) &&
+                !host.EndsWith("zhihu.com", StringComparison.Ordinal)) return false;
+
+            string text = WebUtility.HtmlDecode((primary == null ? "" :
+                ((primary.Title ?? "") + " " + (primary.Text ?? ""))));
+            bool conclusive = Regex.IsMatch(text,
+                "原帖已被作者删除|帖子已被作者删除|该帖子不存在|该帖已删除|没有知识存在的荒原|该回答不存在|回答不存在",
+                RegexOptions.IgnoreCase);
+            if (conclusive) return false;
+
+            bool unavailable = primary == null || !String.IsNullOrWhiteSpace(primary.Error) ||
+                primary.Status < 200 || primary.Status >= 300;
+            bool genericShell = Regex.IsMatch(primary == null ? "" : (primary.Title ?? ""),
+                @"^\s*(?:雪球\s*[-—]\s*聪明的投资者都在这里|知乎\s*[-—]\s*有问题，?就会有答案)\s*$",
+                RegexOptions.IgnoreCase);
+            if (!unavailable && !genericShell) return false;
+
+            try
             {
-                return new RemoteEvidenceResponse
+                var builder = new UriBuilder(target)
                 {
-                    Error = "公开云取证服务调用失败：" + FriendlyError(ex),
-                    Source = "Jina Reader 公开云取证",
-                    TargetUnreachable = false
+                    Scheme = target.Scheme == Uri.UriSchemeHttps ? Uri.UriSchemeHttp : Uri.UriSchemeHttps,
+                    Port = -1
                 };
+                alternateTarget = builder.Uri;
+                return true;
             }
-            finally { PublicCloudProbeGate.Release(); }
+            catch { return false; }
+        }
+
+        internal static bool PreferAlternatePublicReaderEvidence(Uri requested,
+            RemoteEvidenceResponse primary, RemoteEvidenceResponse alternate)
+        {
+            if (alternate == null || !String.IsNullOrWhiteSpace(alternate.Error) ||
+                alternate.Status < 200 || alternate.Status >= 300) return false;
+            string alternateText = WebUtility.HtmlDecode((alternate.Title ?? "") + " " + (alternate.Text ?? ""));
+            if (Regex.IsMatch(alternateText,
+                "原帖已被作者删除|帖子已被作者删除|该帖子不存在|该帖已删除|没有知识存在的荒原|该回答不存在|回答不存在",
+                RegexOptions.IgnoreCase)) return true;
+
+            Uri alternateFinal;
+            bool sameTarget = Uri.TryCreate(alternate.FinalUrl, UriKind.Absolute, out alternateFinal) &&
+                IsSameTargetLocation(requested, alternateFinal);
+            bool genericShell = Regex.IsMatch(alternate.Title ?? "",
+                @"^\s*(?:雪球\s*[-—]\s*聪明的投资者都在这里|知乎\s*[-—]\s*有问题，?就会有答案)\s*$",
+                RegexOptions.IgnoreCase);
+            return sameTarget && !genericShell && alternateText.Length >= 160;
+        }
+
+        internal static bool ShouldRetryAlternatePublicReaderEvidence(Uri requested,
+            RemoteEvidenceResponse alternate)
+        {
+            if (requested == null || !requested.Host.EndsWith("xueqiu.com", StringComparison.OrdinalIgnoreCase))
+                return false;
+            if (alternate == null || !String.IsNullOrWhiteSpace(alternate.Error) ||
+                alternate.Status < 200 || alternate.Status >= 300) return true;
+            return Regex.IsMatch(alternate.Title ?? "",
+                @"^\s*雪球\s*[-—]\s*聪明的投资者都在这里\s*$", RegexOptions.IgnoreCase);
+        }
+
+        internal static bool IsSameTargetLocation(Uri requested, Uri observed)
+        {
+            if (requested == null || observed == null) return false;
+            return String.Equals(requested.Host, observed.Host, StringComparison.OrdinalIgnoreCase) &&
+                String.Equals(requested.AbsolutePath.TrimEnd('/'), observed.AbsolutePath.TrimEnd('/'),
+                    StringComparison.OrdinalIgnoreCase) &&
+                String.Equals(requested.Query ?? "", observed.Query ?? "", StringComparison.OrdinalIgnoreCase);
         }
 
         internal static bool ShouldMarkPubliclyUnavailable(CheckResult result,
@@ -6278,7 +6418,7 @@ namespace LinkDispositionChecker
             return ApplyRemoteEvidence(result, remote, source, trail, requested);
         }
 
-        private static bool ApplyRemoteEvidence(CheckResult result, RemoteEvidenceResponse remote,
+        internal static bool ApplyRemoteEvidence(CheckResult result, RemoteEvidenceResponse remote,
             string source, List<VerificationEvidence> trail, Uri requested)
         {
             if (result == null || remote == null || !String.IsNullOrWhiteSpace(remote.Error)) return false;
@@ -6300,9 +6440,7 @@ namespace LinkDispositionChecker
                     Regex.IsMatch(remoteText, "没有知识存在的荒原|该回答不存在|回答不存在|资源不存在",
                         RegexOptions.IgnoreCase);
                 if (Uri.TryCreate(remoteUrl, UriKind.Absolute, out remoteUri) &&
-                    String.Equals(remoteUri.Host, requested.Host, StringComparison.OrdinalIgnoreCase) &&
-                    String.Equals(remoteUri.AbsolutePath.TrimEnd('/'), requested.AbsolutePath.TrimEnd('/'),
-                        StringComparison.OrdinalIgnoreCase) &&
+                    IsSameTargetLocation(requested, remoteUri) &&
                     String.Equals(result.Platform, "雪球", StringComparison.OrdinalIgnoreCase) &&
                     explicitRemoteRemoval)
                 {
@@ -6324,9 +6462,7 @@ namespace LinkDispositionChecker
                     return true;
                 }
                 if (Uri.TryCreate(remoteUrl, UriKind.Absolute, out remoteUri) &&
-                    String.Equals(remoteUri.Host, requested.Host, StringComparison.OrdinalIgnoreCase) &&
-                    String.Equals(remoteUri.AbsolutePath.TrimEnd('/'), requested.AbsolutePath.TrimEnd('/'),
-                        StringComparison.OrdinalIgnoreCase) && zhihuRemoteEmptyState &&
+                    IsSameTargetLocation(requested, remoteUri) && zhihuRemoteEmptyState &&
                     (requested.AbsolutePath.IndexOf("/answer/", StringComparison.OrdinalIgnoreCase) >= 0 ||
                      requested.AbsolutePath.IndexOf("/pin/", StringComparison.OrdinalIgnoreCase) >= 0))
                 {
@@ -6348,9 +6484,7 @@ namespace LinkDispositionChecker
                     return true;
                 }
                 if (Uri.TryCreate(remoteUrl, UriKind.Absolute, out remoteUri) &&
-                    String.Equals(remoteUri.Host, requested.Host, StringComparison.OrdinalIgnoreCase) &&
-                    String.Equals(remoteUri.AbsolutePath.TrimEnd('/'), requested.AbsolutePath.TrimEnd('/'),
-                        StringComparison.OrdinalIgnoreCase) &&
+                    IsSameTargetLocation(requested, remoteUri) &&
                     !explicitRemoteRemoval &&
                     MatchesExpectedContent(result.ExpectedTitle, result.ExpectedExcerpt, remoteText) &&
                     (String.IsNullOrWhiteSpace(result.ExpectedAuthor) ||

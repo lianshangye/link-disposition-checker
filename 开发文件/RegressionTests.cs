@@ -694,6 +694,21 @@ internal static class RegressionTests
         Console.WriteLine((publicReaderCoveragePassed ? "PASS " : "FAIL ") + "雪球和懂车帝空壳进入公开补证");
         if (!publicReaderCoveragePassed) _failures++;
 
+        string dongchediOfficialJson = "{\"data\":{\"content\":\"<p>3月7日，路虎揽胜官方微博回应长城海报事件，魏建军随后公开道歉。</p>\"," +
+            "\"is_visible\":true,\"media_user\":{\"screen_name\":\"用户5414192661686\"}," +
+            "\"title\":\"长城海报抄袭风波再起，路虎创意被借鉴？魏建军深夜道歉\"," +
+            "\"url\":\"https://toutiao.com/group/7614692857609273880/\"},\"status\":0}";
+        bool dongchediOfficialPassed = Checker.TryMatchDongchediArticleResponse(dongchediOfficialJson,
+            "7614692857609273880", "长城海报抄袭风波再起，路虎创意被“借鉴”？魏建军深夜道歉",
+            "3月7日，路虎揽胜官方微博", "用户5414192661686") &&
+            !Checker.TryMatchDongchediArticleResponse(dongchediOfficialJson.Replace("true", "false"),
+                "7614692857609273880", "长城海报抄袭风波再起", "", "用户5414192661686") &&
+            !Checker.TryMatchDongchediArticleResponse("{\"status\":0,\"is_visible\":true}",
+                "7614692857609273880", "长城海报抄袭风波再起", "", "用户5414192661686");
+        Console.WriteLine((dongchediOfficialPassed ? "PASS " : "FAIL ") +
+            "懂车帝官方详情接口须联合目标编号、可见状态、正文和作者");
+        if (!dongchediOfficialPassed) _failures++;
+
         Expect("懂车帝登录壳不等于下架", "人工复核", EvidenceAdjudicator.Decide(new[]
         {
             new VerificationEvidence { Kind = EvidenceKind.GenericPage, Strength = EvidenceStrength.Supporting,
@@ -1037,6 +1052,76 @@ internal static class RegressionTests
         Console.WriteLine((zhihuJinaEmptyStatePassed && zhihuJinaShellRejected ? "PASS " : "FAIL ") +
             "知乎公开阅读器空状态按回答目标判失效且拒绝通用壳");
         if (!zhihuJinaEmptyStatePassed || !zhihuJinaShellRejected) _failures++;
+
+        Uri xueqiuHttps = new Uri("https://xueqiu.com/7751636044/392858968");
+        Uri xueqiuHttp;
+        bool xueqiuProtocolFallbackPassed = Checker.ShouldTryAlternatePublicReaderProtocol(
+            xueqiuHttps,
+            new RemoteEvidenceResponse
+            {
+                Status = 200,
+                FinalUrl = xueqiuHttps.AbsoluteUri,
+                Title = "雪球-聪明的投资者都在这里",
+                Text = "雪球平台首页"
+            }, out xueqiuHttp) &&
+            xueqiuHttp != null && xueqiuHttp.Scheme == "http" &&
+            xueqiuHttp.AbsolutePath == xueqiuHttps.AbsolutePath &&
+            Checker.PreferAlternatePublicReaderEvidence(xueqiuHttps,
+                new RemoteEvidenceResponse
+                {
+                    Status = 200,
+                    FinalUrl = xueqiuHttps.AbsoluteUri,
+                    Title = "雪球-聪明的投资者都在这里",
+                    Text = "雪球平台首页"
+                },
+                new RemoteEvidenceResponse
+                {
+                    Status = 200,
+                    FinalUrl = xueqiuHttp.AbsoluteUri,
+                    Title = "我又想到 WEY 也许是魏总自己的定稿 - 雪球",
+                    Text = "MiyaRudy 修改于 2026-03-28 我又想到 WEY 也许是魏总自己的定稿，咖啡和猫难道是千金的爱好。" +
+                        new String('内', 180)
+                });
+        Console.WriteLine((xueqiuProtocolFallbackPassed ? "PASS " : "FAIL ") +
+            "雪球公开阅读器通用壳仅回退一次同目标协议");
+        if (!xueqiuProtocolFallbackPassed) _failures++;
+
+        bool xueqiuBoundedRetryPassed = Checker.ShouldRetryAlternatePublicReaderEvidence(xueqiuHttps,
+            new RemoteEvidenceResponse { Error = "公开云取证服务返回 HTTP 429" }) &&
+            Checker.ShouldRetryAlternatePublicReaderEvidence(xueqiuHttps,
+                new RemoteEvidenceResponse { Status = 200, Title = "雪球-聪明的投资者都在这里" }) &&
+            !Checker.ShouldRetryAlternatePublicReaderEvidence(xueqiuHttps,
+                new RemoteEvidenceResponse { Status = 200, Title = "目标正文 - 雪球", Text = new String('正', 200) }) &&
+            !Checker.ShouldRetryAlternatePublicReaderEvidence(
+                new Uri("https://www.zhihu.com/question/1/answer/2"),
+                new RemoteEvidenceResponse { Error = "公开云取证服务返回 HTTP 429" });
+        Console.WriteLine((xueqiuBoundedRetryPassed ? "PASS " : "FAIL ") +
+            "雪球备用公开读取仅对瞬时失败或通用壳重试一次");
+        if (!xueqiuBoundedRetryPassed) _failures++;
+
+        var xueqiuRemovedResult = new CheckResult
+        {
+            OriginalUrl = xueqiuHttps.AbsoluteUri,
+            FinalUrl = xueqiuHttps.AbsoluteUri,
+            Platform = "雪球",
+            ExpectedTitle = "长城汽车相关讨论",
+            ExpectedExcerpt = "推荐内容仍然包含长城汽车相关讨论"
+        };
+        var xueqiuRemovedTrail = new List<VerificationEvidence>();
+        bool xueqiuRemovalPriorityPassed = Checker.ApplyRemoteEvidence(xueqiuRemovedResult,
+            new RemoteEvidenceResponse
+            {
+                Status = 200,
+                FinalUrl = "http://xueqiu.com/7751636044/392858968",
+                Title = "原帖已被作者删除 - 雪球",
+                Text = "原帖已被作者删除 推荐内容仍然包含长城汽车相关讨论及作者信息"
+            }, "public-cloud-reader", xueqiuRemovedTrail, xueqiuHttps) &&
+            xueqiuRemovedResult.Verdict == "已失效" &&
+            xueqiuRemovedTrail.Count == 1 &&
+            xueqiuRemovedTrail[0].Kind == EvidenceKind.TargetRemovalExplicit;
+        Console.WriteLine((xueqiuRemovalPriorityPassed ? "PASS " : "FAIL ") +
+            "雪球同目标协议回退中删除状态优先于推荐正文");
+        if (!xueqiuRemovalPriorityPassed) _failures++;
 
         Expect("雪球页面标题明确原帖删除", "已失效", Checker.ClassifyRenderedPage(
             new CheckResult

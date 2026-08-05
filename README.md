@@ -36,7 +36,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\开发文件\Test-Val
 ```
 
 如所在网络需要显式 HTTP 代理，可在启动前设置 `LINK_CHECKER_HTTP_PROXY`（例如
-`http://127.0.0.1:7893`）。未设置时使用 Windows 系统代理；代理、403、验证码或通用空壳都不会被当作目标内容已失效。
+`http://127.0.0.1:7893`）。未设置时自动读取 Windows 固定 WinINET 代理及绕过列表（PAC/WPAD 仍交给系统代理）；代理、403、验证码或通用空壳都不会被当作目标内容已失效。
 
 ## 发布边界
 

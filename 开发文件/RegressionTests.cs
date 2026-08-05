@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Text.RegularExpressions;
 using LinkDispositionChecker;
 
@@ -1146,6 +1147,21 @@ internal static class RegressionTests
         Console.WriteLine((publicReaderQualityPassed ? "PASS " : "FAIL ") +
             "公开阅读双协议按目标证据质量选择而非响应长度");
         if (!publicReaderQualityPassed) _failures++;
+
+        string previousProxy = Environment.GetEnvironmentVariable("LINK_CHECKER_HTTP_PROXY");
+        IWebProxy configuredProxy;
+        try
+        {
+            Environment.SetEnvironmentVariable("LINK_CHECKER_HTTP_PROXY", "http://127.0.0.1:7893");
+            configuredProxy = Checker.ResolveConfiguredProxy();
+        }
+        finally { Environment.SetEnvironmentVariable("LINK_CHECKER_HTTP_PROXY", previousProxy); }
+        bool configuredProxyPassed = configuredProxy != null &&
+            configuredProxy.GetProxy(new Uri("https://r.jina.ai/https://example.com")).Host == "127.0.0.1" &&
+            configuredProxy.GetProxy(new Uri("https://r.jina.ai/https://example.com")).Port == 7893;
+        Console.WriteLine((configuredProxyPassed ? "PASS " : "FAIL ") +
+            "Windows固定代理被明确解析为公开取证出口");
+        if (!configuredProxyPassed) _failures++;
 
         Uri xueqiuHttps = new Uri("https://xueqiu.com/7751636044/392858968");
         Uri xueqiuHttp;

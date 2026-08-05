@@ -1998,10 +1998,7 @@ namespace LinkDispositionChecker
             {
                 try
                 {
-                    string configuredProxy = Environment.GetEnvironmentVariable("LINK_CHECKER_HTTP_PROXY");
-                    IWebProxy proxy = String.IsNullOrWhiteSpace(configuredProxy)
-                        ? WebRequest.GetSystemWebProxy()
-                        : new WebProxy(configuredProxy.Trim());
+                    IWebProxy proxy = ResolveConfiguredProxy();
                     if (proxy != null)
                     {
                         proxy.Credentials = CredentialCache.DefaultCredentials;
@@ -2017,6 +2014,47 @@ namespace LinkDispositionChecker
             client.DefaultRequestHeaders.TryAddWithoutValidation("Accept", "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8");
             client.DefaultRequestHeaders.TryAddWithoutValidation("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.6");
             return client;
+        }
+
+        internal static IWebProxy ResolveConfiguredProxy()
+        {
+            string configuredProxy = Environment.GetEnvironmentVariable("LINK_CHECKER_HTTP_PROXY");
+            if (!String.IsNullOrWhiteSpace(configuredProxy))
+                return new WebProxy(configuredProxy.Trim());
+
+            // HttpClientHandler does not consistently honor the WinINET proxy
+            // and bypass list in desktop processes. Reconstruct the common
+            // fixed-proxy form explicitly; PAC/WPAD and malformed values still
+            // fall back to the framework's system-proxy implementation.
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(
+                    @"Software\Microsoft\Windows\CurrentVersion\Internet Settings"))
+                {
+                    if (key == null || Convert.ToInt32(key.GetValue("ProxyEnable", 0)) != 1)
+                        return WebRequest.GetSystemWebProxy();
+                    string proxyServer = Convert.ToString(key.GetValue("ProxyServer", ""));
+                    if (String.IsNullOrWhiteSpace(proxyServer)) return WebRequest.GetSystemWebProxy();
+                    string selected = proxyServer.Trim();
+                    Match protocolProxy = Regex.Match(selected, @"(?:^|;)https?=([^;]+)", RegexOptions.IgnoreCase);
+                    if (protocolProxy.Success) selected = protocolProxy.Groups[1].Value.Trim();
+                    if (!selected.Contains("://")) selected = "http://" + selected;
+                    Uri proxyUri;
+                    if (!Uri.TryCreate(selected, UriKind.Absolute, out proxyUri))
+                        return WebRequest.GetSystemWebProxy();
+                    var proxy = new WebProxy(proxyUri);
+                    string bypass = Convert.ToString(key.GetValue("ProxyOverride", ""));
+                    if (!String.IsNullOrWhiteSpace(bypass))
+                    {
+                        proxy.BypassList = bypass.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries)
+                            .Where(item => !String.Equals(item.Trim(), "<local>", StringComparison.OrdinalIgnoreCase))
+                            .Select(item => item.Trim()).ToArray();
+                        proxy.BypassProxyOnLocal = bypass.IndexOf("<local>", StringComparison.OrdinalIgnoreCase) >= 0;
+                    }
+                    return proxy;
+                }
+            }
+            catch { return WebRequest.GetSystemWebProxy(); }
         }
 
         public Task<CheckResult> CheckAsync(string input, int number, CancellationToken token)
@@ -6303,6 +6341,16 @@ namespace LinkDispositionChecker
                 lock (PublicCloudProbeTimingSync) _lastPublicCloudProbeStartedUtc = DateTime.UtcNow;
 
                 RemoteEvidenceResponse primary = await ReadPublicCloudEvidenceOnceAsync(target, token);
+                bool zhihuTarget = target != null && target.Host.EndsWith("zhihu.com", StringComparison.OrdinalIgnoreCase);
+                if (zhihuTarget && PublicReaderEvidenceScore(target, primary,
+                    expectedTitle, expectedExcerpt, expectedAuthor) < 500)
+                {
+                    RemoteEvidenceResponse primaryRetry = await ReadPublicCloudEvidenceOnceAsync(target, token);
+                    if (PublicReaderEvidenceScore(target, primaryRetry,
+                        expectedTitle, expectedExcerpt, expectedAuthor) >
+                        PublicReaderEvidenceScore(target, primary, expectedTitle, expectedExcerpt, expectedAuthor))
+                        primary = primaryRetry;
+                }
                 Uri alternateTarget;
                 if (!ShouldTryAlternatePublicReaderProtocol(target, primary, out alternateTarget))
                     return primary;
@@ -6310,6 +6358,16 @@ namespace LinkDispositionChecker
                 RemoteEvidenceResponse alternate = await ReadPublicCloudEvidenceOnceAsync(alternateTarget, token);
                 if (ShouldRetryAlternatePublicReaderEvidence(target, alternate))
                     alternate = await ReadPublicCloudEvidenceOnceAsync(alternateTarget, token);
+                if (zhihuTarget && PublicReaderEvidenceScore(alternateTarget, alternate,
+                    expectedTitle, expectedExcerpt, expectedAuthor) < 500)
+                {
+                    RemoteEvidenceResponse alternateRetry = await ReadPublicCloudEvidenceOnceAsync(alternateTarget, token);
+                    if (PublicReaderEvidenceScore(alternateTarget, alternateRetry,
+                        expectedTitle, expectedExcerpt, expectedAuthor) >
+                        PublicReaderEvidenceScore(alternateTarget, alternate,
+                            expectedTitle, expectedExcerpt, expectedAuthor))
+                        alternate = alternateRetry;
+                }
                 return SelectPublicReaderEvidence(target, primary, alternate,
                     expectedTitle, expectedExcerpt, expectedAuthor);
             }

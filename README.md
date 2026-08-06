@@ -35,6 +35,16 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\开发文件\Run-Core
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\开发文件\Test-ValidationScripts.ps1'
 ```
 
+正式稳定性验收默认连续运行 10 轮，每轮从本地真实台账抽取 240 条未使用链接，
+并要求每轮及累计未完成率都严格低于 5%：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\开发文件\Run-TenRoundValidation.ps1'
+```
+
+脚本保留逐轮结果、未完成项的平台/基础设施分布和汇总门禁；某一轮失败不会跳过后续轮次。
+长时间任务中断后，使用相同输出目录、种子前缀并增加 `-Resume`，即可跳过已完成轮次并从未完成轮次继续。
+
 如所在网络需要显式 HTTP 代理，可在启动前设置 `LINK_CHECKER_HTTP_PROXY`（例如
 `http://127.0.0.1:7893`）。未设置时自动读取 Windows 固定 WinINET 代理及绕过列表（PAC/WPAD 仍交给系统代理）；代理、403、验证码或通用空壳都不会被当作目标内容已失效。
 

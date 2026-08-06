@@ -2,7 +2,9 @@ param(
     [int]$Rounds = 10,
     [int]$SampleRows = 240,
     [int]$RowsPerPlatformOrDomain = 3,
-    [int]$MinimumNetMediaRows = 20,
+    [int]$MinimumNetMediaRows = 80,
+    [int]$MinimumPlatforms = 50,
+    [int]$MinimumHosts = 100,
     [string]$SourceList = '',
     [string]$HistoryCsv = '',
     [string]$OutputDirectory = '',
@@ -20,6 +22,7 @@ if ($MaximumUnresolvedRate -le 0 -or $MaximumUnresolvedRate -ge 1) {
     throw 'MaximumUnresolvedRate must be between zero and one.'
 }
 if ($MaximumNetworkAttempts -lt 1) { throw 'MaximumNetworkAttempts must be at least one.' }
+if ($MinimumPlatforms -lt 1 -or $MinimumHosts -lt 1) { throw 'Coverage minimums must be positive.' }
 . (Join-Path $PSScriptRoot 'ValidationNetworkGate.ps1')
 
 $testData = Join-Path $PSScriptRoot 'test-data'
@@ -64,6 +67,8 @@ $manifestLines = @(
     'ROUNDS=' + $Rounds,
     'SAMPLE_ROWS=' + $SampleRows,
     'MINIMUM_NETMEDIA_ROWS=' + $MinimumNetMediaRows,
+    'MINIMUM_PLATFORMS=' + $MinimumPlatforms,
+    'MINIMUM_HOSTS=' + $MinimumHosts,
     'MAXIMUM_UNRESOLVED_RATE=' + $MaximumUnresolvedRate.ToString('0.0000', [Globalization.CultureInfo]::InvariantCulture),
     'MAXIMUM_NETWORK_ATTEMPTS=' + $MaximumNetworkAttempts,
     'SEED_PREFIX=' + $SeedPrefix,
@@ -86,6 +91,11 @@ $aliveLabel = -join @([char]0x4ECD, [char]0x53EF, [char]0x8BBF, [char]0x95EE)
 $platformHeader = -join @([char]0x5E73, [char]0x53F0, [char]0x540D, [char]0x79F0)
 $urlHeader = -join @([char]0x94FE, [char]0x63A5)
 $netMediaLabel = -join @([char]0x7F51, [char]0x5A92)
+function Write-AttemptLine([string]$Message, [string]$AttemptLog, [string]$RoundLog) {
+    Write-Host $Message
+    $Message | Add-Content -LiteralPath $AttemptLog -Encoding UTF8
+    $Message | Add-Content -LiteralPath $RoundLog -Encoding UTF8
+}
 try {
     $env:FAST_AUDIT_WORKERS = [string][Math]::Max(1, $Workers)
     for ($round = 1; $round -le $Rounds; $round++) {
@@ -121,22 +131,24 @@ try {
                     $attemptLog = Join-Path $OutputDirectory ($attemptName + '.log')
                     $networkCsv = Join-Path $OutputDirectory ($attemptName + '-network.csv')
                     $network = Invoke-ValidationNetworkGate -EvidenceCsv $networkCsv
-                    ("NETWORK_GATE_ATTEMPT={0}|PASS={1}|SNAPSHOTS={2}/{3}|EVIDENCE={4}" -f `
-                        $attempt, $network.Passed, $network.PassingSnapshots, $network.RequiredSnapshots, $networkCsv) |
-                        Tee-Object -LiteralPath $attemptLog -Append | Add-Content -LiteralPath $logPath -Encoding UTF8
+                    $networkLine = "NETWORK_GATE_ATTEMPT={0}|PASS={1}|SNAPSHOTS={2}/{3}|EVIDENCE={4}" -f `
+                        $attempt, $network.Passed, $network.PassingSnapshots, $network.RequiredSnapshots, $networkCsv
+                    Write-AttemptLine $networkLine $attemptLog $logPath
                     if (-not $network.Passed) { continue }
-                    & (Join-Path $PSScriptRoot 'Run-RepresentativeValidation.ps1') `
-                        -InputCsv $sampleCsv -OutputCsv $attemptResult -MinimumResolvedRate 0 `
-                        *>&1 | Tee-Object -LiteralPath $attemptLog -Append | Add-Content -LiteralPath $logPath -Encoding UTF8
+                    $attemptOutput = & (Join-Path $PSScriptRoot 'Run-ShardedFastAudit.ps1') `
+                        -InputCsv $sampleCsv -OutputCsv $attemptResult `
+                        -RowsPerShard ([Math]::Max(100, $SampleRows)) -Workers $Workers `
+                        *>&1
+                    $attemptOutput | ForEach-Object { Write-Host $_ }
+                    $attemptOutput | Out-File -FilePath $attemptLog -Append -Encoding utf8
+                    $attemptOutput | Out-File -FilePath $logPath -Append -Encoding utf8
                     $attemptRows = if (Test-Path -LiteralPath $attemptResult) { @(Import-Csv -LiteralPath $attemptResult) } else { @() }
                     if (Test-ValidationResultNetworkInvalid -Rows $attemptRows) {
-                        "NETWORK_INVALID_ATTEMPT=$attempt|RESULT=$attemptResult" |
-                            Tee-Object -LiteralPath $attemptLog -Append | Add-Content -LiteralPath $logPath -Encoding UTF8
+                        Write-AttemptLine "NETWORK_INVALID_ATTEMPT=$attempt|RESULT=$attemptResult" $attemptLog $logPath
                         continue
                     }
                     Copy-Item -LiteralPath $attemptResult -Destination $resultCsv -Force
-                    "NETWORK_VALID_ATTEMPT=$attempt|RESULT=$attemptResult" |
-                        Tee-Object -LiteralPath $attemptLog -Append | Add-Content -LiteralPath $logPath -Encoding UTF8
+                    Write-AttemptLine "NETWORK_VALID_ATTEMPT=$attempt|RESULT=$attemptResult" $attemptLog $logPath
                     $acceptedAttempt = $true
                     break
                 }
@@ -161,13 +173,16 @@ try {
         }
         $complete = $sample.Count -eq $SampleRows -and $results.Count -eq $SampleRows -and
             [String]::IsNullOrWhiteSpace($executionError)
-        $passed = $complete -and $unresolvedRate -lt [decimal]$MaximumUnresolvedRate
         $samplePlatforms = @($sample | ForEach-Object { $_.$platformHeader } |
             Where-Object { -not [String]::IsNullOrWhiteSpace($_) } | Select-Object -Unique).Count
         $sampleHosts = @($sample | ForEach-Object {
             try { ([Uri]$_.$urlHeader).DnsSafeHost.ToLowerInvariant() } catch { '' }
         } | Where-Object { $_ } | Select-Object -Unique).Count
         $netMediaRows = @($sample | Where-Object { $_.$platformHeader -eq $netMediaLabel }).Count
+        $strictlyBelowTarget = $complete -and $unresolvedRate -lt [decimal]$MaximumUnresolvedRate
+        $coveragePassed = $samplePlatforms -ge $MinimumPlatforms -and
+            $sampleHosts -ge $MinimumHosts -and $netMediaRows -ge $MinimumNetMediaRows
+        $passed = $strictlyBelowTarget -and $coveragePassed
 
         $roundSummaries.Add([pscustomobject]@{
             Round = $round
@@ -181,7 +196,9 @@ try {
             Removed = $removed
             Unresolved = $unresolved
             UnresolvedRate = [Math]::Round([double]$unresolvedRate, 6)
-            StrictlyBelowTarget = $passed
+            StrictlyBelowTarget = $strictlyBelowTarget
+            CoveragePassed = $coveragePassed
+            Passed = $passed
             StartedAt = $roundStartedAt.ToString('yyyy-MM-dd HH:mm:ss')
             CompletedAt = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
             Error = $executionError
@@ -206,8 +223,8 @@ try {
 
         $roundSummaries | Export-Csv -LiteralPath $summaryCsv -NoTypeInformation -Encoding UTF8
         $breakdowns | Export-Csv -LiteralPath $breakdownCsv -NoTypeInformation -Encoding UTF8
-        Write-Host ("TEN_ROUND_RESULT={0}|UNRESOLVED={1}|RATE={2:0.00}%|PASS={3}" -f `
-            $round, $unresolved, (100 * $unresolvedRate), $passed)
+        Write-Host ("TEN_ROUND_RESULT={0}|UNRESOLVED={1}|RATE={2:0.00}%|COVERAGE={3}|PASS={4}" -f `
+            $round, $unresolved, (100 * $unresolvedRate), $coveragePassed, $passed)
     }
 }
 finally {
@@ -219,7 +236,7 @@ $totalUnresolved = ($roundSummaries | Measure-Object -Property Unresolved -Sum).
 $cumulativeRate = if ($totalRows -eq 0) { [decimal]1 } else {
     [decimal]$totalUnresolved / [decimal]$totalRows
 }
-$passedRounds = @($roundSummaries | Where-Object StrictlyBelowTarget).Count
+$passedRounds = @($roundSummaries | Where-Object Passed).Count
 $allPassed = $roundSummaries.Count -eq $Rounds -and $passedRounds -eq $Rounds -and
     $totalRows -eq ($Rounds * $SampleRows) -and $cumulativeRate -lt [decimal]$MaximumUnresolvedRate
 $completedAt = Get-Date

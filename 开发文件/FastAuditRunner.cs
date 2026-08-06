@@ -7,10 +7,71 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using System.Web.Script.Serialization;
 using LinkDispositionChecker;
 
 internal static class FastAuditRunner
 {
+    private static int _savedLoginCaptureAttempted;
+
+    private sealed class DeterminateResultCache : IDisposable
+    {
+        private readonly object _sync = new object();
+        private readonly string _path;
+        private readonly JavaScriptSerializer _serializer = new JavaScriptSerializer { MaxJsonLength = Int32.MaxValue };
+        private readonly Dictionary<string, CheckResult> _items = new Dictionary<string, CheckResult>(StringComparer.OrdinalIgnoreCase);
+        private StreamWriter _writer;
+        internal DeterminateResultCache(string path)
+        {
+            _path = String.IsNullOrWhiteSpace(path) ? "" : Path.GetFullPath(path);
+            if (_path.Length == 0 || !File.Exists(_path)) return;
+            foreach (string line in File.ReadLines(_path, Encoding.UTF8))
+            {
+                try
+                {
+                    var envelope = _serializer.Deserialize<Dictionary<string, object>>(line);
+                    string key = envelope != null && envelope.ContainsKey("Key") ? envelope["Key"] as string : null;
+                    CheckResult result = envelope != null && envelope.ContainsKey("Result") ? _serializer.ConvertToType<CheckResult>(envelope["Result"]) : null;
+                    if (!String.IsNullOrWhiteSpace(key) && IsDeterminate(result)) _items[key] = result;
+                }
+                catch { }
+            }
+        }
+        internal bool TryGet(string key, out CheckResult result) { lock (_sync) return _items.TryGetValue(key ?? "", out result); }
+        internal void Put(string key, CheckResult result)
+        {
+            if (_path.Length == 0 || String.IsNullOrWhiteSpace(key) || !IsDeterminate(result)) return;
+            lock (_sync)
+            {
+                if (_items.ContainsKey(key)) return;
+                _items[key] = result;
+                if (_writer == null)
+                {
+                    string directory = Path.GetDirectoryName(_path);
+                    if (!String.IsNullOrWhiteSpace(directory)) Directory.CreateDirectory(directory);
+                    _writer = new StreamWriter(_path, true, new UTF8Encoding(false)); _writer.AutoFlush = true;
+                }
+                _writer.WriteLine(_serializer.Serialize(new { Key = key, Result = result }));
+            }
+        }
+        private static bool IsDeterminate(CheckResult result) { return result != null && (result.Verdict == "仍可访问" || result.Verdict == "已失效") && !String.IsNullOrWhiteSpace(result.Evidence); }
+        public void Dispose() { lock (_sync) { if (_writer != null) { _writer.Dispose(); _writer = null; } } }
+    }
+
+    private static string RequestKey(CheckJob job)
+    {
+        if (job == null) return "";
+        Uri target;
+        string url = Uri.TryCreate(job.Url, UriKind.Absolute, out target) ? target.GetComponents(UriComponents.HttpRequestUrl, UriFormat.SafeUnescaped).TrimEnd('/') : (job.Url ?? "").Trim();
+        // Keep row-level metadata in the cache identity. The same URL can occur
+        // with different historical titles, excerpts, or authors; reusing a
+        // final verdict across those rows can turn a content mismatch into a
+        // false positive. The publisher may edit metadata later, so this is
+        // intentionally a conservative request-level cache key.
+        return url + "\n" + (job.Platform ?? "") + "\n" + (job.ContentType ?? "") +
+            "\n" + (job.ExpectedTitle ?? "") + "\n" + (job.ExpectedExcerpt ?? "") +
+            "\n" + (job.ExpectedAuthor ?? "");
+    }
     internal static List<CheckJob> InterleavePendingJobs(IEnumerable<CheckJob> jobs)
     {
         var queues = (jobs ?? Enumerable.Empty<CheckJob>())
@@ -68,24 +129,29 @@ internal static class FastAuditRunner
         InfrastructureRestrictionController infrastructureRestrictions)
     {
         CheckResult result;
-        // Every row gets its own full evidence attempt.  A platform or shared-IP
-        // circuit breaker may record a warning, but it must never turn the
-        // remainder of a real batch into synthetic "unfinished" rows before
-        // their target URLs have been checked.
-        // The fast stage is HTTP/API only. Browser rendering is an explicit
-        // user action and must never be started implicitly or mixed into the
-        // fast-stage coverage metric.
-        bool quickBrowser = false;
-        result = await checker.CheckAsync(
-            job.Url,
-            job.Number,
-            job.ExpectedTitle,
-            job.ExpectedExcerpt,
-            job.ExpectedAuthor,
-            job.Platform,
-            job.ContentType,
-            quickBrowser,
-            CancellationToken.None);
+        // Two real failures are enough to pause a generic shared infrastructure
+        // within this shard. Remaining rows stay retryable and are never
+        // converted into a content verdict.
+        if (infrastructureRestrictions.IsPaused(job))
+        {
+            result = MainForm.CreateInfrastructureDeferredResult(job, job.InfrastructureKey);
+        }
+        else
+        {
+            // The fast stage is HTTP/API only. Browser rendering is an explicit
+            // user action and must never be mixed into the fast-stage metric.
+            bool quickBrowser = false;
+            result = await checker.CheckAsync(
+                job.Url,
+                job.Number,
+                job.ExpectedTitle,
+                job.ExpectedExcerpt,
+                job.ExpectedAuthor,
+                job.Platform,
+                job.ContentType,
+                quickBrowser,
+                CancellationToken.None);
+        }
         // Do not escalate to public-cloud/remote/browser evidence here. Those
         // are the explicit deep-review action; including them would make the
         // fast-stage metric depend on external quotas and multi-second waits.
@@ -155,17 +221,12 @@ internal static class FastAuditRunner
         DateTime taskStartedAt = DateTime.Now;
         var taskWatch = System.Diagnostics.Stopwatch.StartNew();
         List<CheckJob> jobs = MainForm.LoadCsvJobs(input);
-        string numberFilter = Environment.GetEnvironmentVariable("FAST_AUDIT_NUMBERS");
-        if (!String.IsNullOrWhiteSpace(numberFilter))
+        int numberOffset;
+        if (Int32.TryParse(Environment.GetEnvironmentVariable("FAST_AUDIT_NUMBER_OFFSET"), out numberOffset) && numberOffset > 0)
         {
-            var selected = new HashSet<int>(numberFilter.Split(',').Select(value =>
-            {
-                int number;
-                return Int32.TryParse(value.Trim(), out number) ? number : -1;
-            }).Where(number => number > 0));
-            jobs = jobs.Where(job => selected.Contains(job.Number)).ToList();
+            foreach (CheckJob job in jobs) job.Number += numberOffset;
+            Console.WriteLine("NUMBER_OFFSET=" + numberOffset);
         }
-
         if (jobs.Count == 0)
         {
             Console.Error.WriteLine("没有从输入文件中读取到有效链接。");
@@ -176,14 +237,33 @@ internal static class FastAuditRunner
         if (!String.IsNullOrWhiteSpace(outputDirectory)) Directory.CreateDirectory(outputDirectory);
 
         Console.WriteLine("INPUT_JOBS=" + jobs.Count);
+        bool interactiveLogin = String.Equals(Environment.GetEnvironmentVariable("FAST_AUDIT_LOGIN_INTERACTIVE"), "1",
+            StringComparison.OrdinalIgnoreCase);
+        bool savedLogin = String.Equals(Environment.GetEnvironmentVariable("FAST_AUDIT_USE_SAVED_LOGIN"), "1",
+            StringComparison.OrdinalIgnoreCase);
+        if ((interactiveLogin || savedLogin) && Interlocked.Exchange(ref _savedLoginCaptureAttempted, 1) == 0)
+        {
+            CaptureBrowserLogin(jobs, !interactiveLogin);
+            Console.WriteLine((interactiveLogin ? "INTERACTIVE_LOGIN_COOKIES=" : "SAVED_LOGIN_COOKIES=") +
+                AuthenticatedCookieBridge.Count);
+        }
         bool resumeEnabled = String.Equals(Environment.GetEnvironmentVariable("FAST_AUDIT_RESUME"), "1", StringComparison.OrdinalIgnoreCase);
         string inputSha256 = AuditCheckpointStore.ComputeInputSha256(input);
         var results = new ConcurrentBag<CheckResult>();
         var restrictions = new PlatformRestrictionController(3);
         var infrastructureRestrictions = new InfrastructureRestrictionController(2);
         var checker = new Checker(900000);
+        string cachePath = Environment.GetEnvironmentVariable("FAST_AUDIT_RESULT_CACHE");
         using (var checkpointStore = new AuditCheckpointStore(output, inputSha256, resumeEnabled))
+        using (var determinateCache = new DeterminateResultCache(cachePath))
         {
+            string numberFilter = Environment.GetEnvironmentVariable("FAST_AUDIT_NUMBERS");
+            HashSet<int> selectedNumbers = String.IsNullOrWhiteSpace(numberFilter) ? null :
+                new HashSet<int>(numberFilter.Split(',').Select(value =>
+                {
+                    int number;
+                    return Int32.TryParse(value.Trim(), out number) ? number : -1;
+                }).Where(number => number > 0));
             Dictionary<int, CheckResult> recovered = checkpointStore.Load(jobs,
                 message => Console.WriteLine("CHECKPOINT_WARNING=" + message));
             bool retryUnresolved = String.Equals(Environment.GetEnvironmentVariable("FAST_AUDIT_RETRY_UNRESOLVED"), "1", StringComparison.OrdinalIgnoreCase);
@@ -199,7 +279,10 @@ internal static class FastAuditRunner
             }
             foreach (CheckResult result in recovered.Values) results.Add(result);
             int complete = recovered.Count;
-            List<CheckJob> pending = jobs.Where(job => !recovered.ContainsKey(job.Number)).ToList();
+            List<CheckJob> pending = jobs.Where(job => !recovered.ContainsKey(job.Number) &&
+                (selectedNumbers == null || selectedNumbers.Contains(job.Number))).ToList();
+            if (selectedNumbers != null)
+                Console.WriteLine("SELECTED_NUMBERS=" + selectedNumbers.Count);
             Console.WriteLine("CHECKPOINT_ENABLED=" + (resumeEnabled ? "1" : "0"));
             Console.WriteLine("CHECKPOINT_RECORDS=" + checkpointRecords);
             Console.WriteLine("CHECKPOINT_RECOVERED=" + recovered.Count);
@@ -237,14 +320,35 @@ internal static class FastAuditRunner
             int workerCount = Math.Min(Math.Max(1, configuredWorkers), Math.Max(1, pending.Count));
             Console.WriteLine("PHASE=check,WORKERS=" + workerCount + ",PENDING=" + pending.Count);
 
+            // Deduplicate identical public targets within the same batch. Large
+            // ledgers frequently contain the same URL under multiple source
+            // rows; one in-flight request is enough, while each row still gets
+            // its own result number and source metadata. Restriction/timeout
+            // results are deliberately not cached across different identities.
+            var inFlight = new ConcurrentDictionary<string, Task<CheckResult>>(StringComparer.OrdinalIgnoreCase);
+            Func<CheckJob, string> requestKeyOf = RequestKey;
+            int deduplicated = pending.GroupBy(requestKeyOf, StringComparer.OrdinalIgnoreCase).Sum(group => Math.Max(0, group.Count() - 1));
+            Console.WriteLine("DEDUPLICATED_JOBS=" + deduplicated);
+            int cacheHits = 0;
+
             int next = -1;
-            var tasks = Enumerable.Range(0, workerCount).Select(async ignored =>
+            var tasks = Enumerable.Range(0, workerCount).Select(async workerIndex =>
             {
                 while (true)
                 {
                     int index = Interlocked.Increment(ref next);
                     if (index >= pending.Count) break;
-                    CheckResult result = await CheckOne(checker, pending[index], restrictions, infrastructureRestrictions);
+                    CheckJob job = pending[index];
+                    string requestKey = requestKeyOf(job);
+                    CheckResult cached;
+                    Task<CheckResult> shared = determinateCache.TryGet(requestKey, out cached)
+                        ? Task.FromResult(cached)
+                        : inFlight.GetOrAdd(requestKey,
+                            delegate(string unused) { return CheckOne(checker, job, restrictions, infrastructureRestrictions); });
+                    CheckResult sourceResult = await shared;
+                    if (cached != null) Interlocked.Increment(ref cacheHits);
+                    determinateCache.Put(requestKey, sourceResult);
+                    CheckResult result = CloneForJob(sourceResult, job);
                     checkpointStore.Append(result);
                     results.Add(result);
                     int done = Interlocked.Increment(ref complete);
@@ -253,6 +357,7 @@ internal static class FastAuditRunner
                 }
             }).ToArray();
             await Task.WhenAll(tasks);
+            Console.WriteLine("DETERMINATE_CACHE_HITS=" + cacheHits);
         }
 
         List<CheckResult> ordered = results.OrderBy(item => item.Number).ToList();
@@ -328,8 +433,70 @@ internal static class FastAuditRunner
         Console.WriteLine("TASK_COMPLETED_AT=" + taskCompletedAt.ToString("yyyy-MM-dd HH:mm:ss"));
         Console.WriteLine("TASK_ELAPSED=" + taskElapsed);
         Console.WriteLine("CONTRACT_PENDING=" + (ordered.Count - contentResolved));
+        Console.WriteLine("INFRASTRUCTURE_DEFERRED=" + ordered.Count(item =>
+            item != null && item.StatusCode == "基础设施异常"));
         Console.WriteLine("PAUSED_GROUPS=" + restrictions.PausedPlatforms.Count);
         Console.WriteLine("OUTPUT=" + output);
         return ordered.Count == jobs.Count ? 0 : 1;
+    }
+
+    private static void CaptureBrowserLogin(IEnumerable<CheckJob> jobs, bool automatic)
+    {
+        Exception browserError = null;
+        var items = (jobs ?? Enumerable.Empty<CheckJob>()).Where(job => job != null)
+            .Select(job => new CheckResult
+            {
+                Number = job.Number,
+                OriginalUrl = job.Url,
+                ExpectedTitle = job.ExpectedTitle,
+                ExpectedExcerpt = job.ExpectedExcerpt,
+                ExpectedAuthor = job.ExpectedAuthor,
+                Platform = job.Platform,
+                ContentType = job.ContentType,
+                Verdict = "人工复核"
+            }).ToList();
+        var thread = new Thread(delegate()
+        {
+            try
+            {
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                using (var form = new DeepReviewForm(items, null, false, automatic, true))
+                    form.ShowDialog();
+            }
+            catch (Exception ex) { browserError = ex; }
+        });
+        thread.IsBackground = false;
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        if (browserError != null)
+            Console.WriteLine("SAVED_LOGIN_ERROR=" + browserError.Message.Replace("\r", " ").Replace("\n", " "));
+    }
+
+    private static CheckResult CloneForJob(CheckResult source, CheckJob job)
+    {
+        if (source == null || job == null) return source;
+        // Keep the network evidence but restore row-specific identity fields.
+        var copy = new CheckResult
+        {
+            Number = job.Number, Verdict = source.Verdict, StatusCode = source.StatusCode,
+            Title = source.Title, OriginalUrl = job.Url, FinalUrl = source.FinalUrl,
+            Evidence = source.Evidence, CheckedAt = source.CheckedAt, Duration = source.Duration,
+            ExpectedTitle = job.ExpectedTitle ?? "", ExpectedExcerpt = job.ExpectedExcerpt ?? "",
+            ExpectedAuthor = job.ExpectedAuthor ?? "", Platform = job.Platform ?? "",
+            ContentType = job.ContentType ?? source.ContentType, SkipDeepReview = source.SkipDeepReview,
+            SourceSheet = job.SourceSheet, SourceRow = job.SourceRow, DeepReviewed = source.DeepReviewed,
+            EdgeFastReviewed = source.EdgeFastReviewed, EvidenceTrail = source.EvidenceTrail,
+            AnalysisContext = source.AnalysisContext, AiReviewed = source.AiReviewed,
+            AiDecision = source.AiDecision, AiConfidence = source.AiConfidence, AiModel = source.AiModel,
+            AiAttemptCount = source.AiAttemptCount, AiLastError = source.AiLastError,
+            EvidenceStage = source.EvidenceStage, AcquisitionAttempts = source.AcquisitionAttempts,
+            SiteHealth = source.SiteHealth, InfrastructureKey = job.InfrastructureKey,
+            ContentStatus = source.ContentStatus, PublicReachability = source.PublicReachability,
+            AcceptanceRecommendation = source.AcceptanceRecommendation, EvidenceGrade = source.EvidenceGrade,
+            SupplierAction = source.SupplierAction
+        };
+        return copy;
     }
 }

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -38,6 +38,32 @@ internal static class RegressionTests
         bool routeIsolationPassed = Checker.ShouldAttachBrowserCookies(false) && !Checker.ShouldAttachBrowserCookies(true);
         Console.WriteLine((routeIsolationPassed ? "PASS " : "FAIL ") + "远程取证客户端不携带登录 Cookie");
         if (!routeIsolationPassed) _failures++;
+
+        Uri tiebaUri = new Uri("https://tieba.baidu.com/p/10790425311");
+        Uri hupuUri = new Uri("https://bbs.hupu.com/123456789");
+        Uri unknownUri = new Uri("https://unknown-platform.example/article/1");
+        PlatformRule tiebaRule = PlatformRules.Find(tiebaUri);
+        PlatformRule hupuRule = PlatformRules.Find(hupuUri);
+        bool platformCoveragePassed = tiebaRule != null && tiebaRule.Name == "百度贴吧" &&
+            (tiebaRule.Domains ?? new string[0]).Contains("tieba.baidu.com") &&
+            PlatformRules.FindRemovedSignal("该帖子不存在", tiebaUri) == "该帖子不存在" &&
+            PlatformRules.FindRestrictedSignal("请登录后查看", tiebaUri) == "请登录后查看" &&
+            hupuRule != null && hupuRule.Name == "虎扑" &&
+            PlatformRules.Find(new Uri("https://zhidao.baidu.com/question/1.html")) != null &&
+            PlatformRules.Find(new Uri("https://wenku.baidu.com/view/1.html")) != null &&
+            PlatformRules.Find(new Uri("https://csdn.net/article/1")) != null &&
+            PlatformRules.Find(unknownUri) == null;
+        if (!platformCoveragePassed) Console.WriteLine("platform-debug tieba=" + (tiebaRule == null ? "null" : tiebaRule.Name) +
+            ", removed=" + (PlatformRules.FindRemovedSignal("该帖子不存在", tiebaUri) ?? "null") +
+            ", restricted=" + (PlatformRules.FindRestrictedSignal("请登录后查看", tiebaUri) ?? "null") +
+            ", hupu=" + (hupuRule == null ? "null" : hupuRule.Name) +
+            ", zhidao=" + (PlatformRules.Find(new Uri("https://zhidao.baidu.com/question/1.html")) == null) +
+            ", wenku=" + (PlatformRules.Find(new Uri("https://wenku.baidu.com/view/1.html")) == null) +
+            ", csdn=" + (PlatformRules.Find(new Uri("https://csdn.net/article/1")) == null) +
+            ", unknown=" + (PlatformRules.Find(unknownUri) == null));
+        Console.WriteLine((platformCoveragePassed ? "PASS " : "FAIL ") +
+            "平台覆盖规则包含贴吧、百度内容平台及主流社区，并保留未知平台边界");
+        if (!platformCoveragePassed) _failures++;
         List<string> captureOrigins = DeepReviewForm.CookieCaptureOrigins(new[]
         {
             "https://www.zhihu.com/signin?next=%2F",
@@ -87,12 +113,69 @@ internal static class RegressionTests
             "Title: 你似乎来到了没有知识存在的荒原");
         Console.WriteLine((!zhihuShellRejected ? "PASS " : "FAIL ") + "知乎荒原单独仍保留人工复核");
         if (zhihuShellRejected) _failures++;
+        var zhihuAnswerRedirect = new RemoteEvidenceResponse
+        {
+            Status = 200,
+            FinalUrl = "https://www.zhihu.com/question/123/answer/456",
+            Title = "你似乎来到了没有知识存在的荒原 - 知乎",
+            Text = "URL Source: https://www.zhihu.com/question/123/answer/456 你似乎来到了没有知识存在的荒原 5 秒后自动跳转至回答所在的问题页"
+        };
+        var zhihuQuestionLive = new RemoteEvidenceResponse
+        {
+            Status = 200,
+            FinalUrl = "https://www.zhihu.com/question/123",
+            Title = "如何验证目标回答是否仍存在？ - 知乎",
+            Text = "当前问题页仍可访问，包含其他回答，但不包含原目标回答。"
+        };
+        bool zhihuRedirectConfirmationPassed = Checker.IsZhihuAnswerRedirectConfirmed(
+            "https://www.zhihu.com/question/123/answer/456", "如何验证目标回答是否仍存在？",
+            zhihuAnswerRedirect, zhihuQuestionLive) &&
+            !Checker.IsZhihuAnswerRedirectConfirmed(
+                "https://www.zhihu.com/question/123/answer/456", "另一个完全不同的问题标题",
+                zhihuAnswerRedirect, zhihuQuestionLive) &&
+            !Checker.IsZhihuAnswerRedirectConfirmed(
+                "https://www.zhihu.com/question/123/answer/456", "如何验证目标回答是否仍存在？",
+                new RemoteEvidenceResponse { Status = 200,
+                    FinalUrl = "https://www.zhihu.com/question/123/answer/456",
+                    Title = "知乎 - 有问题，就会有答案", Text = "登录后查看更多" },
+                zhihuQuestionLive);
+        Console.WriteLine((zhihuRedirectConfirmationPassed ? "PASS " : "FAIL ") +
+            "知乎回答跳回标题匹配的原问题页且回答编号消失才判定失效");
+        if (!zhihuRedirectConfirmationPassed) _failures++;
 
+        bool sohuIdentityPassed;
+        bool sohuIdentityMatch = Checker.TryMatchSohuFeedDetailByIdentity(
+            "{\"code\":200,\"data\":{\"uid\":\"u-1\",\"msg4Show\":{\"content\":\"This is a long current body proving the target remains publicly visible after its title changes and the structured identity is still present in the official response.\",\"viewable\":true,\"deleted\":false},\"userInfo\":{\"nickName\":\"author-name\"}}}",
+            "u-1", "旧标题", "", "author-name", out sohuIdentityPassed);
+        Console.WriteLine((sohuIdentityMatch && !sohuIdentityPassed ? "PASS " : "FAIL ") + "搜狐动态允许标题变化但要求 uid、正文、公开状态和作者身份");
+        if (!sohuIdentityMatch || sohuIdentityPassed) _failures++;
+
+        string oldPlatformInterval = Environment.GetEnvironmentVariable("FAST_AUDIT_PLATFORM_INTERVAL_MS");
+        string oldGenericInterval = Environment.GetEnvironmentVariable("FAST_AUDIT_GENERIC_INTERVAL_MS");
+        bool configuredPacingPassed = false;
+        try
+        {
+            Environment.SetEnvironmentVariable("FAST_AUDIT_PLATFORM_INTERVAL_MS", "800");
+            Environment.SetEnvironmentVariable("FAST_AUDIT_GENERIC_INTERVAL_MS", "250");
+            configuredPacingPassed =
+                Checker.RequestPacingMilliseconds(new Uri("https://www.douyin.com/video/1")) == 800 &&
+                Checker.RequestPacingMilliseconds(new Uri("https://example.com/page")) == 250;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("FAST_AUDIT_PLATFORM_INTERVAL_MS", oldPlatformInterval);
+            Environment.SetEnvironmentVariable("FAST_AUDIT_GENERIC_INTERVAL_MS", oldGenericInterval);
+        }
         bool pacingPassed =
             Checker.RequestPacingKey(new Uri("https://www.zhihu.com/question/1")) == "zhihu.com" &&
             Checker.RequestPacingKey(new Uri("https://api.weibo.com/2/statuses/show.json")) == "weibo.com" &&
             Checker.RequestPacingMilliseconds(new Uri("https://www.douyin.com/video/1")) >= 1500 &&
             Checker.RequestPacingMilliseconds(new Uri("https://example.com/page")) < 1000 &&
+            Checker.ShouldProbePlatformBeforePage(new Uri("https://www.toutiao.com/article/123456789")) &&
+            Checker.ShouldProbePlatformBeforePage(new Uri("https://weibo.com/1/ABC")) &&
+            Checker.ShouldProbePlatformBeforePage(new Uri("https://www.zhihu.com/question/1/answer/2")) &&
+            !Checker.ShouldProbePlatformBeforePage(new Uri("https://example.com/page")) &&
+            configuredPacingPassed &&
             PerformanceProfile.Resolve("低配模式").Workers == 1 &&
             PerformanceProfile.Resolve("标准模式").Workers == 3 &&
             PerformanceProfile.Resolve("高性能模式").Workers == 6;
@@ -588,11 +671,14 @@ internal static class RegressionTests
         if (!evidencePackagePassed) _failures++;
 
         bool baijiaIdPassed = Checker.ExtractBaiduArticleId(new Uri("https://baijiahao.baidu.com/s?id=1870762825559558263&wfr=spider&for=pc")) == "1870762825559558263";
+        bool baijiaContextIdPassed = Checker.ExtractBaiduArticleId(new Uri("https://mbd.baidu.com/newspage/data/landingshare?context=%7B%22nid%22%3A%22news_9452952005976791043%22%2C%22sourceFrom%22%3A%22bjh%22%7D")) == "9452952005976791043";
         bool dtNidPassed = Checker.ExtractBaiduArticleNid(new Uri("https://mbd.baidu.com/newspage/data/dtlandingwise?nid=dt_5277434666597158759")) == "dt_5277434666597158759";
         bool baiduPublicUrlPassed = Checker.BuildBaiduPublicArticleUrl("5277434666597158759").Contains("news_5277434666597158759");
         bool yoojiaIdPassed = Checker.ExtractBaiduArticleId(new Uri("https://www.yoojia.com/article/9455543928563677004.html")) == "9455543928563677004";
-        Console.WriteLine(((baijiaIdPassed && dtNidPassed && baiduPublicUrlPassed && yoojiaIdPassed) ? "PASS " : "FAIL ") + "百度百家号 s?id、dt_ 编号及公开页识别");
-        if (!baijiaIdPassed || !dtNidPassed || !baiduPublicUrlPassed || !yoojiaIdPassed) _failures++;
+        if (!(baijiaIdPassed && baijiaContextIdPassed && dtNidPassed && baiduPublicUrlPassed && yoojiaIdPassed))
+            Console.WriteLine("baidu-debug s=" + baijiaIdPassed + ", context=" + baijiaContextIdPassed + ", dt=" + dtNidPassed + ", public=" + baiduPublicUrlPassed + ", yoojia=" + yoojiaIdPassed + ", parsed=" + Checker.ExtractBaiduArticleId(new Uri("https://mbd.baidu.com/newspage/data/landingshare?context=%7B%22nid%22%3A%22news_9452952005976791043%22%2C%22sourceFrom%22%3A%22bjh%22%7D")));
+        Console.WriteLine(((baijiaIdPassed && baijiaContextIdPassed && dtNidPassed && baiduPublicUrlPassed && yoojiaIdPassed) ? "PASS " : "FAIL ") + "百度百家号 s?id、context nid、dt_ 编号及公开页识别");
+        if (!baijiaIdPassed || !baijiaContextIdPassed || !dtNidPassed || !baiduPublicUrlPassed || !yoojiaIdPassed) _failures++;
 
         Uri toutiaoShort = new Uri("https://m.toutiao.com/is/yx4jYZTtpy0/");
         Uri toutiaoRedirected = Checker.SelectPlatformProbeUri(toutiaoShort,
@@ -718,7 +804,28 @@ internal static class RegressionTests
                 "<title>中国车出海狂销，魏建军为何急得直跳脚-爱奇艺</title><meta data-video-id='v_1ws4pk79xyw'><main>发布者：悦悦聊社科</main>",
                 "v_1ws4pk79xyw", "中国车出海狂销，魏建军为何急得直跳脚？", "", "悦悦聊社科");
         Console.WriteLine((renderedSocialRemovalPassed ? "PASS " : "FAIL ") + "雪球和微博渲染页只接受带目标编号的明确不可见状态");
+        renderedSocialRemovalPassed = renderedSocialRemovalPassed &&
+            Checker.IsSohuVideoTarget404(
+                new Uri("http://tv.sohu.com/v/dXMvNDM5NDEzMzg1LzcxNzYzMjcwNy5zaHRtbA==.html"),
+                "https://tv.sohu.com/404/index.shtml") &&
+            !Checker.IsSohuVideoTarget404(
+                new Uri("http://tv.sohu.com/v/dXMvNDM5NDEzMzg1LzcxNzYzMjcwNy5zaHRtbA==.html"),
+                "https://www.sohu.com/404/index.shtml") &&
+            !Checker.IsSohuVideoTarget404(
+                new Uri("http://tv.sohu.com/channel/news.html"),
+                "https://tv.sohu.com/404/index.shtml");
         if (!renderedSocialRemovalPassed) _failures++;
+
+        bool sohuFeedPassed;
+        bool sohuFeedRemoved;
+        sohuFeedPassed = Checker.TryMatchSohuFeedDetail(
+            "{\"code\":200,\"data\":{\"uid\":\"1647350239-7400115280032520045-U\",\"msg4Show\":{\"content\":\"魏建军在海报被指抄了路虎后，第二天就自己拍视频认错\",\"viewable\":true,\"deleted\":false}}}",
+            "1647350239-7400115280032520045-U", "魏建军在海报被指抄了路虎后", "", "股市风云追踪", out sohuFeedRemoved) && !sohuFeedRemoved;
+        bool sohuDeleted = Checker.TryMatchSohuFeedDetail(
+            "{\"code\":200,\"data\":{\"uid\":\"1710792510-7460143575000137815-U\",\"msg4Show\":{\"content\":\"抱歉，此动态已被删除。\",\"viewable\":false,\"deleted\":true}}}",
+            "1710792510-7460143575000137815-U", "半年少赚近40亿", "", "大耳朵有福", out sohuFeedRemoved) && sohuFeedRemoved;
+        Console.WriteLine((sohuFeedPassed && sohuDeleted ? "PASS " : "FAIL ") + "搜狐动态详情接口目标 uid、正文和删除状态识别");
+        if (!(sohuFeedPassed && sohuDeleted)) _failures++;
 
         string dzhTitle;
         bool dzhPagePassed = Checker.TryMatchDzhArticlePage(
@@ -805,6 +912,13 @@ internal static class RegressionTests
         Console.WriteLine((dongchediOfficialPassed ? "PASS " : "FAIL ") +
             "懂车帝允许标题和账号改名，但仍须目标编号、可见状态和非空正文");
         if (!dongchediOfficialPassed) _failures++;
+
+        string dongchediUnavailableJson = "{\"data\":{\"content\":\"\",\"content_publish_time\":0,\"is_visible\":false,\"title\":\"\",\"visibility_level\":0},\"message\":\"success\",\"status\":0}";
+        bool dongchediUnavailablePassed = Checker.IsDongchediArticleUnavailableResponse(dongchediUnavailableJson) &&
+            !Checker.IsDongchediArticleUnavailableResponse(dongchediOfficialJson);
+        Console.WriteLine((dongchediUnavailablePassed ? "PASS " : "FAIL ") +
+            "懂车帝目标详情接口不可见且空正文才判定失效");
+        if (!dongchediUnavailablePassed) _failures++;
 
         Expect("懂车帝登录壳不等于下架", "人工复核", EvidenceAdjudicator.Decide(new[]
         {
@@ -1428,11 +1542,13 @@ internal static class RegressionTests
         string oldQuickPass = Environment.GetEnvironmentVariable("LINK_CHECKER_QUICK_PASS");
         Environment.SetEnvironmentVariable("LINK_CHECKER_QUICK_PASS", "1");
         bool broadCloudPassed = Checker.ShouldTryQuickPublicCloudOnTransportFailure(
+            new Uri("https://tieba.baidu.com/p/123456789"), new CheckResult { Platform = "百度贴吧" }, "502") &&
+            !Checker.ShouldTryQuickPublicCloudOnTransportFailure(
             new Uri("https://example.org/article/123"), new CheckResult { Platform = "普通网媒" }, "502") &&
             !Checker.ShouldTryQuickPublicCloudOnTransportFailure(
                 new Uri("https://wxapp.tc.qq.com/251/20302/stodownload?token=x"), new CheckResult { Platform = "微信视频号" }, "502");
         Environment.SetEnvironmentVariable("LINK_CHECKER_QUICK_PASS", oldQuickPass);
-        Console.WriteLine((broadCloudPassed ? "PASS " : "FAIL ") + "快速线路失败覆盖普通公开网页且排除签名媒体资源");
+        Console.WriteLine((broadCloudPassed ? "PASS " : "FAIL ") + "快速线路失败仅对有平台级公开补证的目标启用独立读取，并排除普通网媒和签名媒体");
         if (!broadCloudPassed) _failures++;
 
         string checkpointDirectory = Path.Combine(Path.GetTempPath(), "LinkCheckerCheckpointTest_" + Guid.NewGuid().ToString("N"));

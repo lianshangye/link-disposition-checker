@@ -111,6 +111,45 @@
       "RestrictedSignals": []
     },
     {
+      "Name": "百度贴吧",
+      "Domains": ["tieba.baidu.com"],
+      "LoginUrl": "https://tieba.baidu.com/",
+      "DynamicShell": true,
+      "ReviewTier": "动态公开页",
+      "MinimumWaitMilliseconds": 1100,
+      "MaximumWaitMilliseconds": 3600,
+      "NavigationTimeoutMilliseconds": 11000,
+      "Limitation": "主题帖编号是稳定身份；只有当前主题正文/作者，或目标编号对应的官方不存在/删除页，才可确认状态；登录、验证码和推荐流保留复核",
+      "RemovedSignals": ["帖子可能已被删除", "贴子可能已被删除", "该帖子不存在", "该贴子不存在", "主题帖不存在", "本帖已被删除", "帖子已被删除"],
+      "RestrictedSignals": ["请登录后查看", "验证码", "安全验证", "访问过于频繁"]
+    },
+    {
+      "Name": "百度知道",
+      "Domains": ["zhidao.baidu.com"],
+      "LoginUrl": "https://zhidao.baidu.com/",
+      "DynamicShell": true,
+      "ReviewTier": "动态公开页",
+      "MinimumWaitMilliseconds": 1000,
+      "MaximumWaitMilliseconds": 3400,
+      "NavigationTimeoutMilliseconds": 11000,
+      "Limitation": "问题编号和当前问答正文优先；登录页、验证码或搜索结果页不能证明原问题状态",
+      "RemovedSignals": ["问题不存在", "该问题已被删除", "回答不存在"],
+      "RestrictedSignals": ["请登录后查看", "安全验证", "验证码"]
+    },
+    {
+      "Name": "百度文库/百度百科",
+      "Domains": ["wenku.baidu.com", "baike.baidu.com"],
+      "LoginUrl": "https://www.baidu.com/",
+      "DynamicShell": true,
+      "ReviewTier": "动态公开页",
+      "MinimumWaitMilliseconds": 1000,
+      "MaximumWaitMilliseconds": 3400,
+      "NavigationTimeoutMilliseconds": 11000,
+      "Limitation": "文档或词条编号、当前正文和官方错误状态必须同时核对；付费、登录和空壳页面保留复核",
+      "RemovedSignals": ["文档不存在", "词条不存在", "该文档已删除", "该词条已被删除"],
+      "RestrictedSignals": ["请登录后查看", "安全验证", "验证码", "付费后查看"]
+    },
+    {
       "Name": "腾讯系平台",
       "Domains": ["qq.com", "weishi.qq.com", "v.qq.com"],
       "LoginUrl": "https://www.qq.com/",
@@ -319,7 +358,110 @@
       "Limitation": "分享页验证码不能区分状态；工具会先尝试 ZAKER 官方内容页，仍受限时再保留人工复核",
       "RemovedSignals": [],
       "RestrictedSignals": ["请完成验证", "验证码", "captcha"]
+    },
+    {
+      "Name": "简书",
+      "Domains": ["jianshu.com"],
+      "LoginUrl": "https://www.jianshu.com/",
+      "DynamicShell": true,
+      "ReviewTier": "动态公开页",
+      "MinimumWaitMilliseconds": 1000,
+      "MaximumWaitMilliseconds": 3600,
+      "NavigationTimeoutMilliseconds": 11000,
+      "Limitation": "文章短编号、当前正文和作者可用于确认；登录、风控或空壳页保留复核",
+      "RemovedSignals": ["文章不存在", "该文章已删除", "页面不存在"],
+      "RestrictedSignals": ["请登录", "安全验证", "验证码"]
+    },
+    {
+      "Name": "汽车之家论坛",
+      "Domains": ["club.autohome.com.cn"],
+      "LoginUrl": "https://club.autohome.com.cn/",
+      "DynamicShell": true,
+      "ReviewTier": "动态公开页",
+      "MinimumWaitMilliseconds": 900,
+      "MaximumWaitMilliseconds": 3000,
+      "NavigationTimeoutMilliseconds": 10000,
+      "Limitation": "论坛主题编号和正文优先；登录、验证码及列表页跳转不能证明主题删除",
+      "RemovedSignals": ["帖子不存在", "主题不存在", "该帖子已被删除"],
+      "RestrictedSignals": ["请登录", "验证码", "安全验证"]
+    },
+    {
+      "Name": "虎扑",
+      "Domains": ["hupu.com", "bbs.hupu.com"],
+      "LoginUrl": "https://bbs.hupu.com/",
+      "DynamicShell": true,
+      "ReviewTier": "动态公开页",
+      "MinimumWaitMilliseconds": 1000,
+      "MaximumWaitMilliseconds": 3400,
+      "NavigationTimeoutMilliseconds": 11000,
+      "Limitation": "帖子编号、当前正文和作者优先；验证码、登录和推荐流保留复核",
+      "RemovedSignals": ["帖子不存在", "该帖子已被删除", "主题不存在"],
+      "RestrictedSignals": ["请登录", "验证码", "安全验证"]
+    },
+    {
+      "Name": "豆瓣",
+      "Domains": ["douban.com"],
+      "LoginUrl": "https://www.douban.com/",
+      "DynamicShell": true,
+      "ReviewTier": "动态公开页",
+      "MinimumWaitMilliseconds": 1000,
+      "MaximumWaitMilliseconds": 3600,
+      "NavigationTimeoutMilliseconds": 11000,
+      "Limitation": "条目、日记或小组主题必须取得目标正文；登录、验证码和权限提示不能直接判失效",
+      "RemovedSignals": ["页面不存在", "该内容已被删除", "小组不存在"],
+      "RestrictedSignals": ["请登录", "验证码", "安全验证", "没有权限"]
+    },
+    {
+      "Name": "CSDN",
+      "Domains": ["csdn.net"],
+      "LoginUrl": "https://passport.csdn.net/",
+      "DynamicShell": true,
+      "ReviewTier": "动态公开页",
+      "MinimumWaitMilliseconds": 900,
+      "MaximumWaitMilliseconds": 3000,
+      "NavigationTimeoutMilliseconds": 10000,
+      "Limitation": "文章编号和正文优先；登录、付费墙、空壳和推荐页保留复核",
+      "RemovedSignals": ["文章不存在", "文章已被删除", "页面不存在"],
+      "RestrictedSignals": ["请登录", "验证码", "安全验证", "登录后阅读"]
+    },
+    {
+      "Name": "掘金",
+      "Domains": ["juejin.cn"],
+      "LoginUrl": "https://juejin.cn/",
+      "DynamicShell": true,
+      "ReviewTier": "动态公开页",
+      "MinimumWaitMilliseconds": 900,
+      "MaximumWaitMilliseconds": 3000,
+      "NavigationTimeoutMilliseconds": 10000,
+      "Limitation": "文章短编号和正文优先；登录、风控和仅客户端内容保留复核",
+      "RemovedSignals": ["文章不存在", "该文章已被删除", "页面不存在"],
+      "RestrictedSignals": ["请登录", "验证码", "安全验证"]
+    },
+    {
+      "Name": "NGA",
+      "Domains": ["nga.cn"],
+      "LoginUrl": "https://bbs.nga.cn/",
+      "DynamicShell": true,
+      "ReviewTier": "平台受限",
+      "MinimumWaitMilliseconds": 1100,
+      "MaximumWaitMilliseconds": 3800,
+      "NavigationTimeoutMilliseconds": 12000,
+      "Limitation": "论坛可能要求登录或使用客户端；只有主题正文或目标级错误状态可自动确认",
+      "RemovedSignals": ["帖子不存在", "主题不存在", "该主题已被删除"],
+      "RestrictedSignals": ["请登录", "验证码", "安全验证", "没有权限"]
+    },
+    {
+      "Name": "天涯社区",
+      "Domains": ["tianya.cn"],
+      "LoginUrl": "https://www.tianya.cn/",
+      "DynamicShell": true,
+      "ReviewTier": "平台受限",
+      "MinimumWaitMilliseconds": 1100,
+      "MaximumWaitMilliseconds": 3800,
+      "NavigationTimeoutMilliseconds": 12000,
+      "Limitation": "历史论坛常有整站不可用或登录限制；网络失败不等同于帖子删除",
+      "RemovedSignals": ["帖子不存在", "主题不存在", "页面不存在"],
+      "RestrictedSignals": ["请登录", "验证码", "安全验证", "访问受限"]
     }
   ]
 }
-

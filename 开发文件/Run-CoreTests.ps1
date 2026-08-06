@@ -13,6 +13,7 @@ $acceptanceSource = Join-Path $PSScriptRoot 'AcceptanceEvidence.cs'
 $chinaEyeballSource = Join-Path $PSScriptRoot 'ChinaEyeballEvidence.cs'
 $checkpointSource = Join-Path $PSScriptRoot 'AuditCheckpointStore.cs'
 $fastAuditSource = Join-Path $PSScriptRoot 'FastAuditRunner.cs'
+$shardedAuditSource = Join-Path $PSScriptRoot 'ShardedFastAudit.cs'
 $dependencyRoot = Join-Path $PSScriptRoot 'dependencies'
 $webViewCore = Join-Path $dependencyRoot 'Microsoft.Web.WebView2.Core.dll'
 $webViewForms = Join-Path $dependencyRoot 'Microsoft.Web.WebView2.WinForms.dll'
@@ -36,6 +37,7 @@ $references = @(
     '/reference:System.Xml.Linq.dll',
     '/reference:System.IO.Compression.dll',
     '/reference:System.IO.Compression.FileSystem.dll',
+    '/reference:Microsoft.VisualBasic.dll',
     ('/reference:' + $webViewCore),
     ('/reference:' + $webViewForms)
 )
@@ -50,7 +52,7 @@ function Invoke-Test([string]$Name, [string]$TestSource, [string]$MainClass,
         '/optimize+',
         ('/out:' + $executable),
         ('/main:' + $MainClass)
-    ) + $references + @($source, $aiSource, $logSource, $acceptanceSource, $chinaEyeballSource, $checkpointSource, $fastAuditSource, (Join-Path $PSScriptRoot $TestSource))
+    ) + $references + @($source, $aiSource, $logSource, $acceptanceSource, $chinaEyeballSource, $checkpointSource, $fastAuditSource, $shardedAuditSource, (Join-Path $PSScriptRoot $TestSource))
     & $Compiler @compilerArguments
     if ($LASTEXITCODE -ne 0) { throw "$Name compilation failed." }
     $resolvedArguments = @()
@@ -90,6 +92,7 @@ try {
         else { Write-Warning 'Excel import fixture not supplied; skipping optional Excel import test.' }
     }
     Invoke-Test -Name 'NetworkFallback-x64' -TestSource 'NetworkFallbackTests.cs' -MainClass 'NetworkFallbackTests' -Platform 'x64' -Compiler $compiler64 -Arguments @()
+    Invoke-Test -Name 'ShardedFastAudit-x64' -TestSource 'ShardedFastAuditTests.cs' -MainClass 'LinkDispositionChecker.ShardedFastAuditTests' -Platform 'x64' -Compiler $compiler64 -Arguments @()
     Write-Host 'All core tests passed.'
 }
 finally {

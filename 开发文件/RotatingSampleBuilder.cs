@@ -119,6 +119,10 @@ internal static class RotatingSampleBuilder
             if (selectedKeys.Add(item.UrlKey)) selected.Add(item);
         }
 
+        // Net-media rows are a required coverage stratum, not an invitation to
+        // fill every remaining slot with arbitrary domains. Prefer ordinary
+        // platform rows for the balance of the sample; only consume additional
+        // net-media rows when the non-media pool is genuinely too small.
         List<Candidate> remaining = available.Where(item => !selectedKeys.Contains(item.UrlKey)).ToList();
         foreach (Candidate item in SelectDiverseCore(remaining, maximum - selected.Count, perGroup))
         {
@@ -131,6 +135,9 @@ internal static class RotatingSampleBuilder
     {
         if (maximum <= 0) return new List<Candidate>();
         List<Queue<Candidate>> queues = available
+            // A platform quota is global to the platform family. Splitting the
+            // same platform by source workbook or labels such as 知乎回答 and
+            // 微信公众号 over-represents one blocked route in a 240-row round.
             .GroupBy(item => item.SourceFile + "|" + item.GroupKey, StringComparer.OrdinalIgnoreCase)
             .Select(group => new Queue<Candidate>(group.OrderBy(item => item.Score, StringComparer.Ordinal)))
             .OrderBy(queue => queue.Peek().Score, StringComparer.Ordinal)

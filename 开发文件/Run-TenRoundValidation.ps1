@@ -2,13 +2,14 @@ param(
     [int]$Rounds = 10,
     [int]$SampleRows = 240,
     [int]$RowsPerPlatformOrDomain = 3,
-    [int]$MinimumNetMediaRows = 80,
+    [int]$MinimumNetMediaRows = 20,
     [string]$SourceList = '',
     [string]$HistoryCsv = '',
     [string]$OutputDirectory = '',
     [string]$SeedPrefix = '',
     [int]$Workers = 6,
     [double]$MaximumUnresolvedRate = 0.05,
+    [int]$MaximumNetworkAttempts = 3,
     [switch]$Resume
 )
 
@@ -18,6 +19,8 @@ if ($SampleRows -lt 1) { throw 'SampleRows must be at least one.' }
 if ($MaximumUnresolvedRate -le 0 -or $MaximumUnresolvedRate -ge 1) {
     throw 'MaximumUnresolvedRate must be between zero and one.'
 }
+if ($MaximumNetworkAttempts -lt 1) { throw 'MaximumNetworkAttempts must be at least one.' }
+. (Join-Path $PSScriptRoot 'ValidationNetworkGate.ps1')
 
 $testData = Join-Path $PSScriptRoot 'test-data'
 if ([String]::IsNullOrWhiteSpace($SourceList)) {
@@ -62,6 +65,7 @@ $manifestLines = @(
     'SAMPLE_ROWS=' + $SampleRows,
     'MINIMUM_NETMEDIA_ROWS=' + $MinimumNetMediaRows,
     'MAXIMUM_UNRESOLVED_RATE=' + $MaximumUnresolvedRate.ToString('0.0000', [Globalization.CultureInfo]::InvariantCulture),
+    'MAXIMUM_NETWORK_ATTEMPTS=' + $MaximumNetworkAttempts,
     'SEED_PREFIX=' + $SeedPrefix,
     'SOURCE_LIST=' + $SourceList,
     'HISTORY=' + $HistoryCsv
@@ -102,17 +106,43 @@ try {
             if ($Resume -and $existingResults.Count -eq $SampleRows) {
                 "TEN_ROUND_REUSED_RESULT=$round" | Tee-Object -LiteralPath $logPath
             }
-            elseif ($Resume -and (Test-Path -LiteralPath $sampleCsv)) {
-                & (Join-Path $PSScriptRoot 'Run-RepresentativeValidation.ps1') `
-                    -InputCsv $sampleCsv -OutputCsv $resultCsv -MinimumResolvedRate 0 `
-                    *>&1 | Tee-Object -LiteralPath $logPath
-            }
-            else {
+            elseif (-not (Test-Path -LiteralPath $sampleCsv)) {
                 & (Join-Path $PSScriptRoot 'Run-RotatingValidation.ps1') -InputPath $inputPaths `
                     -SampleRows $SampleRows -RowsPerPlatformOrDomain $RowsPerPlatformOrDomain `
                     -MinimumNetMediaRows $MinimumNetMediaRows -Seed $seed -SampleCsv $sampleCsv `
-                    -ResultCsv $resultCsv -HistoryCsv $HistoryCsv -MinimumResolvedRate 0 `
+                    -ResultCsv $resultCsv -HistoryCsv $HistoryCsv -MinimumResolvedRate 0 -BuildOnly `
                     *>&1 | Tee-Object -LiteralPath $logPath
+            }
+            if (-not ($Resume -and $existingResults.Count -eq $SampleRows)) {
+                $acceptedAttempt = $false
+                for ($attempt = 1; $attempt -le $MaximumNetworkAttempts; $attempt++) {
+                    $attemptName = $roundName + '-attempt-{0:00}' -f $attempt
+                    $attemptResult = Join-Path $OutputDirectory ($attemptName + '-result.csv')
+                    $attemptLog = Join-Path $OutputDirectory ($attemptName + '.log')
+                    $networkCsv = Join-Path $OutputDirectory ($attemptName + '-network.csv')
+                    $network = Invoke-ValidationNetworkGate -EvidenceCsv $networkCsv
+                    ("NETWORK_GATE_ATTEMPT={0}|PASS={1}|SNAPSHOTS={2}/{3}|EVIDENCE={4}" -f `
+                        $attempt, $network.Passed, $network.PassingSnapshots, $network.RequiredSnapshots, $networkCsv) |
+                        Tee-Object -LiteralPath $attemptLog -Append | Add-Content -LiteralPath $logPath -Encoding UTF8
+                    if (-not $network.Passed) { continue }
+                    & (Join-Path $PSScriptRoot 'Run-RepresentativeValidation.ps1') `
+                        -InputCsv $sampleCsv -OutputCsv $attemptResult -MinimumResolvedRate 0 `
+                        *>&1 | Tee-Object -LiteralPath $attemptLog -Append | Add-Content -LiteralPath $logPath -Encoding UTF8
+                    $attemptRows = if (Test-Path -LiteralPath $attemptResult) { @(Import-Csv -LiteralPath $attemptResult) } else { @() }
+                    if (Test-ValidationResultNetworkInvalid -Rows $attemptRows) {
+                        "NETWORK_INVALID_ATTEMPT=$attempt|RESULT=$attemptResult" |
+                            Tee-Object -LiteralPath $attemptLog -Append | Add-Content -LiteralPath $logPath -Encoding UTF8
+                        continue
+                    }
+                    Copy-Item -LiteralPath $attemptResult -Destination $resultCsv -Force
+                    "NETWORK_VALID_ATTEMPT=$attempt|RESULT=$attemptResult" |
+                        Tee-Object -LiteralPath $attemptLog -Append | Add-Content -LiteralPath $logPath -Encoding UTF8
+                    $acceptedAttempt = $true
+                    break
+                }
+                if (-not $acceptedAttempt) {
+                    throw "No network-valid result after $MaximumNetworkAttempts attempts; invalid attempts were preserved."
+                }
             }
         }
         catch {

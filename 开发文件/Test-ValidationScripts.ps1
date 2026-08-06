@@ -51,6 +51,31 @@ try {
     }
     Write-Host 'PASS exactly 5% unresolved fails; only a rate below 5% passes.'
 
+    . (Join-Path $PSScriptRoot 'ValidationNetworkGate.ps1')
+    $networkFailureRows = for ($i = 1; $i -le 240; $i++) {
+        [pscustomobject]@{
+            序号 = $i
+            核验结果 = if ($i -le 40) { '暂时异常' } else { '仍可访问' }
+            HTTP状态 = if ($i -le 40) { '502' } else { '200' }
+            判定依据 = if ($i -le 40) { 'HTTP 502，未取得目标内容' } else { '目标正文仍在' }
+            原链接 = 'https://host' + (($i - 1) % 5 + 1) + '.example.com/item/' + $i
+        }
+    }
+    $singlePlatformRows = for ($i = 1; $i -le 240; $i++) {
+        [pscustomobject]@{
+            序号 = $i
+            核验结果 = if ($i -le 40) { '人工复核' } else { '仍可访问' }
+            HTTP状态 = '200'
+            判定依据 = if ($i -le 40) { '微信安全验证页，未取得目标正文' } else { '目标正文仍在' }
+            原链接 = if ($i -le 40) { 'https://mp.weixin.qq.com/s/example' + $i } else { 'https://news.example.com/item/' + $i }
+        }
+    }
+    if (-not (Test-ValidationResultNetworkInvalid -Rows $networkFailureRows) -or
+        (Test-ValidationResultNetworkInvalid -Rows $singlePlatformRows)) {
+        throw 'Validation network-invalid classifier contract failed.'
+    }
+    Write-Host 'PASS widespread cross-domain DNS/502 is rerunnable network failure, while one-platform login/CAPTCHA remains a real result.'
+
     $fullResult = Join-Path $root 'full-result.csv'
     $boundaryRows = for ($i = 1; $i -le 20; $i++) {
         [pscustomobject]@{ 序号 = $i; 核验结果 = if ($i -eq 20) { '人工复核' } else { '仍可访问' }; 来源工作表 = '原始数据' }

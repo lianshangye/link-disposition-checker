@@ -20,6 +20,74 @@ internal static class RegressionTests
 
     public static int Main()
     {
+        AuthenticatedCookieBridge.Clear();
+        AuthenticatedCookieBridge.Replace(new[]
+        {
+            new BrowserSessionCookie { Name = "sid", Value = "local-only", Domain = ".example.com", Path = "/", IsSecure = true },
+            new BrowserSessionCookie { Name = "", Value = "discard", Domain = ".example.com" },
+            new BrowserSessionCookie { Name = "bad-domain", Value = "discard", Domain = "localhost" }
+        });
+        List<BrowserSessionCookie> cookieSnapshot = AuthenticatedCookieBridge.Snapshot();
+        bool cookieBridgePassed = AuthenticatedCookieBridge.Count == 1 && cookieSnapshot.Count == 1 &&
+            cookieSnapshot[0].Name == "sid" && cookieSnapshot[0].Value == "local-only" &&
+            cookieSnapshot[0].Domain == ".example.com";
+        AuthenticatedCookieBridge.Clear();
+        cookieBridgePassed = cookieBridgePassed && AuthenticatedCookieBridge.Count == 0;
+        Console.WriteLine((cookieBridgePassed ? "PASS " : "FAIL ") + "登录会话 Cookie 仅进程内桥接、过滤无效域名并可清空");
+        if (!cookieBridgePassed) _failures++;
+        bool routeIsolationPassed = Checker.ShouldAttachBrowserCookies(false) && !Checker.ShouldAttachBrowserCookies(true);
+        Console.WriteLine((routeIsolationPassed ? "PASS " : "FAIL ") + "远程取证客户端不携带登录 Cookie");
+        if (!routeIsolationPassed) _failures++;
+        List<string> captureOrigins = DeepReviewForm.CookieCaptureOrigins(new[]
+        {
+            "https://www.zhihu.com/signin?next=%2F",
+            "https://www.zhihu.com/",
+            "https://weibo.com/login.php",
+            "not-a-url"
+        });
+        bool boundedCapturePassed = captureOrigins.Count == 2 &&
+            captureOrigins.Contains("https://www.zhihu.com/") && captureOrigins.Contains("https://weibo.com/");
+        Console.WriteLine((boundedCapturePassed ? "PASS " : "FAIL ") + "登录 Cookie 仅按平台来源捕获且自动去重");
+        if (!boundedCapturePassed) _failures++;
+        AuthenticatedCookieBridge.Replace(new[]
+        {
+            new BrowserSessionCookie { Name = "session", Value = "attached", Domain = ".example.com", Path = "/", IsSecure = true }
+        });
+        CookieContainer localCookies = Checker.CreateCookieContainer(true);
+        CookieContainer remoteCookies = Checker.CreateCookieContainer(false);
+        bool clientCookiePassed = localCookies.GetCookies(new Uri("https://www.example.com/")).Cast<Cookie>()
+                .Any(cookie => cookie.Name == "session" && cookie.Value == "attached") &&
+            remoteCookies.GetCookies(new Uri("https://www.example.com/")).Count == 0;
+        AuthenticatedCookieBridge.Clear();
+        Console.WriteLine((clientCookiePassed ? "PASS " : "FAIL ") + "本地 HTTP 客户端携带登录 Cookie 且远程客户端保持匿名");
+        if (!clientCookiePassed) _failures++;
+        bool yicheTitlePassed = Checker.MatchesExpectedTitle(
+            "长城魏建军公开道歉，究竟在打谁的脸？",
+            "长城魏建军公开道歉，究竟在打谁的脸？_易车");
+        Console.WriteLine((yicheTitlePassed ? "PASS " : "FAIL ") + "易车官方移动页精确标题可作为目标身份补证");
+        if (!yicheTitlePassed) _failures++;
+        bool autohomeMarkerPassed = Checker.IsAutohomeArticleErrorRedirectForTest(
+            "https://chejiahao.autohome.com.cn/info/24920181",
+            "https://chejiahao.m.autohome.com.cn/?from=pc-error");
+        Console.WriteLine((autohomeMarkerPassed ? "PASS " : "FAIL ") + "汽车之家官方 pc-error 跳转保留目标失效证据");
+        if (!autohomeMarkerPassed) _failures++;
+        bool kuaishouPathPassed = Checker.ExtractKuaishouIdForTest(
+            "https://live.kuaishou.com/u/3xuuqapynjm8x8g/3xuxncjwzkaaqyi") == "3xuxncjwzkaaqyi";
+        Console.WriteLine((kuaishouPathPassed ? "PASS " : "FAIL ") + "快手直播分享路径提取作品编号");
+        if (!kuaishouPathPassed) _failures++;
+        bool zhihuJointPassed = Checker.IsZhihuAnswerUnavailableEvidence(
+            "{\"error\":{\"code\":4041,\"name\":\"ResourceNotFoundException\"}}",
+            "https://www.zhihu.com/question/1/answer/2",
+            "URL Source: https://www.zhihu.com/question/1/answer/2 Title: 你似乎来到了没有知识存在的荒原 5 秒后自动跳转至回答所在的问题页");
+        Console.WriteLine((zhihuJointPassed ? "PASS " : "FAIL ") + "知乎回答删除仅接受接口不存在与目标页跳回问题联合证据");
+        if (!zhihuJointPassed) _failures++;
+        bool zhihuShellRejected = Checker.IsZhihuAnswerUnavailableEvidence(
+            "{\"error\":{\"code\":4041,\"name\":\"ResourceNotFoundException\"}}",
+            "https://www.zhihu.com/question/1/answer/2",
+            "Title: 你似乎来到了没有知识存在的荒原");
+        Console.WriteLine((!zhihuShellRejected ? "PASS " : "FAIL ") + "知乎荒原单独仍保留人工复核");
+        if (zhihuShellRejected) _failures++;
+
         bool pacingPassed =
             Checker.RequestPacingKey(new Uri("https://www.zhihu.com/question/1")) == "zhihu.com" &&
             Checker.RequestPacingKey(new Uri("https://api.weibo.com/2/statuses/show.json")) == "weibo.com" &&
@@ -567,6 +635,20 @@ internal static class RegressionTests
         Console.WriteLine((kuaishouProbePassed ? "PASS " : "FAIL ") + "快手 SSR 目标作品、公开状态、文案和作者联合识别");
         if (!kuaishouProbePassed) _failures++;
 
+        string kuaishouDriftSsr = "{\"userName\":\"账号改名后\",\"caption\":\"作品修改后的新标题和正文\",\"share_info\":\"userId=abc&photoId=3x5bc42xndrmj8g\",\"photoStatus\":0}";
+        bool kuaishouMetadataDriftPassed = Checker.TryMatchKuaishouSsrTarget(kuaishouDriftSsr,
+                "3x5bc42xndrmj8g", out kuaishouCaption, out kuaishouAuthor) &&
+            kuaishouCaption == "作品修改后的新标题和正文" && kuaishouAuthor == "账号改名后" &&
+            !Checker.TryMatchKuaishouSsrTarget(kuaishouDriftSsr.Replace("\"photoStatus\":0", "\"photoStatus\":1"),
+                "3x5bc42xndrmj8g", out kuaishouCaption, out kuaishouAuthor) &&
+            !Checker.TryMatchKuaishouSsrTarget("{\"share_info\":\"photoId=3x5bc42xndrmj8g\",\"photoStatus\":0,\"caption\":\"\"}",
+                "3x5bc42xndrmj8g", out kuaishouCaption, out kuaishouAuthor) &&
+            !Checker.TryMatchKuaishouSsrTarget("{\"caption\":\"推荐列表中的其他作品\",\"photoStatus\":0}",
+                "3x5bc42xndrmj8g", out kuaishouCaption, out kuaishouAuthor);
+        Console.WriteLine((kuaishouMetadataDriftPassed ? "PASS " : "FAIL ") +
+            "快手允许标题和账号改名，但仍须目标编号、公开状态和非空作品数据");
+        if (!kuaishouMetadataDriftPassed) _failures++;
+
         bool kuaishouOfficialDetailPassed = Checker.IsKuaishouOfficialDetailRemoved(
                 "{\"result\":205,\"error_msg\":\"作品不存在，可能已经被删除。\"}") &&
             !Checker.IsKuaishouOfficialDetailRemoved(
@@ -712,12 +794,16 @@ internal static class RegressionTests
         bool dongchediOfficialPassed = Checker.TryMatchDongchediArticleResponse(dongchediOfficialJson,
             "7614692857609273880", "长城海报抄袭风波再起，路虎创意被“借鉴”？魏建军深夜道歉",
             "3月7日，路虎揽胜官方微博", "用户5414192661686") &&
+            Checker.TryMatchDongchediArticleResponse(dongchediOfficialJson,
+                "7614692857609273880", "历史标题已经被修改", "历史摘要也已修改", "账号改名前") &&
             !Checker.TryMatchDongchediArticleResponse(dongchediOfficialJson.Replace("true", "false"),
                 "7614692857609273880", "长城海报抄袭风波再起", "", "用户5414192661686") &&
+            !Checker.TryMatchDongchediArticleResponse("{\"data\":{},\"message\":\"success\",\"status\":0}",
+                "7613968204176982050", "历史标题", "", "历史作者") &&
             !Checker.TryMatchDongchediArticleResponse("{\"status\":0,\"is_visible\":true}",
                 "7614692857609273880", "长城海报抄袭风波再起", "", "用户5414192661686");
         Console.WriteLine((dongchediOfficialPassed ? "PASS " : "FAIL ") +
-            "懂车帝官方详情接口须联合目标编号、可见状态、正文和作者");
+            "懂车帝允许标题和账号改名，但仍须目标编号、可见状态和非空正文");
         if (!dongchediOfficialPassed) _failures++;
 
         Expect("懂车帝登录壳不等于下架", "人工复核", EvidenceAdjudicator.Decide(new[]
@@ -1147,6 +1233,17 @@ internal static class RegressionTests
         Console.WriteLine((publicReaderQualityPassed ? "PASS " : "FAIL ") +
             "公开阅读双协议按目标证据质量选择而非响应长度");
         if (!publicReaderQualityPassed) _failures++;
+
+        bool publicReaderEarlyStopPassed = Checker.HasSufficientPublicReaderEvidence(
+                zhihuAnswer, zhihuPresent,
+                "如何看待长城汽车董事长魏建军称专属电动车平台是伪命题",
+                "说白了油改电，说的啥都兼容", "知乎用户") &&
+            !Checker.HasSufficientPublicReaderEvidence(zhihuAnswer, zhihuEmpty,
+                "如何看待长城汽车董事长魏建军称专属电动车平台是伪命题",
+                "说白了油改电，说的啥都兼容", "知乎用户");
+        Console.WriteLine((publicReaderEarlyStopPassed ? "PASS " : "FAIL ") +
+            "公开读取取得目标正文后立即停止，空壳仍继续备用协议");
+        if (!publicReaderEarlyStopPassed) _failures++;
 
         string previousProxy = Environment.GetEnvironmentVariable("LINK_CHECKER_HTTP_PROXY");
         IWebProxy configuredProxy;

@@ -1689,6 +1689,82 @@ namespace LinkDispositionChecker
         }
     }
 
+    internal sealed class BrowserSessionCookie
+    {
+        public string Name { get; set; }
+        public string Value { get; set; }
+        public string Domain { get; set; }
+        public string Path { get; set; }
+        public bool IsSecure { get; set; }
+        public bool IsHttpOnly { get; set; }
+    }
+
+    // Login cookies are kept in memory for the current process only. They are
+    // never sent to public-reader/remote-evidence services and are not written
+    // to the session, logs, exports, or the repository.
+    internal static class AuthenticatedCookieBridge
+    {
+        private static readonly object Sync = new object();
+        private static readonly List<BrowserSessionCookie> Cookies = new List<BrowserSessionCookie>();
+
+        internal static void Replace(IEnumerable<BrowserSessionCookie> cookies)
+        {
+            lock (Sync)
+            {
+                Cookies.Clear();
+                foreach (BrowserSessionCookie cookie in cookies ?? Enumerable.Empty<BrowserSessionCookie>())
+                {
+                    if (cookie == null || String.IsNullOrWhiteSpace(cookie.Name) ||
+                        String.IsNullOrWhiteSpace(cookie.Domain) ||
+                        !IsCookieDomainAllowed(cookie.Domain)) continue;
+                    Cookies.Add(new BrowserSessionCookie
+                    {
+                        Name = cookie.Name,
+                        Value = cookie.Value ?? "",
+                        Domain = cookie.Domain,
+                        Path = String.IsNullOrWhiteSpace(cookie.Path) ? "/" : cookie.Path,
+                        IsSecure = cookie.IsSecure,
+                        IsHttpOnly = cookie.IsHttpOnly
+                    });
+                }
+            }
+        }
+
+        internal static List<BrowserSessionCookie> Snapshot()
+        {
+            lock (Sync)
+            {
+                return Cookies.Select(cookie => new BrowserSessionCookie
+                {
+                    Name = cookie.Name,
+                    Value = cookie.Value,
+                    Domain = cookie.Domain,
+                    Path = cookie.Path,
+                    IsSecure = cookie.IsSecure,
+                    IsHttpOnly = cookie.IsHttpOnly
+                }).ToList();
+            }
+        }
+
+        internal static int Count
+        {
+            get { lock (Sync) return Cookies.Count; }
+        }
+
+        internal static void Clear()
+        {
+            lock (Sync) Cookies.Clear();
+        }
+
+        private static bool IsCookieDomainAllowed(string value)
+        {
+            string domain = (value ?? "").Trim().TrimStart('.').ToLowerInvariant();
+            IPAddress address;
+            return domain.Length > 0 && domain.IndexOf('.') > 0 &&
+                domain != "localhost" && !IPAddress.TryParse(domain, out address);
+        }
+    }
+
     internal sealed partial class Checker
     {
         private static readonly string[] RemovedSignals = new[]
@@ -1728,7 +1804,7 @@ namespace LinkDispositionChecker
         private static readonly SemaphoreSlim KuaishouProbeGate = new SemaphoreSlim(1, 1);
         private static readonly SemaphoreSlim BilibiliProbeGate = new SemaphoreSlim(1, 1);
         private static readonly SemaphoreSlim RenderedSocialProbeGate = new SemaphoreSlim(1, 1);
-        private static readonly SemaphoreSlim PublicCloudProbeGate = new SemaphoreSlim(1, 1);
+        private static readonly SemaphoreSlim PublicCloudProbeGate = new SemaphoreSlim(2, 2);
         private static readonly object PublicCloudProbeTimingSync = new object();
         private static DateTime _lastPublicCloudProbeStartedUtc = DateTime.MinValue;
         private static readonly object ZhihuProbeTimingSync = new object();
@@ -1859,6 +1935,7 @@ namespace LinkDispositionChecker
         private sealed class PlatformProbeOutcome
         {
             public bool Resolved;
+            public bool PublicCloudAttempted;
             public string Verdict;
             public string Evidence;
             public string FinalUrl;
@@ -1970,28 +2047,29 @@ namespace LinkDispositionChecker
             ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls | (SecurityProtocolType)768 | SecurityProtocolType.Tls12;
             ServicePointManager.Expect100Continue = false;
             ServicePointManager.DefaultConnectionLimit = 64;
-            _client = CreateClient(true);
-            _directClient = CreateClient(false);
-            _zhihuClient = CreateClient(true);
-            _remoteEvidenceClient = CreateClient(true);
+            _client = CreateClient(true, ShouldAttachBrowserCookies(false));
+            _directClient = CreateClient(false, ShouldAttachBrowserCookies(false));
+            _zhihuClient = CreateClient(true, ShouldAttachBrowserCookies(false));
+            _remoteEvidenceClient = CreateClient(true, ShouldAttachBrowserCookies(true));
             _remoteEvidenceClient.Timeout = TimeSpan.FromSeconds(25);
             // Globalping's anonymous hourly allowance is counted by the API caller's
             // public IP. Keep the control API off the target-page/system proxy route
             // so a saturated shared proxy does not block otherwise available evidence.
-            _globalpingClient = CreateClient(false);
+            _globalpingClient = CreateClient(false, ShouldAttachBrowserCookies(true));
             _globalpingClient.Timeout = TimeSpan.FromSeconds(30);
             _bodyBytes = Math.Max(180000, bodyBytes);
         }
 
-        private static HttpClient CreateClient(bool useSystemProxy)
+        private static HttpClient CreateClient(bool useSystemProxy, bool includeBrowserCookies)
         {
+            CookieContainer cookieContainer = CreateCookieContainer(includeBrowserCookies);
             var handler = new HttpClientHandler
             {
                 AllowAutoRedirect = true,
                 MaxAutomaticRedirections = 8,
                 AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate,
                 UseCookies = true,
-                CookieContainer = new CookieContainer(),
+                CookieContainer = cookieContainer,
                 UseProxy = useSystemProxy
             };
             if (useSystemProxy)
@@ -2014,6 +2092,46 @@ namespace LinkDispositionChecker
             client.DefaultRequestHeaders.TryAddWithoutValidation("Accept", "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8");
             client.DefaultRequestHeaders.TryAddWithoutValidation("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.6");
             return client;
+        }
+
+        internal static CookieContainer CreateCookieContainer(bool includeBrowserCookies)
+        {
+            var cookieContainer = new CookieContainer();
+            if (includeBrowserCookies)
+            {
+                foreach (BrowserSessionCookie source in AuthenticatedCookieBridge.Snapshot())
+                {
+                    try
+                    {
+                        string domain = (source.Domain ?? "").Trim();
+                        string cookieDomain = domain.TrimStart('.');
+                        if (cookieDomain.Length == 0 || cookieDomain.IndexOf('.') < 0) continue;
+                        var cookie = new Cookie(source.Name, source.Value ?? "",
+                            String.IsNullOrWhiteSpace(source.Path) ? "/" : source.Path, domain)
+                        {
+                            Secure = source.IsSecure,
+                            HttpOnly = source.IsHttpOnly
+                        };
+                        cookieContainer.Add(new Uri("https://" + cookieDomain + "/"), cookie);
+                    }
+                    catch { }
+                }
+            }
+            return cookieContainer;
+        }
+
+        // Remote/public evidence must remain anonymous even when a local
+        // browser session has been prepared. This keeps credentials scoped to
+        // the user's own direct HTTP evidence route.
+        internal static bool ShouldAttachBrowserCookies(bool remoteEvidence)
+        {
+            return !remoteEvidence;
+        }
+
+        internal static bool IsQuickPassEnabled()
+        {
+            return String.Equals(Environment.GetEnvironmentVariable("LINK_CHECKER_QUICK_PASS"), "1",
+                StringComparison.OrdinalIgnoreCase);
         }
 
         internal static IWebProxy ResolveConfiguredProxy()
@@ -2153,6 +2271,7 @@ namespace LinkDispositionChecker
                 result.Duration = "0.0s";
                 return result;
             }
+            bool publicCloudAttempted = false;
 
             if (IsBaiduDtArticle(uri))
             {
@@ -2189,11 +2308,14 @@ namespace LinkDispositionChecker
 
                     Uri platformProbeUri = SelectPlatformProbeUri(uri, result.FinalUrl);
                     PlatformProbeOutcome platformProbe = await ProbePlatformContentAsync(platformProbeUri, expectedTitle, expectedExcerpt, expectedAuthor, token);
+                    publicCloudAttempted = platformProbe != null && platformProbe.PublicCloudAttempted;
                     if ((platformProbe == null || !platformProbe.Resolved) &&
                         platformProbeUri != null && uri != null &&
                         !String.Equals(platformProbeUri.AbsoluteUri, uri.AbsoluteUri, StringComparison.OrdinalIgnoreCase))
                     {
                         PlatformProbeOutcome originalProbe = await ProbePlatformContentAsync(uri, expectedTitle, expectedExcerpt, expectedAuthor, token);
+                        publicCloudAttempted = publicCloudAttempted ||
+                            (originalProbe != null && originalProbe.PublicCloudAttempted);
                         if (originalProbe != null && (platformProbe == null || originalProbe.Resolved))
                             platformProbe = originalProbe;
                     }
@@ -2224,9 +2346,10 @@ namespace LinkDispositionChecker
                     // the independent reader is known to preserve the target
                     // article/post, take one bounded cloud reading before the
                     // generic 200-page heuristics classify it as review.
-                    if ((platformProbe == null || !platformProbe.Resolved) && code >= 200 && code < 300 &&
+                    if (!publicCloudAttempted && (platformProbe == null || !platformProbe.Resolved) && code >= 200 && code < 300 &&
                         ShouldTryPublicCloudForUnresolved(uri, result))
                     {
+                        publicCloudAttempted = true;
                         RemoteEvidenceResponse publicCloud = await TryPublicCloudEvidenceAsync(uri, token,
                             result.ExpectedTitle, result.ExpectedExcerpt, result.ExpectedAuthor);
                         if (ApplyRemoteEvidence(result, publicCloud, "public-cloud-reader", result.EvidenceTrail ?? new List<VerificationEvidence>()))
@@ -2300,8 +2423,9 @@ namespace LinkDispositionChecker
                         // from an independent route.  Try one bounded reader only
                         // when it can return target-level evidence; a login page,
                         // empty shell, or failed reader remains unfinished.
-                        if (code == 403 && ShouldTryQuickPublicCloudOnTransportFailure(uri, result, code.ToString()))
+                        if (!publicCloudAttempted && code == 403 && ShouldTryQuickPublicCloudOnTransportFailure(uri, result, code.ToString()))
                         {
+                            publicCloudAttempted = true;
                             RemoteEvidenceResponse quickCloud = await TryPublicCloudEvidenceAsync(uri, token,
                                 result.ExpectedTitle, result.ExpectedExcerpt, result.ExpectedAuthor);
                             if (ApplyRemoteEvidence(result, quickCloud, "public-cloud-reader",
@@ -2317,9 +2441,10 @@ namespace LinkDispositionChecker
                         // independent read before leaving the row unfinished. This
                         // is especially important for Zhihu: the answer API often
                         // returns 403 even when the answer is still public.
-                        if (platformProbe == null && ShouldTryPublicCloudForUnresolved(uri, result) &&
+                        if (!publicCloudAttempted && platformProbe == null && ShouldTryPublicCloudForUnresolved(uri, result) &&
                             (code == 403 || code == 407))
                         {
+                            publicCloudAttempted = true;
                             RemoteEvidenceResponse restrictedCloud = await TryPublicCloudEvidenceAsync(uri, token,
                                 result.ExpectedTitle, result.ExpectedExcerpt, result.ExpectedAuthor);
                             if (ApplyRemoteEvidence(result, restrictedCloud, "public-cloud-reader",
@@ -2345,11 +2470,12 @@ namespace LinkDispositionChecker
                             result.Evidence = "访问被限制（HTTP " + code + "），不能据此判定已处置";
                         }
                     }
-                    else if (code >= 200 && code < 300 && platformProbe == null &&
+                    else if (!publicCloudAttempted && code >= 200 && code < 300 && platformProbe == null &&
                         ShouldTryPublicCloudForUnresolved(uri, result) &&
                         (LooksLikeLogin(result.FinalUrl) ||
                          !String.IsNullOrEmpty(FindSignal((title + " " + visibleForAi).ToLowerInvariant(), RestrictedSignals))))
                     {
+                        publicCloudAttempted = true;
                         RemoteEvidenceResponse restrictedShellCloud = await TryPublicCloudEvidenceAsync(uri, token,
                             result.ExpectedTitle, result.ExpectedExcerpt, result.ExpectedAuthor);
                         if (ApplyRemoteEvidence(result, restrictedShellCloud, "public-cloud-reader",
@@ -2366,8 +2492,9 @@ namespace LinkDispositionChecker
                     }
                     else if (code >= 500)
                     {
-                        if (ShouldTryQuickPublicCloudOnTransportFailure(uri, result, code.ToString()))
+                        if (!publicCloudAttempted && ShouldTryQuickPublicCloudOnTransportFailure(uri, result, code.ToString()))
                         {
+                            publicCloudAttempted = true;
                             RemoteEvidenceResponse quickCloud = await TryPublicCloudEvidenceAsync(uri, token,
                                 result.ExpectedTitle, result.ExpectedExcerpt, result.ExpectedAuthor);
                             if (ApplyRemoteEvidence(result, quickCloud, "public-cloud-reader",
@@ -2516,8 +2643,9 @@ namespace LinkDispositionChecker
             catch (TaskCanceledException)
             {
                 if (token.IsCancellationRequested) throw;
-                if (ShouldTryQuickPublicCloudOnTransportFailure(uri, result, "超时"))
+                if (!publicCloudAttempted && ShouldTryQuickPublicCloudOnTransportFailure(uri, result, "超时"))
                 {
+                    publicCloudAttempted = true;
                     RemoteEvidenceResponse quickCloud = TryPublicCloudEvidenceAsync(uri, token,
                         result.ExpectedTitle, result.ExpectedExcerpt, result.ExpectedAuthor).GetAwaiter().GetResult();
                     if (ApplyRemoteEvidence(result, quickCloud, "public-cloud-reader",
@@ -2534,8 +2662,9 @@ namespace LinkDispositionChecker
             }
             catch (HttpRequestException ex)
             {
-                if (ShouldTryQuickPublicCloudOnTransportFailure(uri, result, "连接失败"))
+                if (!publicCloudAttempted && ShouldTryQuickPublicCloudOnTransportFailure(uri, result, "连接失败"))
                 {
+                    publicCloudAttempted = true;
                     RemoteEvidenceResponse quickCloud = TryPublicCloudEvidenceAsync(uri, token,
                         result.ExpectedTitle, result.ExpectedExcerpt, result.ExpectedAuthor).GetAwaiter().GetResult();
                     if (ApplyRemoteEvidence(result, quickCloud, "public-cloud-reader",
@@ -2680,8 +2809,10 @@ namespace LinkDispositionChecker
                             dcdOfficialHeaders, token);
                         string dcdOfficialText = dcdOfficialProbe == null ? "" : (dcdOfficialProbe.Body ?? "");
                         string dcdOfficialSource = "official-api";
-                        if (!TryMatchDongchediArticleResponse(dcdOfficialText, dcdId,
-                            expectedTitle, expectedExcerpt, expectedAuthor))
+                        bool dcdOfficialTransportFailed = dcdOfficialProbe == null ||
+                            dcdOfficialProbe.Status == 401 || dcdOfficialProbe.Status == 403 ||
+                            dcdOfficialProbe.Status == 407 || dcdOfficialProbe.Status >= 500;
+                        if (dcdOfficialTransportFailed)
                         {
                             RemoteEvidenceResponse dcdOfficial = await TryChinaEyeballDirectEvidenceAsync(dcdOfficialUri, token);
                             dcdOfficialText = dcdOfficial == null || !String.IsNullOrWhiteSpace(dcdOfficial.Error) ||
@@ -2693,38 +2824,10 @@ namespace LinkDispositionChecker
                             return ProbeOutcome(EvidenceKind.TargetContentPresent, EvidenceStrength.Conclusive,
                                 dcdOfficialSource, "懂车帝", dcdId,
                                 dcdOfficialSource == "official-api"
-                                    ? "懂车帝官方详情接口返回目标编号、可见状态、匹配正文和作者"
-                                    : "懂车帝官方详情接口由中国普通宽带返回目标编号、可见状态、匹配正文和作者",
+                                    ? "懂车帝官方详情接口返回目标编号、可见状态和非空当前正文；标题或账号可能已修改"
+                                    : "懂车帝官方详情接口由中国普通宽带返回目标编号、可见状态和非空当前正文；标题或账号可能已修改",
                                 dcdOfficialUri.AbsoluteUri, true);
                     }
-                    RemoteEvidenceResponse dcdCloud = await TryPublicCloudEvidenceAsync(original, token);
-                    string dcdCloudText = WebUtility.HtmlDecode((dcdCloud == null ? "" :
-                        (dcdCloud.Title ?? "") + " " + (dcdCloud.Text ?? "")));
-                    if (dcdCloud != null && String.IsNullOrWhiteSpace(dcdCloud.Error) && dcdCloud.Status == 200 &&
-                        MatchesExpectedContent(expectedTitle, expectedExcerpt, dcdCloudText) &&
-                        (String.IsNullOrWhiteSpace(expectedAuthor) || MatchesExpectedAuthor(expectedAuthor, dcdCloudText)))
-                        return ProbeOutcome(EvidenceKind.TargetContentPresent, EvidenceStrength.Strong,
-                            "public-cloud-reader", "懂车帝", "", "懂车帝独立公开读取线路返回匹配标题/正文/作者", dcdCloud.FinalUrl, true);
-                    if (dcdCloud != null && String.IsNullOrWhiteSpace(dcdCloud.Error) && dcdCloud.Status == 200 &&
-                        Regex.IsMatch(dcdCloudText, "文章不存在|内容不存在|作品不存在|已删除|已下线", RegexOptions.IgnoreCase))
-                        return ProbeOutcome(EvidenceKind.TargetRemovalExplicit, EvidenceStrength.Strong,
-                            "public-cloud-reader", "懂车帝", "", "懂车帝独立公开读取线路明确提示目标内容不存在或已删除", dcdCloud.FinalUrl, true);
-                }
-                // Jina can expose a cached target article even when the live
-                // DCD page is a login shell.  A cache hit is accepted only when
-                // the imported title/excerpt (and author, when supplied) match;
-                // a generic login shell remains unresolved.
-                if (String.Equals(Environment.GetEnvironmentVariable("LINK_CHECKER_QUICK_PASS"), "1",
-                    StringComparison.OrdinalIgnoreCase))
-                {
-                    RemoteEvidenceResponse cachedDcd = await TryPublicCloudEvidenceAsync(original, token);
-                    string cachedText = WebUtility.HtmlDecode(cachedDcd == null ? "" :
-                        (cachedDcd.Title ?? "") + " " + (cachedDcd.Text ?? ""));
-                    if (cachedDcd != null && String.IsNullOrWhiteSpace(cachedDcd.Error) && cachedDcd.Status == 200 &&
-                        MatchesExpectedContent(expectedTitle, expectedExcerpt, cachedText) &&
-                        (String.IsNullOrWhiteSpace(expectedAuthor) || MatchesExpectedAuthor(expectedAuthor, cachedText)))
-                        return ProbeOutcome(EvidenceKind.TargetContentPresent, EvidenceStrength.Strong,
-                            "public-cloud-reader", "懂车帝", "", "懂车帝公开缓存返回匹配目标标题/正文/作者", cachedDcd.FinalUrl, true);
                 }
                 return null;
             }
@@ -2864,6 +2967,8 @@ namespace LinkDispositionChecker
             if (host.EndsWith("kuaishou.com", StringComparison.Ordinal) || host.EndsWith("gifshow.com", StringComparison.Ordinal))
             {
                 identity = Regex.Match(original.AbsolutePath ?? "", @"/(?:short-video|fw/photo)/([A-Za-z0-9]{10,})", RegexOptions.IgnoreCase);
+                if (!identity.Success)
+                    identity = Regex.Match(original.AbsolutePath ?? "", @"/u/[A-Za-z0-9_-]+/([A-Za-z0-9]{10,})(?:/|$)", RegexOptions.IgnoreCase);
                 if (identity.Success)
                 {
                     string id = identity.Groups[1].Value;
@@ -2902,27 +3007,41 @@ namespace LinkDispositionChecker
                     try
                     {
                         probe = await TryReadProbeAsync(probeUrl, headers, token);
-                        if (probe == null || probe.Status != 200 ||
-                            (probe.Body ?? "").IndexOf("photoId=" + id, StringComparison.OrdinalIgnoreCase) < 0)
+                        string firstBody = probe == null ? "" : (probe.Body ?? "");
+                        string firstCaption;
+                        string firstAuthor;
+                        bool firstTarget = probe != null && probe.Status == 200 &&
+                            (TryMatchKuaishouSsrTarget(firstBody, id, out firstCaption, out firstAuthor) ||
+                             IsKuaishouRemovedSsrContent(firstBody, id));
+                        if (!firstTarget)
                         {
                             await Task.Delay(250, token);
-                            probe = await TryReadProbeAsync(probeUrl, headers, token);
+                            ProbeResponse directProbe = await ReadProbeWithClientAsync(_directClient,
+                                probeUrl, headers, token);
+                            if (directProbe != null && directProbe.Status == 200) probe = directProbe;
                         }
                     }
                     finally { KuaishouProbeGate.Release(); }
-                    string currentCaption;
-                    string currentAuthor;
+                    string currentCaption = "";
+                    string currentAuthor = "";
                     if (probe != null && probe.Status == 200 &&
                         IsKuaishouRemovedSsrContent(probe.Body, id))
                         return ProbeOutcome(EvidenceKind.TargetRemovalExplicit, EvidenceStrength.Conclusive,
                             "official-mobile-page", "快手", id,
                             "快手官方作品页针对该作品返回“获取失败，作品可能已被删除或尚未上传”",
                             probe.FinalUrl, true);
-                    if (probe != null && probe.Status == 200 &&
-                        TryMatchKuaishouSsrContent(probe.Body, id, expectedTitle, expectedAuthor, out currentCaption, out currentAuthor))
+                    bool metadataMatch = probe != null && probe.Status == 200 &&
+                        TryMatchKuaishouSsrContent(probe.Body, id, expectedTitle, expectedAuthor, out currentCaption, out currentAuthor);
+                    bool targetPublished = probe != null && probe.Status == 200 &&
+                        TryMatchKuaishouSsrTarget(probe.Body, id, out currentCaption, out currentAuthor);
+                    if (targetPublished)
                         return ProbeOutcome(EvidenceKind.TargetContentPresent, EvidenceStrength.Conclusive,
-                            "official-mobile-page", "快手", id, "快手官方移动页返回目标作品编号、公开状态、匹配文案" +
-                                (String.IsNullOrWhiteSpace(currentAuthor) ? "" : "和作者“" + currentAuthor + "”"), probe.FinalUrl, true);
+                            "official-mobile-page", "快手", id,
+                            metadataMatch
+                                ? "快手官方移动页返回目标作品编号、公开状态、匹配文案" +
+                                    (String.IsNullOrWhiteSpace(currentAuthor) ? "" : "和作者“" + currentAuthor + "”")
+                                : "快手官方移动页返回目标作品编号、公开状态和非空作品数据；标题或账号可能已修改",
+                            probe.FinalUrl, true);
                 }
             }
             if (host.EndsWith("share.dzh.com.cn", StringComparison.Ordinal))
@@ -3042,6 +3161,7 @@ namespace LinkDispositionChecker
                                     ? EvidenceKind.TargetRemovalExplicit : EvidenceKind.TargetContentPresent,
                                 EvidenceStrength.Strong, "public-cloud-reader", "雪球", id,
                                 cloudResult.Evidence, cloudResult.FinalUrl, true);
+                        return new PlatformProbeOutcome { Resolved = false, PublicCloudAttempted = true };
                     }
                     PlatformProbeOutcome xueqiuProbe = await ProbeRenderedSocialPostAsync(original.AbsoluteUri,
                         "雪球", id, expectedTitle, expectedExcerpt, expectedAuthor, token);
@@ -3641,9 +3761,12 @@ namespace LinkDispositionChecker
                         bool idMatch = (probe.FinalUrl ?? probeUrl).IndexOf("/wenzhang/" + id, StringComparison.OrdinalIgnoreCase) >= 0;
                         bool contentMatch = MatchesExpectedContent(expectedTitle, expectedExcerpt, ExtractTitle(probe.Body) + " " + visible);
                         bool authorMatch = MatchesExpectedAuthor(expectedAuthor, visible + " " + (probe.Body ?? ""));
-                        if (idMatch && contentMatch && (String.IsNullOrWhiteSpace(expectedAuthor) || authorMatch))
+                        bool exactTitle = MatchesExpectedTitle(expectedTitle, ExtractTitle(probe.Body));
+                        if (idMatch && contentMatch && (String.IsNullOrWhiteSpace(expectedAuthor) || authorMatch || exactTitle))
                             return ProbeOutcome(EvidenceKind.TargetContentPresent, EvidenceStrength.Conclusive,
-                                "official-mobile-page", "易车", id, "易车官方移动正文页返回目标编号、匹配标题和发文作者", probe.FinalUrl, true);
+                                "official-mobile-page", "易车", id, exactTitle && !authorMatch
+                                    ? "易车官方移动正文页返回目标编号和精确匹配标题"
+                                    : "易车官方移动正文页返回目标编号、匹配标题和发文作者", probe.FinalUrl, true);
                     }
                 }
             }
@@ -3838,9 +3961,21 @@ namespace LinkDispositionChecker
                 finally { ZhihuProbeGate.Release(); }
                 if (probe == null) return null;
                 string body = probe.Body;
-                if ((probe.Status == 404 || probe.Status == 410) && IsZhihuRemovedApiResponse(body))
-                    return ProbeOutcome(EvidenceKind.TargetRemovalExplicit, EvidenceStrength.Conclusive,
-                        "official-api", "知乎", id, "知乎公开回答接口确认目标回答不存在", probeUrl, true);
+                if (probe.Status == 404 || probe.Status == 410)
+                {
+                    if (IsZhihuRemovedApiResponse(body))
+                        return ProbeOutcome(EvidenceKind.TargetRemovalExplicit, EvidenceStrength.Conclusive,
+                            "official-api", "知乎", id, "知乎公开回答接口确认目标回答不存在", probeUrl, true);
+                    RemoteEvidenceResponse answerReader = await ReadPublicCloudEvidenceOnceAsync(original, token);
+                    string readerText = answerReader == null ? "" :
+                        (answerReader.FinalUrl ?? "") + " " + (answerReader.Title ?? "") + " " + (answerReader.Text ?? "");
+                    if (answerReader != null && String.IsNullOrWhiteSpace(answerReader.Error) &&
+                        answerReader.Status == 200 &&
+                        IsZhihuAnswerUnavailableEvidence(body, original.AbsoluteUri, readerText))
+                        return ProbeOutcome(EvidenceKind.TargetRemovalExplicit, EvidenceStrength.Conclusive,
+                            "official-api+public-reader", "知乎", id,
+                            "知乎精确回答接口返回目标编号不存在，且目标回答页明确跳回所在问题页", original.AbsoluteUri, true);
+                }
                 // A Zhihu anti-bot response is not deletion evidence. Keep the item
                 // unfinished so a later browser pass can use the answer-page redirect.
                 if (probe.Status == 403) return null;
@@ -4755,8 +4890,51 @@ namespace LinkDispositionChecker
             try { finalSource = WebUtility.UrlDecode(WebUtility.UrlDecode(finalSource)); }
             catch { }
             bool marker = source.IndexOf("pc-error-no-hidden", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                finalSource.IndexOf("pc-error-no-hidden", StringComparison.OrdinalIgnoreCase) >= 0;
+                finalSource.IndexOf("pc-error-no-hidden", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                Regex.IsMatch(finalSource, @"(?:[?&#]|%3[fF]|%26)from(?:=|%3[dD])(?:pc-)?error(?:[&#]|$|%26)", RegexOptions.IgnoreCase);
             return !sameArticle && homeRedirect && marker;
+        }
+
+        internal static bool IsAutohomeArticleErrorRedirectForTest(string requestedUrl, string finalUrl)
+        {
+            Uri requested;
+            return Uri.TryCreate(requestedUrl, UriKind.Absolute, out requested) &&
+                IsAutohomeArticleErrorRedirect(requested, finalUrl, "");
+        }
+
+        internal static string ExtractKuaishouIdForTest(string url)
+        {
+            Uri uri;
+            if (!Uri.TryCreate(url ?? "", UriKind.Absolute, out uri)) return "";
+            Match match = Regex.Match(uri.AbsolutePath ?? "",
+                @"/(?:short-video|fw/photo)/([A-Za-z0-9]{10,})", RegexOptions.IgnoreCase);
+            if (!match.Success)
+                match = Regex.Match(uri.AbsolutePath ?? "",
+                    @"/u/[A-Za-z0-9_-]+/([A-Za-z0-9]{10,})(?:/|$)", RegexOptions.IgnoreCase);
+            return match.Success ? match.Groups[1].Value : "";
+        }
+
+        internal static bool IsZhihuAnswerUnavailableEvidence(string apiBody, string requestedUrl,
+            string readerText)
+        {
+            string source = apiBody ?? "";
+            Uri requested;
+            if (!Uri.TryCreate(requestedUrl ?? "", UriKind.Absolute, out requested) ||
+                !requested.Host.EndsWith("zhihu.com", StringComparison.OrdinalIgnoreCase)) return false;
+            Match identity = Regex.Match(requested.AbsolutePath ?? "",
+                @"/question/([0-9]+)/answer/([0-9]+)", RegexOptions.IgnoreCase);
+            if (!identity.Success) return false;
+            bool exactApiMissing = ExtractJsonInt(source, "code", Int32.MinValue) == 4041 &&
+                Regex.IsMatch(source, "ResourceNotFoundException", RegexOptions.IgnoreCase);
+            if (!exactApiMissing) return false;
+            string text = WebUtility.HtmlDecode(readerText ?? "");
+            bool targetReader = text.IndexOf(requested.AbsoluteUri, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                (text.IndexOf(identity.Groups[1].Value, StringComparison.OrdinalIgnoreCase) >= 0 &&
+                 text.IndexOf(identity.Groups[2].Value, StringComparison.OrdinalIgnoreCase) >= 0);
+            bool explicitAnswerRedirect = Regex.IsMatch(text,
+                "没有知识存在的荒原[\\s\\S]{0,1000}(?:自动)?跳转至回答所在的问题页|回答不存在[\\s\\S]{0,600}问题页",
+                RegexOptions.IgnoreCase);
+            return targetReader && explicitAnswerRedirect;
         }
 
         internal static bool TryMatchBilibiliArticleInfo(string json, string id, string expectedTitle,
@@ -4890,8 +5068,42 @@ namespace LinkDispositionChecker
             string content = ExtractJsonStringLong(source, "content", 50000);
             string author = ExtractJsonStringLong(source, "screen_name", 2000);
             string combined = title + " " + ExtractVisibleText(content);
-            if (!MatchesExpectedContent(expectedTitle, expectedExcerpt, combined)) return false;
-            return String.IsNullOrWhiteSpace(expectedAuthor) || MatchesExpectedAuthor(expectedAuthor, author);
+            bool publishedPayload = CleanText(combined, 50000).Length >= 20;
+            // The official endpoint is keyed by the immutable group id and the
+            // response echoes that id, is_visible=true and the current payload.
+            // Titles, account names and even article text can be edited later;
+            // those fields are consistency signals, not a prerequisite for
+            // confirming that this exact link still exists.
+            return publishedPayload;
+        }
+
+        internal static bool TryMatchKuaishouSsrTarget(string html, string shortId,
+            out string currentCaption, out string currentAuthor)
+        {
+            currentCaption = "";
+            currentAuthor = "";
+            if (String.IsNullOrWhiteSpace(html) || String.IsNullOrWhiteSpace(shortId)) return false;
+            Match identity = Regex.Match(html,
+                "\\\"share_info\\\"\\s*:\\s*\\\"[^\\\"]*photoId=" + Regex.Escape(shortId) + "(?:&|\\\")",
+                RegexOptions.IgnoreCase);
+            if (!identity.Success) return false;
+            int start = Math.Max(0, identity.Index - 24000);
+            int length = Math.Min(html.Length - start, identity.Index - start + identity.Length + 1200);
+            string targetBlock = html.Substring(start, length);
+            string statusBlock = targetBlock.Substring(Math.Max(0, identity.Index - start));
+            if (!Regex.IsMatch(statusBlock, "\\\"photoStatus\\\"\\s*:\\s*0(?:[^0-9]|$)",
+                RegexOptions.IgnoreCase)) return false;
+            MatchCollection captions = Regex.Matches(targetBlock,
+                "\\\"caption\\\"\\s*:\\s*\\\"((?:\\\\.|[^\\\"])*)\\\"", RegexOptions.IgnoreCase);
+            MatchCollection authors = Regex.Matches(targetBlock,
+                "\\\"userName\\\"\\s*:\\s*\\\"((?:\\\\.|[^\\\"])*)\\\"", RegexOptions.IgnoreCase);
+            if (captions.Count == 0) return false;
+            currentCaption = CleanText(WebUtility.HtmlDecode(DecodeJsonUnicode(
+                Regex.Unescape(captions[captions.Count - 1].Groups[1].Value))), 1000);
+            if (authors.Count > 0)
+                currentAuthor = CleanText(WebUtility.HtmlDecode(DecodeJsonUnicode(
+                    Regex.Unescape(authors[authors.Count - 1].Groups[1].Value))), 180);
+            return !String.IsNullOrWhiteSpace(currentCaption);
         }
 
         internal static bool TryMatchHexunNewsResponse(string json, string id, string expectedTitle, string expectedExcerpt)
@@ -6189,7 +6401,6 @@ namespace LinkDispositionChecker
                 host.EndsWith("iesdouyin.com", StringComparison.Ordinal) ||
                 host.EndsWith("mbd.baidu.com", StringComparison.Ordinal) ||
                 host.EndsWith("baijiahao.baidu.com", StringComparison.Ordinal) ||
-                host.EndsWith("mp.weixin.qq.com", StringComparison.Ordinal) ||
                 host.EndsWith("xueqiu.com", StringComparison.Ordinal) ||
                 host.EndsWith("dcdapp.com", StringComparison.Ordinal) ||
                 host.EndsWith("dongchedi.com", StringComparison.Ordinal) ||
@@ -6331,43 +6542,29 @@ namespace LinkDispositionChecker
             await PublicCloudProbeGate.WaitAsync(token);
             try
             {
+                int spacing = IsQuickPassEnabled() ? 850 : 3200;
                 int delay;
                 lock (PublicCloudProbeTimingSync)
                 {
-                    delay = Math.Max(0,
-                        (int)(_lastPublicCloudProbeStartedUtc.AddMilliseconds(3200) - DateTime.UtcNow).TotalMilliseconds);
+                    DateTime now = DateTime.UtcNow;
+                    DateTime nextAllowed = _lastPublicCloudProbeStartedUtc.AddMilliseconds(spacing);
+                    delay = Math.Max(0, (int)(nextAllowed - now).TotalMilliseconds);
+                    _lastPublicCloudProbeStartedUtc = now.AddMilliseconds(delay);
                 }
                 if (delay > 0) await Task.Delay(delay, token);
-                lock (PublicCloudProbeTimingSync) _lastPublicCloudProbeStartedUtc = DateTime.UtcNow;
 
                 RemoteEvidenceResponse primary = await ReadPublicCloudEvidenceOnceAsync(target, token);
-                bool zhihuTarget = target != null && target.Host.EndsWith("zhihu.com", StringComparison.OrdinalIgnoreCase);
-                if (zhihuTarget && PublicReaderEvidenceScore(target, primary,
-                    expectedTitle, expectedExcerpt, expectedAuthor) < 500)
-                {
-                    RemoteEvidenceResponse primaryRetry = await ReadPublicCloudEvidenceOnceAsync(target, token);
-                    if (PublicReaderEvidenceScore(target, primaryRetry,
-                        expectedTitle, expectedExcerpt, expectedAuthor) >
-                        PublicReaderEvidenceScore(target, primary, expectedTitle, expectedExcerpt, expectedAuthor))
-                        primary = primaryRetry;
-                }
+                // Once the primary reader has returned target-matching content
+                // (or an explicit target removal state), another protocol adds
+                // no evidence. Stopping here avoids unnecessary slow calls and
+                // reduces pressure on the shared public-reader route.
+                if (HasSufficientPublicReaderEvidence(target, primary,
+                    expectedTitle, expectedExcerpt, expectedAuthor)) return primary;
                 Uri alternateTarget;
                 if (!ShouldTryAlternatePublicReaderProtocol(target, primary, out alternateTarget))
                     return primary;
 
                 RemoteEvidenceResponse alternate = await ReadPublicCloudEvidenceOnceAsync(alternateTarget, token);
-                if (ShouldRetryAlternatePublicReaderEvidence(target, alternate))
-                    alternate = await ReadPublicCloudEvidenceOnceAsync(alternateTarget, token);
-                if (zhihuTarget && PublicReaderEvidenceScore(alternateTarget, alternate,
-                    expectedTitle, expectedExcerpt, expectedAuthor) < 500)
-                {
-                    RemoteEvidenceResponse alternateRetry = await ReadPublicCloudEvidenceOnceAsync(alternateTarget, token);
-                    if (PublicReaderEvidenceScore(alternateTarget, alternateRetry,
-                        expectedTitle, expectedExcerpt, expectedAuthor) >
-                        PublicReaderEvidenceScore(alternateTarget, alternate,
-                            expectedTitle, expectedExcerpt, expectedAuthor))
-                        alternate = alternateRetry;
-                }
                 return SelectPublicReaderEvidence(target, primary, alternate,
                     expectedTitle, expectedExcerpt, expectedAuthor);
             }
@@ -6391,8 +6588,9 @@ namespace LinkDispositionChecker
                 {
                     request.Headers.TryAddWithoutValidation("x-no-cache", "true");
                     request.Headers.TryAddWithoutValidation("x-engine", "browser");
-                    request.Headers.TryAddWithoutValidation("x-timeout", "18");
-                    request.Headers.TryAddWithoutValidation("x-max-tokens", "12000");
+                    bool quickPass = IsQuickPassEnabled();
+                    request.Headers.TryAddWithoutValidation("x-timeout", quickPass ? "8" : "18");
+                    request.Headers.TryAddWithoutValidation("x-max-tokens", quickPass ? "8000" : "12000");
                     using (HttpResponseMessage response = await _remoteEvidenceClient.SendAsync(request, token))
                 {
                     string body = await ReadLimitedBodyAsync(response.Content,
@@ -6541,6 +6739,14 @@ namespace LinkDispositionChecker
                 @"^\s*(?:雪球\s*[-—]\s*聪明的投资者都在这里|知乎\s*[-—]\s*有问题，?就会有答案)\s*$",
                 RegexOptions.IgnoreCase);
             return genericShell ? 0 : Math.Min(300, CleanText(text, 12000).Length);
+        }
+
+        internal static bool HasSufficientPublicReaderEvidence(Uri requested,
+            RemoteEvidenceResponse response, string expectedTitle, string expectedExcerpt,
+            string expectedAuthor)
+        {
+            return PublicReaderEvidenceScore(requested, response,
+                expectedTitle, expectedExcerpt, expectedAuthor) >= 500;
         }
 
         internal static bool IsZhihuPublicReaderEmptyState(Uri requested,
@@ -7619,6 +7825,7 @@ namespace LinkDispositionChecker
         private readonly Label _counter = new Label();
         private readonly Button _continue = new Button();
         private readonly Button _stop = new Button();
+        private readonly Button _clearLogin = new Button();
         private readonly ComboBox _loginPlatforms = new ComboBox();
         private readonly Button _openLoginPlatform = new Button();
         private readonly Dictionary<string, string> _loginTargets = new Dictionary<string, string>();
@@ -7628,18 +7835,21 @@ namespace LinkDispositionChecker
         private bool _processing;
         private bool _alternateAttemptedForCurrent;
         private bool _loginPreparation = true;
+        private bool _loginCaptured;
         private bool _completionShown;
         private readonly bool _fastMode;
         private readonly bool _autoStart;
+        private readonly bool _loginOnly;
         private readonly HashSet<string> _pausedPlatformKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         public int ResolvedCount { get; private set; }
 
         public DeepReviewForm(IEnumerable<CheckResult> items, Action<CheckResult> onProgress,
-            bool fastMode = false, bool autoStart = false)
+            bool fastMode = false, bool autoStart = false, bool loginOnly = false)
         {
             _fastMode = fastMode;
             _autoStart = autoStart;
+            _loginOnly = loginOnly;
             IEnumerable<CheckResult> sourceItems = items ?? Enumerable.Empty<CheckResult>();
             _items = fastMode ? sourceItems.ToList() : sourceItems
                 .OrderBy(GetReviewBatchOrder)
@@ -7647,7 +7857,7 @@ namespace LinkDispositionChecker
                 .ThenBy(item => item.Number)
                 .ToList();
             _onProgress = onProgress;
-            Text = fastMode ? "内置浏览器快速复核" : "内置浏览器深度复核";
+            Text = loginOnly ? "快速核验前登录准备" : fastMode ? "内置浏览器快速复核" : "内置浏览器深度复核";
             StartPosition = FormStartPosition.CenterParent;
             if (_autoStart)
             {
@@ -7660,7 +7870,7 @@ namespace LinkDispositionChecker
             BackColor = Color.FromArgb(244, 247, 251);
 
             var header = new Panel { Dock = DockStyle.Top, Height = 78, BackColor = Color.FromArgb(27, 62, 111), Padding = new Padding(18, 10, 18, 10) };
-            var title = new Label { Text = fastMode ? "内置浏览器快速复核" : "内置浏览器深度复核", ForeColor = Color.White, Font = new Font("微软雅黑", 16, FontStyle.Bold), AutoSize = true, Location = new Point(18, 8) };
+            var title = new Label { Text = loginOnly ? "快速核验前登录准备" : fastMode ? "内置浏览器快速复核" : "内置浏览器深度复核", ForeColor = Color.White, Font = new Font("微软雅黑", 16, FontStyle.Bold), AutoSize = true, Location = new Point(18, 8) };
             _counter.ForeColor = Color.FromArgb(206, 220, 239); _counter.AutoSize = true; _counter.Location = new Point(20, 46);
             header.Controls.Add(title); header.Controls.Add(_counter);
 
@@ -7669,10 +7879,11 @@ namespace LinkDispositionChecker
             footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 440));
             footer.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             _status.AutoEllipsis = true; _status.ForeColor = Color.FromArgb(55, 65, 81); _status.Dock = DockStyle.Fill; _status.Margin = new Padding(0, 0, 8, 0); _status.TextAlign = ContentAlignment.MiddleLeft;
-            StyleDeepButton(_continue, "准备后台复核", true); StyleDeepButton(_stop, "停止", false);
+            StyleDeepButton(_continue, loginOnly ? "完成登录并继续快速核验" : "准备后台复核", true); StyleDeepButton(_stop, "停止", false);
+            StyleDeepButton(_clearLogin, "停止本次使用", false); _clearLogin.Width = 125;
             _continue.Enabled = false;
             var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Padding = new Padding(0, 4, 0, 0), Margin = new Padding(0) };
-            buttons.Controls.Add(_continue); buttons.Controls.Add(_stop);
+            buttons.Controls.Add(_continue); buttons.Controls.Add(_clearLogin); buttons.Controls.Add(_stop);
             footer.Controls.Add(_status, 0, 0); footer.Controls.Add(buttons, 1, 0);
 
             var loginBar = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 52, BackColor = Color.FromArgb(232, 240, 250), Padding = new Padding(16, 8, 16, 6), WrapContents = false };
@@ -7689,6 +7900,14 @@ namespace LinkDispositionChecker
             Shown += async delegate { await InitializeAndStartAsync(); };
             _continue.Click += async delegate { await ContinueAfterVerificationAsync(); };
             _openLoginPlatform.Click += async delegate { await OpenSelectedLoginPlatformAsync(); };
+            _clearLogin.Click += delegate
+            {
+                AuthenticatedCookieBridge.Clear();
+                _loginCaptured = false;
+                _status.Text = "快速核验已停止使用登录 Cookie；内置浏览器中的平台登录状态未退出。";
+                _continue.Text = _loginOnly ? "完成登录并继续快速核验" : _fastMode ? "开始内置浏览器复核（登录可选）" : "开始后台复核（登录可选）";
+                _continue.Enabled = true;
+            };
             _stop.Click += delegate { _cancellation.Cancel(); Close(); };
             FormClosing += delegate { if (!_cancellation.IsCancellationRequested) _cancellation.Cancel(); };
         }
@@ -7704,7 +7923,7 @@ namespace LinkDispositionChecker
 
         private async Task InitializeAndStartAsync()
         {
-            if (_items.Count == 0) { _status.Text = _fastMode ? "没有需要内置浏览器快速复核的链接。" : "没有需要深度复核的链接。"; return; }
+            if (_items.Count == 0 && !_loginOnly) { _status.Text = _fastMode ? "没有需要内置浏览器快速复核的链接。" : "没有需要深度复核的链接。"; return; }
             try
             {
                 string userData = Environment.GetEnvironmentVariable("LINK_CHECKER_WEBVIEW_PROFILE");
@@ -7719,13 +7938,13 @@ namespace LinkDispositionChecker
                 _browser.CoreWebView2.Settings.AreDefaultContextMenusEnabled = true;
                 _browser.CoreWebView2.Settings.AreDefaultScriptDialogsEnabled = false;
                 PrepareLoginTargets();
-                _continue.Text = _fastMode ? "开始内置浏览器复核（登录可选）" : "开始后台复核（登录可选）";
-                _continue.Width = _fastMode ? 270 : 220;
+                _continue.Text = _loginOnly ? "完成登录并继续快速核验" : _fastMode ? "开始内置浏览器复核（登录可选）" : "开始后台复核（登录可选）";
+                _continue.Width = _loginOnly ? 270 : _fastMode ? 270 : 220;
                 _continue.Enabled = true;
-                _counter.Text = "准备开始，共 " + _items.Count + (_fastMode ? " 条待快速核验" : " 条待后台复核候选");
+                _counter.Text = _loginOnly ? "登录准备完成后，返回主窗口开始快速核验" : "准备开始，共 " + _items.Count + (_fastMode ? " 条待快速核验" : " 条待后台复核候选");
                 _status.Text = _loginTargets.Count == 0
-                    ? (_fastMode ? "可直接开始内置浏览器快速复核。" : "可直接点击“开始后台复核（登录可选）”。")
-                    : (_fastMode ? "登录是可选项；也可直接开始，工具会先检查各平台公开页面状态。" : BuildReviewBatchSummary() + "。这些是后台复核候选，不是要求你逐条手动查看的数量；登录是可选项，开始后会自动继续下一条。");
+                    ? (_loginOnly ? "没有发现可登录的平台；可关闭窗口直接开始快速核验。" : _fastMode ? "可直接开始内置浏览器快速复核。" : "可直接点击“开始后台复核（登录可选）”。")
+                    : (_loginOnly ? "请在上方选择平台完成登录；登录凭证只保存在本机浏览器会话中。" : _fastMode ? "登录是可选项；也可直接开始，工具会先检查各平台公开页面状态。" : BuildReviewBatchSummary() + "。这些是后台复核候选，不是要求你逐条手动查看的数量；登录是可选项，开始后会自动继续下一条。");
                 if (_loginPlatforms.Items.Count > 0) _loginPlatforms.SelectedIndex = 0;
                 if (_autoStart) await ContinueAfterVerificationAsync();
             }
@@ -7912,6 +8131,18 @@ namespace LinkDispositionChecker
         {
             if (_loginPreparation)
             {
+                if (_loginOnly)
+                {
+                    if (_loginCaptured) { Close(); return; }
+                    await CaptureBrowserCookiesAsync();
+                    _loginCaptured = true;
+                    _status.Text = "登录会话已保存到本机内存（Cookie 数量：" + AuthenticatedCookieBridge.Count + "）。可以关闭此窗口开始快速核验。";
+                    _continue.Text = "关闭登录准备";
+                    _continue.Enabled = true;
+                    _openLoginPlatform.Enabled = false;
+                    _loginPlatforms.Enabled = false;
+                    return;
+                }
                 _loginPreparation = false;
                 _continue.Text = _fastMode ? "内置浏览器复核进行中" : "后台复核进行中";
                 _continue.Width = 150;
@@ -7926,6 +8157,51 @@ namespace LinkDispositionChecker
                 else await ProcessCurrentAsync(true);
                 return;
             }
+        }
+
+        private async Task CaptureBrowserCookiesAsync()
+        {
+            var cookies = new List<BrowserSessionCookie>();
+            if (_browser == null || _browser.CoreWebView2 == null) return;
+            // Query one stable origin per login platform. Querying every input
+            // URL makes a large batch unnecessarily slow and can miss cookies
+            // scoped to the platform home domain.
+            var origins = CookieCaptureOrigins(_loginTargets.Values);
+            foreach (string origin in origins)
+            {
+                try
+                {
+                    IList<CoreWebView2Cookie> found = await _browser.CoreWebView2.CookieManager.GetCookiesAsync(origin);
+                    foreach (CoreWebView2Cookie cookie in found ?? new List<CoreWebView2Cookie>())
+                    {
+                        cookies.Add(new BrowserSessionCookie
+                        {
+                            Name = cookie.Name,
+                            Value = cookie.Value,
+                            Domain = cookie.Domain,
+                            Path = cookie.Path,
+                            IsSecure = cookie.IsSecure,
+                            IsHttpOnly = cookie.IsHttpOnly
+                        });
+                    }
+                }
+                catch { }
+            }
+            AuthenticatedCookieBridge.Replace(cookies);
+        }
+
+        internal static List<string> CookieCaptureOrigins(IEnumerable<string> loginTargets)
+        {
+            return (loginTargets ?? Enumerable.Empty<string>())
+                .Select(value =>
+                {
+                    Uri uri;
+                    return Uri.TryCreate(value, UriKind.Absolute, out uri)
+                        ? uri.GetLeftPart(UriPartial.Authority) + "/" : "";
+                })
+                .Where(value => !String.IsNullOrWhiteSpace(value))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
         }
 
         private async Task ProcessFastItemsAsync()
@@ -8942,6 +9218,7 @@ namespace LinkDispositionChecker
                 lock (_sync) { return _paused.Values.Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(item => item).ToList(); }
             }
         }
+
     }
 
     // Shared hosting/IP failures are deferred once per infrastructure group.
@@ -9146,6 +9423,7 @@ namespace LinkDispositionChecker
     {
         private readonly TextBox _input = new TextBox();
         private readonly Button _start = new Button();
+        private readonly Button _loginPrepare = new Button();
         private readonly Button _stop = new Button();
         private readonly Button _import = new Button();
         private readonly Button _resume = new Button();
@@ -9275,15 +9553,15 @@ namespace LinkDispositionChecker
             main.Controls.Add(inputPanel, 0, 1);
 
             var toolbar = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, AutoScroll = true, Padding = new Padding(0, 6, 0, 4) };
-            StyleButton(_start, "开始检测", true); StyleButton(_retryNetwork, "继续未完成", false);
+            StyleButton(_start, "开始检测", true); StyleButton(_loginPrepare, "登录准备（可选）", false); StyleButton(_retryNetwork, "继续未完成", false);
             StyleButton(_deepReview, "自动补证", false);
             StyleButton(_stop, "停止", false);
             StyleButton(_export, "导出结果", false);
             StyleButton(_open, "打开链接", false); StyleButton(_openLog, "运行日志", false);
-            _start.Width = 125; _stop.Width = 92; _export.Width = 125; _open.Width = 125; _openLog.Width = 125;
+            _start.Width = 125; _loginPrepare.Width = 145; _stop.Width = 92; _export.Width = 125; _open.Width = 125; _openLog.Width = 125;
             _stop.Enabled = false; _retryNetwork.Enabled = false; _deepReview.Enabled = false;
             _aiReview.Enabled = false; _acceptancePack.Enabled = false;
-            _start.Click += async delegate { await StartChecksAsync(false); }; _stop.Click += delegate { if (_cancellation != null) _cancellation.Cancel(); };
+            _start.Click += async delegate { await StartChecksAsync(false); }; _loginPrepare.Click += async delegate { await OpenLoginPreparationAsync(); }; _stop.Click += delegate { if (_cancellation != null) _cancellation.Cancel(); };
             _retryNetwork.Click += async delegate { await ResumeLastSessionAsync(true); };
             _deepReview.Click += delegate { RunSelectedReview(); }; _export.Click += ExportClick; _open.Click += OpenSelectedClick;
             _aiReview.Click += async delegate { await RunAiReviewAsync(); };
@@ -9295,7 +9573,7 @@ namespace LinkDispositionChecker
             };
             _openLog.Click += delegate { OpenLatestExecutionLog(); };
             _acceptancePack.Click += delegate { GenerateAcceptanceEvidencePackage(null, true); };
-            toolbar.Controls.Add(_start); toolbar.Controls.Add(_retryNetwork); toolbar.Controls.Add(_deepReview); toolbar.Controls.Add(_stop);
+            toolbar.Controls.Add(_start); toolbar.Controls.Add(_loginPrepare); toolbar.Controls.Add(_retryNetwork); toolbar.Controls.Add(_deepReview); toolbar.Controls.Add(_stop);
             toolbar.Controls.Add(_export); toolbar.Controls.Add(_open); toolbar.Controls.Add(_openLog);
             toolbar.Controls.Add(new Label { Text = "    显示：", AutoSize = true, Margin = new Padding(8, 9, 0, 0), ForeColor = Color.FromArgb(75, 85, 99) });
             _filter.DropDownStyle = ComboBoxStyle.DropDownList; _filter.Width = 160; _filter.Margin = new Padding(4, 4, 0, 0);
@@ -9342,18 +9620,30 @@ namespace LinkDispositionChecker
             _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = property, HeaderText = header, Width = width, SortMode = DataGridViewColumnSortMode.Automatic });
         }
 
-        private async Task StartChecksAsync(bool resumeExisting, string launchMode = null)
+        private async Task StartChecksAsync(bool resumeExisting, string launchMode = null, bool skipLoginPrompt = false)
         {
             List<CheckJob> jobs = BuildJobs();
             if (jobs.Count == 0) { MessageBox.Show("未找到有效链接。\n\n请粘贴以 http:// 或 https:// 开头的地址。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
             if (_running) return;
+            if (!skipLoginPrompt && AuthenticatedCookieBridge.Count == 0 && ShouldOfferLoginPreparation(jobs))
+            {
+                DialogResult prepare = MessageBox.Show(
+                    "本批链接包含可能需要登录或安全验证的平台。\n\n先完成一次集中登录准备，通常可以减少登录壳、验证码和人工复核数量；登录凭证只在本机当前进程内存中使用，不会上传。\n\n是否现在准备登录？选择“否”将直接按公开页面开始快速核验。",
+                    "快速核验前登录准备（可选）", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+                if (prepare == DialogResult.Yes)
+                {
+                    await OpenLoginPreparationAsync();
+                    await StartChecksAsync(resumeExisting, launchMode, true);
+                    return;
+                }
+            }
             if (_networkMode.SelectedIndex == 1)
             {
                 PrepareEdgeCompatibilityJobs(jobs, resumeExisting);
                 return;
             }
 
-            _running = true; _start.Enabled = false; _retryNetwork.Enabled = false; _stop.Enabled = true; _deepReview.Enabled = false; _remoteSettings.Enabled = false; _acceptancePack.Enabled = false; _import.Enabled = false; _clear.Enabled = false; _input.ReadOnly = true;
+            _running = true; _start.Enabled = false; _loginPrepare.Enabled = false; _retryNetwork.Enabled = false; _stop.Enabled = true; _deepReview.Enabled = false; _remoteSettings.Enabled = false; _acceptancePack.Enabled = false; _import.Enabled = false; _clear.Enabled = false; _input.ReadOnly = true;
             _performance.Enabled = false;
             _networkMode.Enabled = false;
             _resume.Enabled = false;
@@ -9454,7 +9744,7 @@ namespace LinkDispositionChecker
                 FlushUiResults(Int32.MaxValue);
                 if (_runWatch != null) _runWatch.Stop();
                 _allRows.Sort((a, b) => a.Number.CompareTo(b.Number));
-                _running = false; ApplyFilter(); UpdateStats(); _start.Enabled = true; _stop.Enabled = false; _remoteSettings.Enabled = true; _import.Enabled = true; _clear.Enabled = true; _input.ReadOnly = false;
+                _running = false; ApplyFilter(); UpdateStats(); _start.Enabled = true; _loginPrepare.Enabled = true; _stop.Enabled = false; _remoteSettings.Enabled = true; _import.Enabled = true; _clear.Enabled = true; _input.ReadOnly = false;
                 _performance.Enabled = true;
                 _networkMode.Enabled = true;
                 RefreshResumeButton(); SaveSessionSafe();
@@ -9731,6 +10021,51 @@ namespace LinkDispositionChecker
                 (item.Verdict == "人工复核" || item.Verdict == "疑似已处置" ||
                  (item.Verdict == "暂时异常" &&
                   String.Equals(item.SiteHealth, "站点首页可访问", StringComparison.OrdinalIgnoreCase)));
+        }
+
+        private static bool ShouldOfferLoginPreparation(IEnumerable<CheckJob> jobs)
+        {
+            foreach (CheckJob job in jobs ?? Enumerable.Empty<CheckJob>())
+            {
+                Uri uri;
+                if (!Uri.TryCreate(job == null ? "" : job.Url, UriKind.Absolute, out uri)) continue;
+                string host = (uri.Host ?? "").ToLowerInvariant();
+                if (host.Contains("weibo.com") || host.Contains("zhihu.com") ||
+                    host.Contains("toutiao.com") || host.Contains("douyin.com") ||
+                    host.Contains("dongchedi.com") || host.Contains("dcdapp.com") ||
+                    host.Contains("xiaohongshu.com") || host.Contains("xhslink.com") ||
+                    host.Contains("baidu.com") || host.Contains("qq.com")) return true;
+            }
+            return false;
+        }
+
+        private async Task OpenLoginPreparationAsync()
+        {
+            if (_running) return;
+            List<CheckJob> jobs = BuildJobs();
+            if (jobs.Count == 0)
+            {
+                MessageBox.Show("请先导入 Excel/CSV 或粘贴待核验链接，再进行登录准备。", "登录准备", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            var items = jobs.Select(job => new CheckResult
+            {
+                Number = job.Number,
+                OriginalUrl = job.Url,
+                Platform = job.Platform,
+                ExpectedTitle = job.ExpectedTitle,
+                ExpectedExcerpt = job.ExpectedExcerpt,
+                ExpectedAuthor = job.ExpectedAuthor,
+                ContentType = job.ContentType,
+                Verdict = "人工复核"
+            }).ToList();
+            using (var form = new DeepReviewForm(items, null, false, false, true))
+                form.ShowDialog(this);
+            RefreshResumeButton();
+            _progressText.Text = AuthenticatedCookieBridge.Count > 0
+                ? "登录准备完成：已保留 " + AuthenticatedCookieBridge.Count + " 个本机会话 Cookie，快速核验将优先使用"
+                : "未取得登录会话；快速核验仍可按公开页面继续运行";
+            await Task.CompletedTask;
         }
 
         internal static bool IsFastEvidenceReviewCandidate(CheckResult item)

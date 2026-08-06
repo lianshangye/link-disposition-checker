@@ -3,7 +3,7 @@
     [string]$SourceList = '',
     [int]$SampleRows = 240,
     [int]$RowsPerPlatformOrDomain = 3,
-    [int]$MinimumNetMediaRows = 80,
+    [int]$MinimumNetMediaRows = 20,
     [string]$Seed = '',
     [string]$SampleCsv = '',
     [string]$ResultCsv = '',

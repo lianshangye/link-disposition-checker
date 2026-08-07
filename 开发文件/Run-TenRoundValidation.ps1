@@ -12,6 +12,10 @@ param(
     [int]$Workers = 6,
     [double]$MaximumUnresolvedRate = 0.05,
     [int]$MaximumNetworkAttempts = 3,
+    [switch]$QuickIndependentEvidence,
+    [ValidateSet('off','shadow','assist')][string]$AiMode = 'off',
+    [int]$AiMaxCandidates = 50,
+    [int]$AiWorkers = 3,
     [switch]$Resume
 )
 
@@ -23,6 +27,8 @@ if ($MaximumUnresolvedRate -le 0 -or $MaximumUnresolvedRate -ge 1) {
 }
 if ($MaximumNetworkAttempts -lt 1) { throw 'MaximumNetworkAttempts must be at least one.' }
 if ($MinimumPlatforms -lt 1 -or $MinimumHosts -lt 1) { throw 'Coverage minimums must be positive.' }
+if ($AiMaxCandidates -lt 1 -or $AiMaxCandidates -gt 200) { throw 'AiMaxCandidates must be between 1 and 200.' }
+if ($AiWorkers -lt 1 -or $AiWorkers -gt 8) { throw 'AiWorkers must be between 1 and 8.' }
 . (Join-Path $PSScriptRoot 'ValidationNetworkGate.ps1')
 
 $testData = Join-Path $PSScriptRoot 'test-data'
@@ -138,6 +144,8 @@ try {
                     $attemptOutput = & (Join-Path $PSScriptRoot 'Run-ShardedFastAudit.ps1') `
                         -InputCsv $sampleCsv -OutputCsv $attemptResult `
                         -RowsPerShard ([Math]::Max(100, $SampleRows)) -Workers $Workers `
+                        -QuickIndependentEvidence:$QuickIndependentEvidence -AiMode $AiMode `
+                        -AiMaxCandidates $AiMaxCandidates -AiWorkers $AiWorkers `
                         *>&1
                     $attemptOutput | ForEach-Object { Write-Host $_ }
                     $attemptOutput | Out-File -FilePath $attemptLog -Append -Encoding utf8

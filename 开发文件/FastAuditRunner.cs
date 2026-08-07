@@ -101,6 +101,18 @@ internal static class FastAuditRunner
             .ToList();
     }
 
+    internal static bool ShouldRunQuickIndependentEvidenceForDeferred(CheckJob job, CheckResult result)
+    {
+        return String.Equals(Environment.GetEnvironmentVariable("FAST_AUDIT_QUICK_INDEPENDENT_EVIDENCE"), "1",
+            StringComparison.OrdinalIgnoreCase) && Checker.ShouldTryQuickIndependentEvidence(job, result);
+    }
+
+    internal static bool ShouldRunQuickIndependentEvidenceForShell(CheckJob job, CheckResult result)
+    {
+        return String.Equals(Environment.GetEnvironmentVariable("FAST_AUDIT_QUICK_INDEPENDENT_EVIDENCE"), "1",
+            StringComparison.OrdinalIgnoreCase) && Checker.ShouldTryQuickIndependentContentEvidence(job, result);
+    }
+
     private static string Csv(string value)
     {
         return "\"" + (value ?? "").Replace("\"", "\"\"").Replace("\r", " ").Replace("\n", " ") + "\"";
@@ -135,6 +147,14 @@ internal static class FastAuditRunner
         if (infrastructureRestrictions.IsPaused(job))
         {
             result = MainForm.CreateInfrastructureDeferredResult(job, job.InfrastructureKey);
+            // A shared-infrastructure circuit prevents another request through
+            // the failing local route, but it must not prevent the bounded
+            // independent-evidence path from running.  Otherwise every row
+            // behind a noisy IP is guaranteed to remain unfinished even when a
+            // public reader can still obtain target-specific evidence.
+            if (ShouldRunQuickIndependentEvidenceForDeferred(job, result) ||
+                ShouldRunQuickIndependentEvidenceForShell(job, result))
+                result = await checker.TryQuickIndependentEvidenceAsync(job, result, CancellationToken.None);
         }
         else
         {
@@ -151,6 +171,9 @@ internal static class FastAuditRunner
                 job.ContentType,
                 quickBrowser,
                 CancellationToken.None);
+            if (String.Equals(Environment.GetEnvironmentVariable("FAST_AUDIT_QUICK_INDEPENDENT_EVIDENCE"), "1",
+                StringComparison.OrdinalIgnoreCase))
+                result = await checker.TryQuickIndependentEvidenceAsync(job, result, CancellationToken.None);
         }
         // Do not escalate to public-cloud/remote/browser evidence here. Those
         // are the explicit deep-review action; including them would make the
@@ -361,6 +384,19 @@ internal static class FastAuditRunner
         }
 
         List<CheckResult> ordered = results.OrderBy(item => item.Number).ToList();
+        string aiMode = AiFastStage.Mode();
+        if (aiMode != "off")
+        {
+            AiFastStageReport aiReport = AiFastStage.RunAsync(ordered, CancellationToken.None).GetAwaiter().GetResult();
+            Console.WriteLine("AI_FAST_MODE=" + aiReport.Mode);
+            Console.WriteLine("AI_FAST_CANDIDATES=" + aiReport.Candidates);
+            Console.WriteLine("AI_FAST_ATTEMPTED=" + aiReport.Attempted);
+            Console.WriteLine("AI_FAST_SUCCEEDED=" + aiReport.Succeeded);
+            Console.WriteLine("AI_FAST_APPLIED=" + aiReport.Applied);
+            Console.WriteLine("AI_FAST_FAILED=" + aiReport.Failed);
+            if (!String.IsNullOrWhiteSpace(aiReport.Error))
+                Console.WriteLine("AI_FAST_ERROR=" + aiReport.Error.Replace("\r", " ").Replace("\n", " "));
+        }
         // The validation runner represents the product's quick stage. Do not
         // silently launch WebView2 here; browser evidence is an explicit user
         // action in the desktop application and must not be mixed into the

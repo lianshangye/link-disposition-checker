@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using LinkDispositionChecker;
@@ -13,9 +14,12 @@ internal static class RotatingSampleBuilder
         public CheckJob Job;
         public string SourceFile;
         public string GroupKey;
+        public string InfrastructureKey;
         public string Score;
         public string UrlKey;
     }
+
+    private const int MaximumRowsPerInfrastructure = 24;
 
     private const string OutputHeader =
         "\u5e8f\u53f7,\u5e73\u53f0\u540d\u79f0,\u6807\u9898,\u6458\u8981,\u8d26\u53f7\u6635\u79f0,\u94fe\u63a5,\u5185\u5bb9\u7c7b\u578b," +
@@ -44,6 +48,7 @@ internal static class RotatingSampleBuilder
         if (previousSeeds.Contains(seed))
             throw new InvalidDataException("The rotating sample seed has already been used: " + seed);
         List<Candidate> loaded = inputs.SelectMany(path => Load(path, seed)).ToList();
+        ResolveInfrastructureKeys(loaded);
         foreach (string input in inputs)
         {
             int sourceRows = loaded.Count(item => SamePath(item.SourceFile, input));
@@ -71,7 +76,8 @@ internal static class RotatingSampleBuilder
             Console.WriteLine("ROTATING_AVAILABLE_NETMEDIA=" + availableNetMedia);
             return 7;
         }
-        List<Candidate> selected = SelectDiverse(available, maximum, perGroup, minimumNetMedia);
+        List<Candidate> selected = SelectDiverse(available, maximum, perGroup, minimumNetMedia,
+            MaximumRowsPerInfrastructure);
         if (selected.Count < maximum)
         {
             Console.WriteLine("ROTATING_POOL_EXHAUSTED=1");
@@ -97,6 +103,9 @@ internal static class RotatingSampleBuilder
         Console.WriteLine("ROTATING_SAMPLE_ROWS=" + selected.Count);
         Console.WriteLine("ROTATING_SAMPLE_PLATFORMS=" + selected.Select(item => Platform(item.Job)).Distinct(StringComparer.OrdinalIgnoreCase).Count());
         Console.WriteLine("ROTATING_SAMPLE_HOSTS=" + selected.Select(item => Host(item.Job.Url)).Distinct(StringComparer.OrdinalIgnoreCase).Count());
+        Console.WriteLine("ROTATING_SAMPLE_INFRASTRUCTURES=" + selected.Select(item => item.InfrastructureKey).Distinct(StringComparer.OrdinalIgnoreCase).Count());
+        Console.WriteLine("ROTATING_MAX_INFRA_ROWS=" + selected.GroupBy(item => item.InfrastructureKey, StringComparer.OrdinalIgnoreCase).Select(group => group.Count()).DefaultIfEmpty(0).Max());
+        Console.WriteLine("ROTATING_INFRASTRUCTURE_CAP=" + MaximumRowsPerInfrastructure);
         Console.WriteLine("ROTATING_SAMPLE_SOURCES=" + selected.Select(item => item.SourceFile).Distinct(StringComparer.OrdinalIgnoreCase).Count());
         Console.WriteLine("ROTATING_SAMPLE_NETMEDIA=" + selected.Count(IsNetMedia));
         Console.WriteLine("ROTATING_MINIMUM_NETMEDIA=" + minimumNetMedia);
@@ -107,31 +116,37 @@ internal static class RotatingSampleBuilder
         return selected.Count > 0 ? 0 : 4;
     }
 
-    private static List<Candidate> SelectDiverse(List<Candidate> available, int maximum, int perGroup, int minimumNetMedia)
+    private static List<Candidate> SelectDiverse(List<Candidate> available, int maximum, int perGroup, int minimumNetMedia,
+        int maximumRowsPerInfrastructure)
     {
         List<Candidate> netMedia = available.Where(IsNetMedia).ToList();
         if (netMedia.Count < minimumNetMedia) return new List<Candidate>();
 
         var selected = new List<Candidate>();
         var selectedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (Candidate item in SelectDiverseCore(netMedia, minimumNetMedia, perGroup))
+        var infrastructureCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (Candidate item in SelectDiverseCore(netMedia, minimumNetMedia, perGroup,
+            maximumRowsPerInfrastructure, infrastructureCounts))
         {
             if (selectedKeys.Add(item.UrlKey)) selected.Add(item);
         }
+        if (selected.Count < minimumNetMedia) return new List<Candidate>();
 
         // Net-media rows are a required coverage stratum, not an invitation to
         // fill every remaining slot with arbitrary domains. Prefer ordinary
         // platform rows for the balance of the sample; only consume additional
         // net-media rows when the non-media pool is genuinely too small.
         List<Candidate> remaining = available.Where(item => !selectedKeys.Contains(item.UrlKey)).ToList();
-        foreach (Candidate item in SelectDiverseCore(remaining, maximum - selected.Count, perGroup))
+        foreach (Candidate item in SelectDiverseCore(remaining, maximum - selected.Count, perGroup,
+            maximumRowsPerInfrastructure, infrastructureCounts))
         {
             if (selectedKeys.Add(item.UrlKey)) selected.Add(item);
         }
         return selected;
     }
 
-    private static List<Candidate> SelectDiverseCore(List<Candidate> available, int maximum, int perGroup)
+    private static List<Candidate> SelectDiverseCore(List<Candidate> available, int maximum, int perGroup,
+        int maximumRowsPerInfrastructure, Dictionary<string, int> infrastructureCounts)
     {
         if (maximum <= 0) return new List<Candidate>();
         List<Queue<Candidate>> queues = available
@@ -144,6 +159,8 @@ internal static class RotatingSampleBuilder
             .ToList();
         var selected = new List<Candidate>();
         var selectedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (infrastructureCounts == null)
+            infrastructureCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
         for (int pass = 0; pass < perGroup && selected.Count < maximum; pass++)
         {
@@ -151,17 +168,41 @@ internal static class RotatingSampleBuilder
             {
                 if (selected.Count >= maximum) break;
                 if (queue.Count == 0) continue;
-                Candidate item = queue.Dequeue();
-                if (selectedKeys.Add(item.UrlKey)) selected.Add(item);
+                Candidate item = queue.Peek();
+                int infrastructureCount;
+                infrastructureCounts.TryGetValue(item.InfrastructureKey ?? "", out infrastructureCount);
+                if (infrastructureCount >= maximumRowsPerInfrastructure)
+                {
+                    queue.Dequeue();
+                    continue;
+                }
+                queue.Dequeue();
+                if (selectedKeys.Add(item.UrlKey))
+                {
+                    selected.Add(item);
+                    infrastructureCounts[item.InfrastructureKey ?? ""] = infrastructureCount + 1;
+                }
             }
         }
 
         if (selected.Count < maximum)
         {
-            foreach (Candidate item in queues.SelectMany(queue => queue).OrderBy(item => item.Score, StringComparer.Ordinal))
+            // The first pass deliberately dequeues candidates that hit the
+            // infrastructure cap. A fallback over the remaining queue items
+            // would permanently lose candidates behind those entries. Scan the
+            // complete deterministic pool instead so the required stratum is
+            // met whenever the real pool can satisfy it.
+            foreach (Candidate item in available.OrderBy(item => item.Score, StringComparer.Ordinal))
             {
                 if (selected.Count >= maximum) break;
-                if (selectedKeys.Add(item.UrlKey)) selected.Add(item);
+                int infrastructureCount;
+                infrastructureCounts.TryGetValue(item.InfrastructureKey ?? "", out infrastructureCount);
+                if (infrastructureCount >= maximumRowsPerInfrastructure) continue;
+                if (selectedKeys.Add(item.UrlKey))
+                {
+                    selected.Add(item);
+                    infrastructureCounts[item.InfrastructureKey ?? ""] = infrastructureCount + 1;
+                }
             }
         }
         return selected;
@@ -267,6 +308,7 @@ internal static class RotatingSampleBuilder
                 Job = job,
                 SourceFile = path,
                 GroupKey = Group(job),
+                InfrastructureKey = "",
                 UrlKey = key,
                 Score = Hash(seed + "|" + path + "|" + key)
             };
@@ -291,6 +333,36 @@ internal static class RotatingSampleBuilder
     {
         Uri uri;
         return Uri.TryCreate(url ?? "", UriKind.Absolute, out uri) ? uri.Host.ToLowerInvariant() : "no-domain";
+    }
+
+    private static void ResolveInfrastructureKeys(IEnumerable<Candidate> candidates)
+    {
+        var cache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (Candidate candidate in candidates ?? Enumerable.Empty<Candidate>())
+        {
+            Uri uri;
+            if (candidate == null || candidate.Job == null ||
+                !Uri.TryCreate(candidate.Job.Url ?? "", UriKind.Absolute, out uri)) continue;
+            string host = (uri.DnsSafeHost ?? "").Trim().ToLowerInvariant();
+            if (host.Length == 0) continue;
+            string infrastructure;
+            if (!cache.TryGetValue(host, out infrastructure))
+            {
+                infrastructure = host;
+                try
+                {
+                    IPAddress[] addresses = System.Net.Dns.GetHostAddresses(host);
+                    IPAddress address = addresses == null ? null : addresses
+                        .Where(item => item != null)
+                        .OrderBy(item => item.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork ? 0 : 1)
+                        .FirstOrDefault();
+                    if (address != null) infrastructure = "IP " + address;
+                }
+                catch { }
+                cache[host] = infrastructure;
+            }
+            candidate.InfrastructureKey = infrastructure;
+        }
     }
 
     private static string CanonicalUrl(string value)

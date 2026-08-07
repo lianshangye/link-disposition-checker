@@ -2162,6 +2162,12 @@ namespace LinkDispositionChecker
                 StringComparison.OrdinalIgnoreCase);
         }
 
+        internal static bool IsQuickIndependentEvidenceEnabled()
+        {
+            return String.Equals(Environment.GetEnvironmentVariable("FAST_AUDIT_QUICK_INDEPENDENT_EVIDENCE"), "1",
+                StringComparison.OrdinalIgnoreCase);
+        }
+
         internal static IWebProxy ResolveConfiguredProxy()
         {
             string configuredProxy = Environment.GetEnvironmentVariable("LINK_CHECKER_HTTP_PROXY");
@@ -2774,7 +2780,43 @@ namespace LinkDispositionChecker
             return result;
         }
 
+        // Platform-specific probes are optional evidence. A failed reader,
+        // proxy reset, or transient TLS error must never abort the whole batch;
+        // the caller can still use the ordinary page request and preserve the
+        // row as retryable when no target evidence was obtained.
         private async Task<PlatformProbeOutcome> ProbePlatformContentAsync(Uri original, string expectedTitle, string expectedExcerpt, string expectedAuthor, CancellationToken token)
+        {
+            CancellationToken effectiveToken = token;
+            CancellationTokenSource quickProbeTimeout = null;
+            if (IsQuickPassEnabled())
+            {
+                quickProbeTimeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+                // Platform APIs are optional fast-stage evidence. Bound the
+                // complete probe (including proxy/direct retries) so one
+                // challenged platform cannot occupy a worker for a minute.
+                quickProbeTimeout.CancelAfter(8000);
+                effectiveToken = quickProbeTimeout.Token;
+            }
+            try
+            {
+                return await ProbePlatformContentCoreAsync(original, expectedTitle, expectedExcerpt, expectedAuthor, effectiveToken);
+            }
+            catch (OperationCanceledException)
+            {
+                if (token.IsCancellationRequested) throw;
+                return null;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+            finally
+            {
+                if (quickProbeTimeout != null) quickProbeTimeout.Dispose();
+            }
+        }
+
+        private async Task<PlatformProbeOutcome> ProbePlatformContentCoreAsync(Uri original, string expectedTitle, string expectedExcerpt, string expectedAuthor, CancellationToken token)
         {
             if (original == null) return null;
             string host = original.Host.ToLowerInvariant();
@@ -3204,7 +3246,7 @@ namespace LinkDispositionChecker
                     // when the target identity/content is present or the page has
                     // a target-specific removal state.
                     if (String.Equals(Environment.GetEnvironmentVariable("LINK_CHECKER_QUICK_PASS"), "1",
-                        StringComparison.OrdinalIgnoreCase))
+                        StringComparison.OrdinalIgnoreCase) && IsQuickIndependentEvidenceEnabled())
                     {
                         RemoteEvidenceResponse cloud = await TryPublicCloudEvidenceAsync(original, token,
                             expectedTitle, expectedExcerpt, expectedAuthor);
@@ -3700,7 +3742,11 @@ namespace LinkDispositionChecker
                 }
             }
 
-            Match choiceNews = Regex.Match(original.Fragment ?? "", @"(?:^|[?&])infoCode=(?:SN)?([0-9]+)", RegexOptions.IgnoreCase);
+            // Choice news identifiers are commonly prefixed with NW/SN and
+            // contain letters; accepting digits only silently bypasses the
+            // official mobile-page probe and leaves otherwise readable rows in
+            // generic-shell review.
+            Match choiceNews = Regex.Match(original.Fragment ?? "", @"(?:^|[?&])infoCode=(?:SN)?([A-Z0-9_-]+)", RegexOptions.IgnoreCase);
             Match fundNews = Regex.Match(original.Query ?? "", @"(?:^|[?&])code=([0-9]{12,})", RegexOptions.IgnoreCase);
             if ((host.EndsWith("choicew2z.eastmoney.com", StringComparison.Ordinal) && choiceNews.Success) ||
                 (host.EndsWith("1234567.com.cn", StringComparison.Ordinal) && fundNews.Success))
@@ -4051,6 +4097,22 @@ namespace LinkDispositionChecker
                                 probe = directProbe;
                         }
                     }
+                    // Zhihu has historically exposed the same answer object at
+                    // api.zhihu.com.  Keep this as one bounded official fallback
+                    // because the www API is frequently challenged by a
+                    // proxy; a 403/login response remains unresolved and is
+                    // never converted into a content verdict.
+                    if (probe == null || probe.Status == 403 || probe.Status == 429)
+                    {
+                        string alternateProbeUrl = "https://api.zhihu.com/answers/" + id +
+                            "?include=content%2Cexcerpt%2Cauthor%2Cname%2Cquestion%2Ctitle";
+                        ProbeResponse alternateProbe = await TryReadProbeAsync(alternateProbeUrl, headers, token);
+                        if (alternateProbe != null && alternateProbe.Status == 200)
+                        {
+                            probe = alternateProbe;
+                            probeUrl = alternateProbeUrl;
+                        }
+                    }
                 }
                 finally { ZhihuProbeGate.Release(); }
                 if (probe == null) return null;
@@ -4078,6 +4140,7 @@ namespace LinkDispositionChecker
                 {
                     string questionId = questionAnswerIdentity.Groups[1].Value;
                     Uri questionUri = new Uri(original.GetLeftPart(UriPartial.Authority) + "/question/" + questionId);
+                    if (IsQuickPassEnabled() && !IsQuickIndependentEvidenceEnabled()) return null;
                     RemoteEvidenceResponse answerReader = await ReadPublicCloudEvidenceOnceAsync(original, token);
                     Task<RemoteEvidenceResponse> questionTask = ZhihuQuestionReaderCache.GetOrAdd(
                         questionUri.AbsoluteUri,
@@ -6325,6 +6388,117 @@ namespace LinkDispositionChecker
             return result;
         }
 
+        internal static bool ShouldTryQuickIndependentEvidence(CheckJob job, CheckResult result)
+        {
+            if (job == null || result == null || !NetworkRestrictionCircuitBreaker.IsTransientRestriction(result))
+                return false;
+            string platform = (job.Platform ?? "").Trim();
+            bool generic = String.IsNullOrWhiteSpace(platform) || platform == "网媒" ||
+                platform == "未知" || platform == "未知平台";
+            bool tieba = platform.IndexOf("贴吧", StringComparison.OrdinalIgnoreCase) >= 0;
+            if (!generic && !tieba) return false;
+            Uri target;
+            if (!Uri.TryCreate(job.Url ?? "", UriKind.Absolute, out target) ||
+                IsSignedMediaUri(target)) return false;
+            int status;
+            if (Int32.TryParse(result.StatusCode ?? "", out status))
+                return status == 403 && tieba || status == 408 || status == 502 || status == 503 || status == 504 || status >= 500;
+            return String.Equals(result.StatusCode, "超时", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(result.StatusCode, "连接失败", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(result.StatusCode, "基础设施异常", StringComparison.OrdinalIgnoreCase);
+        }
+
+        internal static bool ShouldTryQuickIndependentContentEvidence(CheckJob job, CheckResult result)
+        {
+            if (job == null || result == null || result.Verdict != "人工复核" ||
+                !String.Equals(result.StatusCode, "200", StringComparison.OrdinalIgnoreCase)) return false;
+            if (String.IsNullOrWhiteSpace(job.ExpectedTitle) && String.IsNullOrWhiteSpace(job.ExpectedExcerpt)) return false;
+            Uri target;
+            if (!Uri.TryCreate(job.Url ?? "", UriKind.Absolute, out target) || IsSignedMediaUri(target)) return false;
+            string host = (target.Host ?? "").ToLowerInvariant();
+            // Login-dependent and anti-bot platforms have dedicated evidence
+            // paths; a generic reader must not turn their shells into a result.
+            if (host.EndsWith("zhihu.com", StringComparison.Ordinal) ||
+                host.EndsWith("bilibili.com", StringComparison.Ordinal) ||
+                host.EndsWith("b23.tv", StringComparison.Ordinal) ||
+                host.EndsWith("mp.weixin.qq.com", StringComparison.Ordinal) ||
+                host.EndsWith("channels.weixin.qq.com", StringComparison.Ordinal) ||
+                host.EndsWith("xiaohongshu.com", StringComparison.Ordinal) ||
+                host.EndsWith("xhslink.com", StringComparison.Ordinal)) return false;
+            // Do not send every ordinary 200/review page to the public reader.
+            // A page with a real title and a substantial observed body has
+            // already supplied the evidence available to the fast HTTP stage;
+            // only an empty/short shell or an explicit login/restriction signal
+            // benefits from the extra route. This keeps large batches bounded
+            // while retaining recovery for dynamic shells.
+            string context = result.AnalysisContext ?? "";
+            string evidence = (result.Evidence ?? "") + " " + context;
+            bool restrictedShell = NetworkRestrictionCircuitBreaker.IsSecurityOrRateLimitText(evidence) ||
+                Regex.IsMatch(evidence, "登录|扫码|验证码|验证|风控|安全验证", RegexOptions.IgnoreCase);
+            bool shortShell = String.IsNullOrWhiteSpace(result.Title) ||
+                Regex.Replace(context, @"\s+", "").Length < 220;
+            return restrictedShell || shortShell;
+        }
+
+        internal async Task<CheckResult> TryQuickIndependentEvidenceAsync(CheckJob job, CheckResult result,
+            CancellationToken token)
+        {
+            bool networkEvidence = ShouldTryQuickIndependentEvidence(job, result);
+            bool contentEvidence = ShouldTryQuickIndependentContentEvidence(job, result);
+            if (!networkEvidence && !contentEvidence) return result;
+            Uri target;
+            if (!Uri.TryCreate(job.Url ?? "", UriKind.Absolute, out target)) return result;
+            var trail = result.EvidenceTrail ?? new List<VerificationEvidence>();
+            result.EvidenceTrail = trail;
+            RemoteEvidenceResponse publicCloud = await TryPublicCloudEvidenceAsync(target, token,
+                result.ExpectedTitle, result.ExpectedExcerpt, result.ExpectedAuthor);
+            if (ApplyRemoteEvidence(result, publicCloud, "quick-independent-public-reader", trail, target))
+            {
+                result.EvidenceStage = "快速独立线路已确认";
+                result.AcquisitionAttempts = "公开云取证";
+                return result;
+            }
+            // Some Hupu supplier links use the legacy voice host, while the
+            // current public thread is exposed at the mobile/community host.
+            // Read only the same immutable thread path through those official
+            // hosts; a generic Hupu index must never be treated as evidence.
+            if ((target.Host ?? "").EndsWith("voice.hupu.com", StringComparison.OrdinalIgnoreCase))
+            {
+                foreach (string host in new[] { "m.hupu.com", "bbs.hupu.com" })
+                {
+                    Uri alternate;
+                    try { alternate = new UriBuilder(target) { Host = host }.Uri; }
+                    catch { continue; }
+                    RemoteEvidenceResponse alternateEvidence = await TryPublicCloudEvidenceAsync(alternate, token,
+                        result.ExpectedTitle, result.ExpectedExcerpt, result.ExpectedAuthor);
+                    if (ApplyRemoteEvidence(result, alternateEvidence,
+                        "quick-independent-hupu-official", trail, alternate))
+                    {
+                        result.EvidenceStage = "快速独立线路已确认";
+                        result.AcquisitionAttempts = "虎扑官方替代路径" + host;
+                        return result;
+                    }
+                }
+            }
+            List<string> endpoints = RemoteEvidenceStore.LoadEndpoints();
+            int number = 0;
+            foreach (string endpoint in endpoints)
+            {
+                number++;
+                RemoteEvidenceResponse remote = await TryRemoteEvidenceAsync(endpoint, target, token);
+                if (ApplyRemoteEvidence(result, remote, "quick-independent-remote-" + number, trail, target))
+                {
+                    result.EvidenceStage = "快速独立线路已确认";
+                    result.AcquisitionAttempts = "自有远程节点" + number;
+                    return result;
+                }
+            }
+            result.EvidenceStage = "快速独立线路未确认";
+            result.AcquisitionAttempts = endpoints.Count == 0 ? "公开云取证未确认" :
+                "公开云取证未确认；已尝试自有远程节点 " + endpoints.Count + " 个";
+            return result;
+        }
+
         internal static bool IsChinaProbeCapacityFailure(string error)
         {
             string text = (error ?? "").ToLowerInvariant();
@@ -6420,9 +6594,11 @@ namespace LinkDispositionChecker
             {
                 string normalizedRemote = WebUtility.HtmlDecode((page.Title ?? "") + " " +
                     (page.MainText ?? "") + " " + (page.Text ?? ""));
-                if (MatchesExpectedContent(result.ExpectedTitle, result.ExpectedExcerpt, normalizedRemote) &&
+                if ((MatchesExpectedContent(result.ExpectedTitle, result.ExpectedExcerpt, normalizedRemote) ||
+                     HasExpectedTitleAndMeaningfulReaderBody(result.ExpectedTitle, result.ExpectedExcerpt, normalizedRemote)) &&
                     (String.IsNullOrWhiteSpace(result.ExpectedAuthor) ||
-                     MatchesExpectedAuthor(result.ExpectedAuthor, normalizedRemote)))
+                     MatchesExpectedAuthor(result.ExpectedAuthor, normalizedRemote) ||
+                     HasExpectedTitleAndMeaningfulReaderBody(result.ExpectedTitle, result.ExpectedExcerpt, normalizedRemote)))
                 {
                     Uri remoteUri;
                     if (Uri.TryCreate(page.Url, UriKind.Absolute, out remoteUri) &&
@@ -6564,7 +6740,7 @@ namespace LinkDispositionChecker
             return visibleBody || publicReaderBody || embeddedSummary;
         }
 
-        private static bool IsRemoteTargetSpecificRemoval(CheckResult result, string visible,
+        internal static bool IsRemoteTargetSpecificRemoval(CheckResult result, string visible,
             string title, string finalUrl)
         {
             string platform = (result.Platform ?? "").Trim();
@@ -6575,12 +6751,20 @@ namespace LinkDispositionChecker
             if (platform.IndexOf("知乎", StringComparison.OrdinalIgnoreCase) >= 0)
                 return Regex.IsMatch(text, "该问题不存在|该回答不存在|回答不存在",
                     RegexOptions.IgnoreCase);
+            if (platform.IndexOf("虎扑", StringComparison.OrdinalIgnoreCase) >= 0)
+                return Regex.IsMatch(text, "该帖子找不到了|帖子不存在|该帖子已被删除|主题不存在",
+                    RegexOptions.IgnoreCase);
             return false;
         }
 
         internal static bool ShouldTryPublicCloudForUnresolved(Uri uri, CheckResult result)
         {
             if (uri == null || result == null) return false;
+            // The fast stage must remain HTTP/API-only unless the caller
+            // explicitly opts into the bounded independent-reader route.
+            // Deep review does not set LINK_CHECKER_QUICK_PASS and remains
+            // allowed to use the reader as an explicit user action.
+            if (IsQuickPassEnabled() && !IsQuickIndependentEvidenceEnabled()) return false;
             string host = (uri.Host ?? "").ToLowerInvariant();
             string platform = (result.Platform ?? "").Trim();
             return host.EndsWith("tieba.baidu.com", StringComparison.Ordinal) ||
@@ -6606,7 +6790,7 @@ namespace LinkDispositionChecker
         {
             if (uri == null || result == null ||
                 !String.Equals(Environment.GetEnvironmentVariable("LINK_CHECKER_QUICK_PASS"), "1",
-                    StringComparison.OrdinalIgnoreCase)) return false;
+                    StringComparison.OrdinalIgnoreCase) || !IsQuickIndependentEvidenceEnabled()) return false;
             int code;
             bool transport = Int32.TryParse(status, out code)
                 ? (code == 401 || code == 403 || code == 407 || code >= 500)
@@ -6809,9 +6993,26 @@ namespace LinkDispositionChecker
         private async Task<RemoteEvidenceResponse> TryPublicCloudEvidenceAsync(Uri target,
             CancellationToken token, string expectedTitle, string expectedExcerpt, string expectedAuthor)
         {
-            await PublicCloudProbeGate.WaitAsync(token);
+            if (IsQuickPassEnabled() && !IsQuickIndependentEvidenceEnabled())
+                return new RemoteEvidenceResponse
+                {
+                    Error = "快速阶段未启用独立公开阅读器",
+                    Source = "快速阶段门禁",
+                    TargetUnreachable = false
+                };
+            CancellationToken effectiveToken = token;
+            CancellationTokenSource quickTimeout = null;
+            bool gateAcquired = false;
+            if (IsQuickPassEnabled() && IsQuickIndependentEvidenceEnabled())
+            {
+                quickTimeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+                quickTimeout.CancelAfter(10000);
+                effectiveToken = quickTimeout.Token;
+            }
             try
             {
+                await PublicCloudProbeGate.WaitAsync(effectiveToken);
+                gateAcquired = true;
                 int spacing = IsQuickPassEnabled() ? 850 : 3200;
                 int delay;
                 lock (PublicCloudProbeTimingSync)
@@ -6821,13 +7022,13 @@ namespace LinkDispositionChecker
                     delay = Math.Max(0, (int)(nextAllowed - now).TotalMilliseconds);
                     _lastPublicCloudProbeStartedUtc = now.AddMilliseconds(delay);
                 }
-                if (delay > 0) await Task.Delay(delay, token);
+                if (delay > 0) await Task.Delay(delay, effectiveToken);
 
                 int attempts = ShouldRetryBulkPublicReader(target) ? 2 : 1;
                 RemoteEvidenceResponse selected = null;
                 for (int attempt = 0; attempt < attempts; attempt++)
                 {
-                    RemoteEvidenceResponse primary = await ReadPublicCloudEvidenceOnceAsync(target, token);
+                    RemoteEvidenceResponse primary = await ReadPublicCloudEvidenceOnceAsync(target, effectiveToken);
                     // Once the primary reader has returned target-matching content
                     // (or an explicit target removal state), another protocol adds
                     // no evidence. Stopping here avoids unnecessary slow calls and
@@ -6839,13 +7040,13 @@ namespace LinkDispositionChecker
                         selected = primary;
                     else
                     {
-                        RemoteEvidenceResponse alternate = await ReadPublicCloudEvidenceOnceAsync(alternateTarget, token);
+                        RemoteEvidenceResponse alternate = await ReadPublicCloudEvidenceOnceAsync(alternateTarget, effectiveToken);
                         selected = SelectPublicReaderEvidence(target, primary, alternate,
                             expectedTitle, expectedExcerpt, expectedAuthor);
                         if (HasSufficientPublicReaderEvidence(target, selected,
                             expectedTitle, expectedExcerpt, expectedAuthor)) return selected;
                     }
-                    if (attempt + 1 < attempts) await Task.Delay(250, token);
+                    if (attempt + 1 < attempts) await Task.Delay(250, effectiveToken);
                 }
                 return selected;
             }
@@ -6858,7 +7059,11 @@ namespace LinkDispositionChecker
                     TargetUnreachable = false
                 };
             }
-            finally { PublicCloudProbeGate.Release(); }
+            finally
+            {
+                if (gateAcquired) PublicCloudProbeGate.Release();
+                if (quickTimeout != null) quickTimeout.Dispose();
+            }
         }
 
         private static bool ShouldRetryBulkPublicReader(Uri target)
@@ -7024,7 +7229,11 @@ namespace LinkDispositionChecker
             bool contentMatch = MatchesExpectedContent(expectedTitle, expectedExcerpt, text);
             bool authorMatch = String.IsNullOrWhiteSpace(expectedAuthor) ||
                 MatchesExpectedAuthor(expectedAuthor, text);
+            bool changedTitleMatch = HasExpectedTitleAndMeaningfulReaderBody(expectedTitle,
+                expectedExcerpt, text);
             if (contentMatch && authorMatch) return 900;
+            if (changedTitleMatch && authorMatch) return 820;
+            if (changedTitleMatch) return 560;
             if (contentMatch) return 650;
             if (!String.IsNullOrWhiteSpace(expectedAuthor) && authorMatch && CleanText(text, 12000).Length >= 180)
                 return 450;
@@ -7040,6 +7249,34 @@ namespace LinkDispositionChecker
         {
             return PublicReaderEvidenceScore(requested, response,
                 expectedTitle, expectedExcerpt, expectedAuthor) >= 500;
+        }
+
+        internal static bool MatchesExpectedTitleByCharacterOverlap(string expectedTitle, string pageText)
+        {
+            string expected = NormalizeForMatch(expectedTitle);
+            string page = NormalizeForMatch(pageText);
+            if (expected.Length < 8 || page.Length < 20) return false;
+            int[] previous = new int[page.Length + 1];
+            int[] current = new int[page.Length + 1];
+            for (int i = 1; i <= expected.Length; i++)
+            {
+                for (int j = 1; j <= page.Length; j++)
+                    current[j] = expected[i - 1] == page[j - 1]
+                        ? previous[j - 1] + 1
+                        : Math.Max(previous[j], current[j - 1]);
+                var swap = previous; previous = current; current = swap;
+                Array.Clear(current, 0, current.Length);
+            }
+            int lcs = previous[page.Length];
+            return lcs >= 8 && lcs * 100 >= expected.Length * 65;
+        }
+
+        internal static bool HasExpectedTitleAndMeaningfulReaderBody(string expectedTitle,
+            string expectedExcerpt, string readerText)
+        {
+            if (String.IsNullOrWhiteSpace(readerText) || CleanText(readerText, 12000).Length < 180) return false;
+            return MatchesExpectedTitleByCharacterOverlap(expectedTitle, readerText) ||
+                MatchesExpectedContent(expectedTitle, expectedExcerpt, readerText);
         }
 
         internal static bool IsZhihuPublicReaderEmptyState(Uri requested,
@@ -7078,10 +7315,27 @@ namespace LinkDispositionChecker
         internal static bool IsSameTargetLocation(Uri requested, Uri observed)
         {
             if (requested == null || observed == null) return false;
-            return String.Equals(requested.Host, observed.Host, StringComparison.OrdinalIgnoreCase) &&
-                String.Equals(requested.AbsolutePath.TrimEnd('/'), observed.AbsolutePath.TrimEnd('/'),
-                    StringComparison.OrdinalIgnoreCase) &&
-                String.Equals(requested.Query ?? "", observed.Query ?? "", StringComparison.OrdinalIgnoreCase);
+            if (!String.Equals(requested.Host, observed.Host, StringComparison.OrdinalIgnoreCase) ||
+                !String.Equals(requested.AbsolutePath.TrimEnd('/'), observed.AbsolutePath.TrimEnd('/'),
+                    StringComparison.OrdinalIgnoreCase)) return false;
+            return String.Equals(NormalizeEvidenceQuery(requested.Query), NormalizeEvidenceQuery(observed.Query),
+                StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string NormalizeEvidenceQuery(string query)
+        {
+            if (String.IsNullOrWhiteSpace(query)) return "";
+            var kept = new List<string>();
+            foreach (string pair in query.TrimStart('?').Split('&'))
+            {
+                if (String.IsNullOrWhiteSpace(pair)) continue;
+                string key = pair.Split('=')[0].Trim().ToLowerInvariant();
+                if (key.StartsWith("utm_", StringComparison.Ordinal) ||
+                    new[] { "spm_id_from", "from", "share_code", "share_source", "sharefrom", "isappinstalled" }
+                        .Contains(key)) continue;
+                kept.Add(pair);
+            }
+            return String.Join("&", kept);
         }
 
         internal static bool ShouldMarkPubliclyUnavailable(CheckResult result,
@@ -7147,9 +7401,11 @@ namespace LinkDispositionChecker
                 if (Uri.TryCreate(remoteUrl, UriKind.Absolute, out remoteUri) &&
                     IsSameTargetLocation(requested, remoteUri) &&
                     !explicitRemoteRemoval &&
-                    MatchesExpectedContent(result.ExpectedTitle, result.ExpectedExcerpt, remoteText) &&
+                    (MatchesExpectedContent(result.ExpectedTitle, result.ExpectedExcerpt, remoteText) ||
+                     HasExpectedTitleAndMeaningfulReaderBody(result.ExpectedTitle, result.ExpectedExcerpt, remoteText)) &&
                     (String.IsNullOrWhiteSpace(result.ExpectedAuthor) ||
-                     MatchesExpectedAuthor(result.ExpectedAuthor, remoteText)))
+                     MatchesExpectedAuthor(result.ExpectedAuthor, remoteText) ||
+                     HasExpectedTitleAndMeaningfulReaderBody(result.ExpectedTitle, result.ExpectedExcerpt, remoteText)))
                 {
                     result.Verdict = "仍可访问";
                     result.StatusCode = remote.Status.ToString();

@@ -182,6 +182,68 @@ internal static class RegressionTests
         Console.WriteLine((pacingPassed ? "PASS " : "FAIL ") + "平台级限速和保守并发配置");
         if (!pacingPassed) _failures++;
 
+        string oldQuickIndependentEvidence = Environment.GetEnvironmentVariable("FAST_AUDIT_QUICK_INDEPENDENT_EVIDENCE");
+        Environment.SetEnvironmentVariable("FAST_AUDIT_QUICK_INDEPENDENT_EVIDENCE", "1");
+        bool quickIndependentEvidencePassed;
+        try
+        {
+            quickIndependentEvidencePassed =
+                Checker.ShouldTryQuickIndependentEvidence(new CheckJob { Platform = "网媒", Url = "https://example.com/a" },
+                    new CheckResult { Verdict = "暂时异常", StatusCode = "502" }) &&
+                !Checker.ShouldTryQuickIndependentEvidence(new CheckJob { Platform = "知乎", Url = "https://www.zhihu.com/a" },
+                    new CheckResult { Verdict = "暂时异常", StatusCode = "502" }) &&
+                !Checker.ShouldTryQuickIndependentEvidence(new CheckJob { Platform = "网媒", Url = "https://example.com/a?token=secret" },
+                    new CheckResult { Verdict = "暂时异常", StatusCode = "502" }) &&
+                !Checker.ShouldTryQuickIndependentEvidence(new CheckJob { Platform = "网媒", Url = "https://example.com/a" },
+                    new CheckResult { Verdict = "人工复核", StatusCode = "200" });
+        }
+        finally { Environment.SetEnvironmentVariable("FAST_AUDIT_QUICK_INDEPENDENT_EVIDENCE", oldQuickIndependentEvidence); }
+        Console.WriteLine((quickIndependentEvidencePassed ? "PASS " : "FAIL ") + "快速独立线路只覆盖普通网媒网络异常且排除签名媒体");
+        if (!quickIndependentEvidencePassed) _failures++;
+
+        bool quickIndependentShellPassed =
+            Checker.ShouldTryQuickIndependentContentEvidence(
+                new CheckJob { Platform = "网媒", Url = "https://example.com/a", ExpectedTitle = "目标文章" },
+                new CheckResult { Verdict = "人工复核", StatusCode = "200" }) &&
+            !Checker.ShouldTryQuickIndependentContentEvidence(
+                new CheckJob { Platform = "知乎", Url = "https://www.zhihu.com/a", ExpectedTitle = "目标回答" },
+                new CheckResult { Verdict = "人工复核", StatusCode = "200" }) &&
+            !Checker.ShouldTryQuickIndependentContentEvidence(
+                new CheckJob { Platform = "网媒", Url = "https://example.com/a?token=secret", ExpectedTitle = "目标文章" },
+                new CheckResult { Verdict = "人工复核", StatusCode = "200" });
+        Console.WriteLine((quickIndependentShellPassed ? "PASS " : "FAIL ") +
+            "普通网媒 HTTP 200 空壳进入一次独立正文补证且排除受限平台");
+        if (!quickIndependentShellPassed) _failures++;
+
+        bool readerTrackingQueryPassed =
+            Checker.IsSameTargetLocation(
+                new Uri("https://choicew2z.eastmoney.com/info/news/#/appDetail?infoCode=NW1&utm_source=x"),
+                new Uri("https://choicew2z.eastmoney.com/info/news/#/appDetail?infoCode=NW1")) &&
+            Checker.IsSameTargetLocation(
+                new Uri("https://example.com/a?token=one"),
+                new Uri("https://example.com/a?token=two")) == false;
+        Console.WriteLine((readerTrackingQueryPassed ? "PASS " : "FAIL ") +
+            "独立阅读器忽略跟踪参数但保留目标查询参数");
+        if (!readerTrackingQueryPassed) _failures++;
+
+        bool changedTitleOverlapPassed =
+            Checker.MatchesExpectedTitleByCharacterOverlap("魏建军道歉：承认抄袭",
+                "魏建军公开致歉并承认海报抄袭，相关事件引发广泛讨论。") &&
+            !Checker.MatchesExpectedTitleByCharacterOverlap("完全不相关的标题",
+                "这是另一篇文章的正文内容，和目标没有关系。");
+        Console.WriteLine((changedTitleOverlapPassed ? "PASS " : "FAIL ") +
+            "独立正文补证允许标题改写但拒绝无关正文");
+        if (!changedTitleOverlapPassed) _failures++;
+
+        bool hupuRemovalPassed =
+            Checker.IsRemoteTargetSpecificRemoval(
+                new CheckResult { Platform = "虎扑体育网" },
+                "JR你好，该帖子找不到了，请去别处逛逛吧", "虎扑体育网", "https://m.hupu.com/bbs/640218901");
+        Console.WriteLine((hupuRemovalPassed ? "PASS " : "FAIL ") +
+            "虎扑官方移动页目标帖子不存在证据识别");
+        if (!hupuRemovalPassed) _failures++;
+
+
         bool targetSignalPassed =
             Checker.IsTencentVideoUnavailableResponse(
                 "QZOutputJson={\"vid\":\"l1257edy4lk\",\"em\":80,\"msg\":\"该内容暂时不支持观看，可以看看其他内容哦\"};",
@@ -354,6 +416,25 @@ internal static class RegressionTests
             aiAlive.Verdict == "仍可访问" && !aiRemovedApplied.Resolved && aiRemoved.Verdict == "疑似已处置";
         Console.WriteLine((aiPolicyPassed ? "PASS " : "FAIL ") + "Yunwu 兼容接口、AI候选过滤和本地安全门");
         if (!aiPolicyPassed) _failures++;
+
+        string oldAiMode = Environment.GetEnvironmentVariable("FAST_AUDIT_AI_MODE");
+        Environment.SetEnvironmentVariable("FAST_AUDIT_AI_MODE", null);
+        var aiFastDisabledProbe = new CheckResult { Verdict = "人工复核", StatusCode = "200", AnalysisContext = new string('字', 100), Evidence = "页面已返回" };
+        AiFastStageReport aiFastDisabled = AiFastStage.RunAsync(new List<CheckResult> { aiFastDisabledProbe },
+            System.Threading.CancellationToken.None).GetAwaiter().GetResult();
+        Environment.SetEnvironmentVariable("FAST_AUDIT_AI_MODE", oldAiMode);
+        bool aiFastStagePassed = aiFastDisabled.Mode == "off" && aiFastDisabled.Candidates == 0 &&
+            !aiFastDisabledProbe.AiReviewed;
+        var shadowProbe = new CheckResult { Verdict = "人工复核", Evidence = "页面已返回", AnalysisContext = "页面正文" };
+        AiReviewPolicy.RecordShadow(shadowProbe, new AiReviewDecision
+        {
+            Verdict = "仍可访问", Confidence = 0.99, Reason = "影子测试"
+        }, "shadow-test");
+        aiFastStagePassed = aiFastStagePassed && shadowProbe.Verdict == "人工复核" &&
+            shadowProbe.AiReviewed && shadowProbe.AiDecision == "仍可访问" &&
+            (shadowProbe.Evidence ?? "").Contains("影子");
+        Console.WriteLine((aiFastStagePassed ? "PASS " : "FAIL ") + "快速阶段 AI 影子模式无配置旁路且不改变规则判定");
+        if (!aiFastStagePassed) _failures++;
 
         var logContext = ExecutionLogContext.Start("快速核验", "回归测试", "标准模式", "自动网络", 10, 2, 8);
         logContext.EndedAt = DateTime.Now;
@@ -567,6 +648,20 @@ internal static class RegressionTests
         Console.WriteLine((sharedInfrastructurePassed ? "PASS " : "FAIL ") +
             "共享基础设施异常只触发一次访问并保留可重试状态");
         if (!sharedInfrastructurePassed) _failures++;
+
+        string oldQuickIndependent = Environment.GetEnvironmentVariable("FAST_AUDIT_QUICK_INDEPENDENT_EVIDENCE");
+        Environment.SetEnvironmentVariable("FAST_AUDIT_QUICK_INDEPENDENT_EVIDENCE", "1");
+        bool deferredIndependentRoutePassed =
+            FastAuditRunner.ShouldRunQuickIndependentEvidenceForDeferred(
+                new CheckJob { Platform = "网媒", Url = "https://news.example.com/a" },
+                new CheckResult { Verdict = "暂时异常", StatusCode = "基础设施异常" }) &&
+            !FastAuditRunner.ShouldRunQuickIndependentEvidenceForDeferred(
+                new CheckJob { Platform = "知乎", Url = "https://www.zhihu.com/a" },
+                new CheckResult { Verdict = "暂时异常", StatusCode = "基础设施异常" });
+        Environment.SetEnvironmentVariable("FAST_AUDIT_QUICK_INDEPENDENT_EVIDENCE", oldQuickIndependent);
+        Console.WriteLine((deferredIndependentRoutePassed ? "PASS " : "FAIL ") +
+            "共享基础设施熔断后仍进入快速独立线路补证");
+        if (!deferredIndependentRoutePassed) _failures++;
 
         bool kuaishouRemovedPassed =
             Checker.IsKuaishouRemovedSsrContent("{\"result\":223,\"error_msg\":\"获取失败，作品可能已被删除或尚未上传\"}", "3x3hbza3vsiqe5w") &&
@@ -893,6 +988,19 @@ internal static class RegressionTests
                 new CheckResult { Platform = "简书" });
         Console.WriteLine((publicReaderCoveragePassed ? "PASS " : "FAIL ") + "雪球和懂车帝空壳进入公开补证");
         if (!publicReaderCoveragePassed) _failures++;
+
+        string oldQuickModeForReaderGate = Environment.GetEnvironmentVariable("LINK_CHECKER_QUICK_PASS");
+        string oldIndependentModeForReaderGate = Environment.GetEnvironmentVariable("FAST_AUDIT_QUICK_INDEPENDENT_EVIDENCE");
+        Environment.SetEnvironmentVariable("LINK_CHECKER_QUICK_PASS", "1");
+        Environment.SetEnvironmentVariable("FAST_AUDIT_QUICK_INDEPENDENT_EVIDENCE", null);
+        bool quickReaderGatePassed = !Checker.ShouldTryPublicCloudForUnresolved(
+            new Uri("https://xueqiu.com/2037102031/396950721"),
+            new CheckResult { Platform = "雪球" });
+        Environment.SetEnvironmentVariable("LINK_CHECKER_QUICK_PASS", oldQuickModeForReaderGate);
+        Environment.SetEnvironmentVariable("FAST_AUDIT_QUICK_INDEPENDENT_EVIDENCE", oldIndependentModeForReaderGate);
+        Console.WriteLine((quickReaderGatePassed ? "PASS " : "FAIL ") +
+            "默认快速阶段不隐式调用慢速公开阅读器");
+        if (!quickReaderGatePassed) _failures++;
 
         string dongchediOfficialJson = "{\"data\":{\"content\":\"<p>3月7日，路虎揽胜官方微博回应长城海报事件，魏建军随后公开道歉。</p>\"," +
             "\"is_visible\":true,\"media_user\":{\"screen_name\":\"用户5414192661686\"}," +
@@ -1540,7 +1648,9 @@ internal static class RegressionTests
         if (!expiredWechatPassed) _failures++;
 
         string oldQuickPass = Environment.GetEnvironmentVariable("LINK_CHECKER_QUICK_PASS");
+        string oldQuickIndependentForCloud = Environment.GetEnvironmentVariable("FAST_AUDIT_QUICK_INDEPENDENT_EVIDENCE");
         Environment.SetEnvironmentVariable("LINK_CHECKER_QUICK_PASS", "1");
+        Environment.SetEnvironmentVariable("FAST_AUDIT_QUICK_INDEPENDENT_EVIDENCE", "1");
         bool broadCloudPassed = Checker.ShouldTryQuickPublicCloudOnTransportFailure(
             new Uri("https://tieba.baidu.com/p/123456789"), new CheckResult { Platform = "百度贴吧" }, "502") &&
             !Checker.ShouldTryQuickPublicCloudOnTransportFailure(
@@ -1548,6 +1658,7 @@ internal static class RegressionTests
             !Checker.ShouldTryQuickPublicCloudOnTransportFailure(
                 new Uri("https://wxapp.tc.qq.com/251/20302/stodownload?token=x"), new CheckResult { Platform = "微信视频号" }, "502");
         Environment.SetEnvironmentVariable("LINK_CHECKER_QUICK_PASS", oldQuickPass);
+        Environment.SetEnvironmentVariable("FAST_AUDIT_QUICK_INDEPENDENT_EVIDENCE", oldQuickIndependentForCloud);
         Console.WriteLine((broadCloudPassed ? "PASS " : "FAIL ") + "快速线路失败仅对有平台级公开补证的目标启用独立读取，并排除普通网媒和签名媒体");
         if (!broadCloudPassed) _failures++;
 

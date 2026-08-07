@@ -144,6 +144,121 @@ namespace LinkDispositionChecker
         }
     }
 
+    internal sealed class AiFastStageReport
+    {
+        internal string Mode { get; set; }
+        internal int Candidates { get; set; }
+        internal int Attempted { get; set; }
+        internal int Succeeded { get; set; }
+        internal int Applied { get; set; }
+        internal int Failed { get; set; }
+        internal string Error { get; set; }
+    }
+
+    // Optional fast-stage AI.  It is deliberately separate from the normal
+    // browser review button: no token/configuration means a no-op, and the
+    // shadow mode records suggestions without changing the content verdict.
+    internal static class AiFastStage
+    {
+        internal static string Mode()
+        {
+            string value = (Environment.GetEnvironmentVariable("FAST_AUDIT_AI_MODE") ?? "").Trim().ToLowerInvariant();
+            return value == "shadow" || value == "assist" ? value : "off";
+        }
+
+        internal static int MaxCandidates()
+        {
+            int value;
+            return Int32.TryParse(Environment.GetEnvironmentVariable("FAST_AUDIT_AI_MAX_CANDIDATES"), out value)
+                ? Math.Min(200, Math.Max(1, value)) : 50;
+        }
+
+        internal static int Workers()
+        {
+            int value;
+            return Int32.TryParse(Environment.GetEnvironmentVariable("FAST_AUDIT_AI_WORKERS"), out value)
+                ? Math.Min(8, Math.Max(1, value)) : 3;
+        }
+
+        internal static async Task<AiFastStageReport> RunAsync(
+            IList<CheckResult> rows, CancellationToken cancellationToken)
+        {
+            string mode = Mode();
+            var report = new AiFastStageReport { Mode = mode, Error = "" };
+            if (mode == "off") return report;
+
+            AiRuntimeSettings settings = AiSettingsStore.Load();
+            if (settings == null || String.IsNullOrWhiteSpace(settings.Token) ||
+                String.IsNullOrWhiteSpace(settings.Model))
+            {
+                report.Error = "AI settings are not configured";
+                return report;
+            }
+
+            List<CheckResult> candidates = (rows ?? new List<CheckResult>())
+                .Where(AiReviewPolicy.IsEligible).OrderBy(item => item.Number)
+                .Take(MaxCandidates()).ToList();
+            report.Candidates = candidates.Count;
+            if (candidates.Count == 0) return report;
+
+            using (var client = new YunwuAiClient(settings.Token))
+            using (var gate = new SemaphoreSlim(Workers(), Workers()))
+            {
+                int attempted = 0, succeeded = 0, applied = 0, failed = 0;
+                var tasks = candidates.Select(async item =>
+                {
+                    await gate.WaitAsync(cancellationToken);
+                    try
+                    {
+                        Interlocked.Increment(ref attempted);
+                        AiReviewDecision decision = null;
+                        Exception lastError = null;
+                        for (int attempt = 1; attempt <= AiBatchPolicy.MaximumAttemptsPerItem; attempt++)
+                        {
+                            Exception currentError = null;
+                            try
+                            {
+                                decision = await client.ReviewAsync(settings, item, cancellationToken);
+                            }
+                            catch (Exception error)
+                            {
+                                currentError = error;
+                                lastError = error;
+                            }
+                            if (decision != null) break;
+                            if (currentError == null || AiBatchPolicy.IsFatal(currentError) ||
+                                !AiBatchPolicy.CanRetry(currentError, attempt)) break;
+                            await Task.Delay(AiBatchPolicy.RetryDelayMilliseconds(currentError, attempt), cancellationToken);
+                        }
+                        if (decision == null)
+                        {
+                            Interlocked.Increment(ref failed);
+                            item.AiLastError = AiReviewPolicy.Clean(lastError == null ? "AI request failed" : lastError.Message, 300);
+                            return;
+                        }
+                        Interlocked.Increment(ref succeeded);
+                        AiReviewApplication application;
+                        if (mode == "assist")
+                            application = AiReviewPolicy.Apply(item, decision, settings.Model);
+                        else
+                        {
+                            AiReviewPolicy.RecordShadow(item, decision, settings.Model);
+                            application = new AiReviewApplication { Resolved = false };
+                        }
+                        if (application != null && application.Resolved) Interlocked.Increment(ref applied);
+                    }
+                    finally { gate.Release(); }
+                }).ToArray();
+                await Task.WhenAll(tasks);
+                report.Attempted = attempted;
+                report.Succeeded = succeeded;
+                report.Applied = applied;
+                report.Failed = failed;
+            }
+            return report;
+        }
+    }
+
     internal sealed class YunwuAiClient : IDisposable
     {
         private readonly HttpClient _client;
@@ -366,6 +481,19 @@ namespace LinkDispositionChecker
 
             item.Evidence = AppendEvidence(item.Evidence, explanation + "；未通过本地安全门，保留原结果");
             return new AiReviewApplication { Resolved = false, AppliedVerdict = item.Verdict, Message = "AI 建议已记录，未改变最终判定" };
+        }
+
+        internal static void RecordShadow(CheckResult item, AiReviewDecision decision, string model)
+        {
+            if (item == null || decision == null) return;
+            item.AiReviewed = true;
+            item.AiDecision = IsDecisionLabel(decision.Verdict) ? decision.Verdict : "人工复核";
+            item.AiConfidence = Math.Max(0, Math.Min(1, decision.Confidence));
+            item.AiModel = model ?? "";
+            string note = "AI影子判断（" + (model ?? "未知模型") + "，置信度 " +
+                item.AiConfidence.ToString("P0") + "）：" + Clean(decision.Reason, 300) +
+                "；影子模式未改变规则判定";
+            item.Evidence = AppendEvidence(item.Evidence, note);
         }
 
         internal static string BuildObservedContext(string title, string mainText, string visibleText)

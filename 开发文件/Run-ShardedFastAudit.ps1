@@ -9,6 +9,10 @@
     [switch]$UseSavedLogin,
     [switch]$Resume,
     [switch]$RetryUnresolved,
+    [switch]$QuickIndependentEvidence,
+    [ValidateSet('off','shadow','assist')][string]$AiMode = 'off',
+    [int]$AiMaxCandidates = 50,
+    [int]$AiWorkers = 3,
     [switch]$PlanOnly
 )
 
@@ -17,6 +21,8 @@ $planningWatch = [Diagnostics.Stopwatch]::StartNew()
 if ($RowsPerShard -lt 100) { throw 'RowsPerShard must be at least 100.' }
 if ($PlatformIntervalMs -lt 400 -or $PlatformIntervalMs -gt 5000) { throw 'PlatformIntervalMs must be between 400 and 5000.' }
 if ($GenericIntervalMs -lt 50 -or $GenericIntervalMs -gt 2000) { throw 'GenericIntervalMs must be between 50 and 2000.' }
+if ($AiMaxCandidates -lt 1 -or $AiMaxCandidates -gt 200) { throw 'AiMaxCandidates must be between 1 and 200.' }
+if ($AiWorkers -lt 1 -or $AiWorkers -gt 8) { throw 'AiWorkers must be between 1 and 8.' }
 if (-not (Test-Path -LiteralPath $InputCsv -PathType Leaf)) { throw "Input CSV not found: $InputCsv" }
 $InputCsv = [IO.Path]::GetFullPath($InputCsv)
 $OutputCsv = [IO.Path]::GetFullPath($OutputCsv)
@@ -261,11 +267,19 @@ $oldPublicRetry = $env:FAST_AUDIT_PUBLIC_RETRY
 $oldSavedLogin = $env:FAST_AUDIT_USE_SAVED_LOGIN
 $oldInteractiveLogin = $env:FAST_AUDIT_LOGIN_INTERACTIVE
 $oldNumbers = $env:FAST_AUDIT_NUMBERS
+$oldQuickIndependent = $env:FAST_AUDIT_QUICK_INDEPENDENT_EVIDENCE
+$oldAiMode = $env:FAST_AUDIT_AI_MODE
+$oldAiMaxCandidates = $env:FAST_AUDIT_AI_MAX_CANDIDATES
+$oldAiWorkers = $env:FAST_AUDIT_AI_WORKERS
 try {
     $env:FAST_AUDIT_WORKERS = [string][Math]::Max(1, $Workers)
     $env:FAST_AUDIT_PLATFORM_INTERVAL_MS = [string]$PlatformIntervalMs
     $env:FAST_AUDIT_GENERIC_INTERVAL_MS = [string]$GenericIntervalMs
     $env:FAST_AUDIT_PUBLIC_RETRY = '1'
+    $env:FAST_AUDIT_QUICK_INDEPENDENT_EVIDENCE = if ($QuickIndependentEvidence) { '1' } else { $null }
+    $env:FAST_AUDIT_AI_MODE = if ($AiMode -eq 'off') { $null } else { $AiMode }
+    $env:FAST_AUDIT_AI_MAX_CANDIDATES = [string]$AiMaxCandidates
+    $env:FAST_AUDIT_AI_WORKERS = [string]$AiWorkers
     if ($UseSavedLogin -or $LoginFirst) { $env:FAST_AUDIT_USE_SAVED_LOGIN = '1' }
     $interactiveLoginPending = [bool]$LoginFirst
     # A sharded run is resumable by contract.  The manifest and per-shard
@@ -400,6 +414,10 @@ finally {
     $env:FAST_AUDIT_USE_SAVED_LOGIN = $oldSavedLogin
     $env:FAST_AUDIT_LOGIN_INTERACTIVE = $oldInteractiveLogin
     $env:FAST_AUDIT_NUMBERS = $oldNumbers
+    $env:FAST_AUDIT_QUICK_INDEPENDENT_EVIDENCE = $oldQuickIndependent
+    $env:FAST_AUDIT_AI_MODE = $oldAiMode
+    $env:FAST_AUDIT_AI_MAX_CANDIDATES = $oldAiMaxCandidates
+    $env:FAST_AUDIT_AI_WORKERS = $oldAiWorkers
     if ($runnerInfo -and (Test-Path -LiteralPath $runnerInfo.Directory)) { Remove-Item -LiteralPath $runnerInfo.Directory -Recurse -Force -ErrorAction SilentlyContinue }
 }
 

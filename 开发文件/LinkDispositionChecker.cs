@@ -4168,12 +4168,12 @@ namespace LinkDispositionChecker
                             await Task.Delay(500, token);
                             minimalProbe = await ReadProbeWithClientAsync(_zhihuClient, minimalProbeUrl, headers, token);
                         }
-                        if (minimalProbe != null && (minimalProbe.Status == 403 || minimalProbe.Status == 429))
-                        {
-                            ProbeResponse directMinimal = await ReadProbeWithClientAsync(_directClient,
-                                minimalProbeUrl, headers, token);
-                            if (directMinimal != null && directMinimal.Status > 0) minimalProbe = directMinimal;
-                        }
+                    if (minimalProbe != null && (minimalProbe.Status == 403 || minimalProbe.Status == 429))
+                    {
+                        ProbeResponse directMinimal = await ReadDirectProbeWithWebRequestAsync(
+                            minimalProbeUrl, headers, token);
+                        if (directMinimal != null && directMinimal.Status > 0) minimalProbe = directMinimal;
+                    }
                         if (minimalProbe != null && minimalProbe.Status == 200)
                         {
                             probe = minimalProbe;
@@ -5074,6 +5074,39 @@ namespace LinkDispositionChecker
                     RegexOptions.IgnoreCase);
         }
 
+        internal static bool IsWechatAccountClosed(string originalUrl, string currentUrl,
+            string title, string visible)
+        {
+            Uri original;
+            Uri current;
+            if (!Uri.TryCreate(originalUrl ?? "", UriKind.Absolute, out original) ||
+                !Uri.TryCreate(currentUrl ?? "", UriKind.Absolute, out current) ||
+                !current.Host.EndsWith("mp.weixin.qq.com", StringComparison.OrdinalIgnoreCase)) return false;
+            string text = WebUtility.HtmlDecode((title ?? "") + " " + (visible ?? ""));
+            return Regex.IsMatch(text, "此账号已自主注销[，,]?内容无法查看|账号已自主注销|帐号已自主注销",
+                RegexOptions.IgnoreCase);
+        }
+
+        internal static bool IsWeiboVideoIdentity(CheckResult result, string title,
+            string visible, string currentUrl)
+        {
+            if (result == null || String.IsNullOrWhiteSpace(result.ExpectedTitle)) return false;
+            Uri original;
+            Uri current;
+            if (!Uri.TryCreate(result.OriginalUrl ?? "", UriKind.Absolute, out original) ||
+                !Uri.TryCreate(currentUrl ?? "", UriKind.Absolute, out current) ||
+                !current.Host.EndsWith("weibo.com", StringComparison.OrdinalIgnoreCase) ||
+                !((original.AbsolutePath ?? "").IndexOf("/tv/show/", StringComparison.OrdinalIgnoreCase) >= 0)) return false;
+            Match id = Regex.Match(original.AbsolutePath ?? "", @"/tv/show/[0-9]+:([0-9]+)", RegexOptions.IgnoreCase);
+            if (!id.Success || (currentUrl ?? "").IndexOf(id.Groups[1].Value, StringComparison.OrdinalIgnoreCase) < 0 ||
+                LooksLikeLogin(currentUrl) || LooksLikeErrorPage(currentUrl, title, visible)) return false;
+            string pageText = (title ?? "") + " " + (visible ?? "");
+            return (MatchesExpectedTitle(result.ExpectedTitle, pageText) ||
+                MatchesExpectedTitleByFragments(result.ExpectedTitle, pageText)) &&
+                (String.IsNullOrWhiteSpace(result.ExpectedAuthor) || MatchesExpectedAuthor(result.ExpectedAuthor, pageText)) &&
+                Regex.IsMatch(pageText, "播放视频|次观看|发布于|视频", RegexOptions.IgnoreCase);
+        }
+
         internal static bool IsTiebaRenderedRemoval(string html, string id)
         {
             string source = html ?? "";
@@ -5742,6 +5775,65 @@ namespace LinkDispositionChecker
             catch { return null; }
         }
 
+        private async Task<ProbeResponse> ReadDirectProbeWithWebRequestAsync(string url,
+            IDictionary<string, string> headers, CancellationToken token)
+        {
+            return await Task.Run(delegate
+            {
+                token.ThrowIfCancellationRequested();
+                try
+                {
+                    var request = (HttpWebRequest)WebRequest.Create(url);
+                    request.Method = "GET";
+                    request.AllowAutoRedirect = true;
+                    request.MaximumAutomaticRedirections = 5;
+                    request.AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate;
+                    request.Proxy = null;
+                    request.Timeout = 15000;
+                    request.ReadWriteTimeout = 15000;
+                    request.UserAgent = "Mozilla/5.0";
+                    request.Accept = "application/json";
+                    if (headers != null)
+                        foreach (var header in headers)
+                        {
+                            if (header.Key.Equals("Referer", StringComparison.OrdinalIgnoreCase)) request.Referer = header.Value;
+                            else if (header.Key.Equals("Accept-Language", StringComparison.OrdinalIgnoreCase))
+                                request.Headers[HttpRequestHeader.AcceptLanguage] = header.Value;
+                        }
+                    using (var response = (HttpWebResponse)request.GetResponse())
+                    using (var stream = response.GetResponseStream())
+                    using (var reader = new StreamReader(stream, Encoding.UTF8, true))
+                    {
+                        char[] buffer = new char[Math.Min(_bodyBytes, 700000)];
+                        int read = reader.ReadBlock(buffer, 0, buffer.Length);
+                        return new ProbeResponse
+                        {
+                            Status = (int)response.StatusCode,
+                            Body = new string(buffer, 0, read),
+                            FinalUrl = response.ResponseUri == null ? url : response.ResponseUri.AbsoluteUri
+                        };
+                    }
+                }
+                catch (WebException error)
+                {
+                    var response = error.Response as HttpWebResponse;
+                    if (response == null) return null;
+                    using (response)
+                    using (var stream = response.GetResponseStream())
+                    using (var reader = stream == null ? null : new StreamReader(stream, Encoding.UTF8, true))
+                    {
+                        string body = reader == null ? "" : reader.ReadToEnd();
+                        return new ProbeResponse
+                        {
+                            Status = (int)response.StatusCode,
+                            Body = body,
+                            FinalUrl = response.ResponseUri == null ? url : response.ResponseUri.AbsoluteUri
+                        };
+                    }
+                }
+            }, token);
+        }
+
         private async Task<ProbeResponse> TryReadCleanPublicProbeAsync(string url, IDictionary<string, string> headers, CancellationToken token)
         {
             await BaiduPublicProbeGate.WaitAsync(token);
@@ -6026,9 +6118,22 @@ namespace LinkDispositionChecker
                 return DecideEvidence(EvidenceKind.TargetRemovalExplicit, EvidenceStrength.Conclusive,
                     "rendered-page", "百度贴吧", "", "百度贴吧目标帖子进入官方404/帖子不存在页面", currentUrl, true);
             }
+            // WeChat may return HTTP 200 with a platform shell when the public
+            // article's account has been注销. This is a target-level state, not
+            // a generic login or anti-abuse page, so it can be resolved safely.
+            if (IsWechatAccountClosed(result.OriginalUrl, currentUrl, title, visible))
+            {
+                return DecideEvidence(EvidenceKind.TargetRemovalExplicit, EvidenceStrength.Conclusive,
+                    "rendered-page", "微信", "", "微信页面明确提示此账号已自主注销，目标内容无法查看", currentUrl, true);
+            }
 
             bool expectedMatch = MatchesExpectedContent(result.ExpectedTitle, result.ExpectedExcerpt, title + " " + visible);
             bool authorMatch = MatchesExpectedAuthor(result.ExpectedAuthor, title + " " + visible);
+            if (IsWeiboVideoIdentity(result, title, visible, currentUrl))
+            {
+                return DecideEvidence(EvidenceKind.TargetContentPresent, EvidenceStrength.Strong,
+                    "rendered-page", "微博视频", "", "微博视频页保留目标视频编号、匹配标题和发布账号", currentUrl, true);
+            }
             bool strongContentIdentity = HasStrongRenderedContentIdentity(result, page, expectedMatch);
             Uri originalIdentityUri;
             Uri.TryCreate(result.OriginalUrl, UriKind.Absolute, out originalIdentityUri);
@@ -9002,6 +9107,8 @@ namespace LinkDispositionChecker
             await Task.Delay(wait, token);
             RenderedPageData latest = await ReadPageAsync(browser, token);
             int retries = IsFastDynamicHost(url) ? 3 : 1;
+            if (url.IndexOf("mp.weixin.qq.com", StringComparison.OrdinalIgnoreCase) >= 0)
+                retries = 5;
             for (int attempt = 0; attempt < retries && (latest.Text ?? "").Length < 160; attempt++)
             {
                 await Task.Delay(500, token);
@@ -9018,7 +9125,10 @@ namespace LinkDispositionChecker
             if (host.Contains("dongchedi.com") || host.Contains("dcdapp.com") ||
                 host.Contains("xueqiu.com") || host.Contains("weibo.com") ||
                 host.Contains("bilibili.com") || host.Contains("kuaishou.com") ||
-                host.Contains("mp.weixin.qq.com")) return 2400;
+                // WeChat public articles may first paint a generic platform shell
+                // before replacing it with the article after its anti-abuse token
+                // is accepted. Allow that second paint in the fast browser pass.
+                host.Contains("mp.weixin.qq.com")) return 5000;
             return IsFastDynamicHost(url) ? 1700 : 700;
         }
 

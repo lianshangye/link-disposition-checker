@@ -935,6 +935,29 @@ internal static class RegressionTests
                 "https://tv.sohu.com/404/index.shtml");
         if (!renderedSocialRemovalPassed) _failures++;
 
+        bool platformSpecificRenderedPassed =
+            Checker.IsWechatAccountClosed(
+                "https://mp.weixin.qq.com/s?__biz=test&mid=2247498867&idx=1&sn=test",
+                "https://mp.weixin.qq.com/s?__biz=test&mid=2247498867&idx=1&sn=test&poc_token=test",
+                "微信公众平台", "此账号已自主注销，内容无法查看") &&
+            !Checker.IsWechatAccountClosed(
+                "https://mp.weixin.qq.com/s?__biz=test&mid=1&idx=1&sn=test",
+                "https://mp.weixin.qq.com/s?__biz=test&mid=1&idx=1&sn=test",
+                "微信公众平台", "环境异常，完成验证后即可继续访问") &&
+            Checker.IsWeiboVideoIdentity(
+                new CheckResult
+                {
+                    OriginalUrl = "https://weibo.com/tv/show/1034:5320983868014770",
+                    ExpectedTitle = "内外双重夹击！增收却不盈利，长城该如何突围？",
+                    ExpectedAuthor = "极速视驾"
+                },
+                "内外双重夹击！增收却... - @极速视驾 的视频 - 视频 - 微博",
+                "播放视频 25次观看 · 内外双重夹击！增收却不盈利，长城该如何突围？ · 发布于 重庆 极速视驾 分享视频",
+                "https://weibo.com/tv/show/1034:5320983868014770");
+        Console.WriteLine((platformSpecificRenderedPassed ? "PASS " : "FAIL ") +
+            "微信账号注销和微博视频页目标级身份识别");
+        if (!platformSpecificRenderedPassed) _failures++;
+
         bool sohuFeedPassed;
         bool sohuFeedRemoved;
         sohuFeedPassed = Checker.TryMatchSohuFeedDetail(

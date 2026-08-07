@@ -264,11 +264,21 @@ internal static class FastAuditRunner
             StringComparison.OrdinalIgnoreCase);
         bool savedLogin = String.Equals(Environment.GetEnvironmentVariable("FAST_AUDIT_USE_SAVED_LOGIN"), "1",
             StringComparison.OrdinalIgnoreCase);
-        if ((interactiveLogin || savedLogin) && Interlocked.Exchange(ref _savedLoginCaptureAttempted, 1) == 0)
+        string cookieHandoffPath = Environment.GetEnvironmentVariable("FAST_AUDIT_COOKIE_HANDOFF");
+        if (AuthenticatedCookieBridge.Count == 0 && !String.IsNullOrWhiteSpace(cookieHandoffPath))
+        {
+            bool imported = AuthenticatedCookieBridge.ImportEncrypted(cookieHandoffPath);
+            Console.WriteLine("COOKIE_HANDOFF_IMPORTED=" + (imported ? "1" : "0"));
+        }
+        if (AuthenticatedCookieBridge.Count == 0 && (interactiveLogin || savedLogin) &&
+            Interlocked.Exchange(ref _savedLoginCaptureAttempted, 1) == 0)
         {
             CaptureBrowserLogin(jobs, !interactiveLogin);
             Console.WriteLine((interactiveLogin ? "INTERACTIVE_LOGIN_COOKIES=" : "SAVED_LOGIN_COOKIES=") +
                 AuthenticatedCookieBridge.Count);
+            if (!String.IsNullOrWhiteSpace(cookieHandoffPath) && AuthenticatedCookieBridge.Count > 0)
+                Console.WriteLine("COOKIE_HANDOFF_EXPORTED=" +
+                    (AuthenticatedCookieBridge.ExportEncrypted(cookieHandoffPath) ? "1" : "0"));
         }
         bool resumeEnabled = String.Equals(Environment.GetEnvironmentVariable("FAST_AUDIT_RESUME"), "1", StringComparison.OrdinalIgnoreCase);
         string inputSha256 = AuditCheckpointStore.ComputeInputSha256(input);

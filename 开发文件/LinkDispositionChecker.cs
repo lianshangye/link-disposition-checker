@@ -1711,6 +1711,8 @@ namespace LinkDispositionChecker
     {
         private static readonly object Sync = new object();
         private static readonly List<BrowserSessionCookie> Cookies = new List<BrowserSessionCookie>();
+        private static readonly JavaScriptSerializer Serializer = new JavaScriptSerializer { MaxJsonLength = 1000000 };
+        private static readonly byte[] HandoffEntropy = Encoding.UTF8.GetBytes("LinkDispositionChecker.CookieHandoff.v1");
 
         internal static void Replace(IEnumerable<BrowserSessionCookie> cookies)
         {
@@ -1759,6 +1761,45 @@ namespace LinkDispositionChecker
         internal static void Clear()
         {
             lock (Sync) Cookies.Clear();
+        }
+
+        // The sharded runner may start one process per shard.  Export/import is
+        // an opt-in, same-user, one-run handoff protected by Windows DPAPI;
+        // callers must delete the file when the run ends.  This is never used
+        // for remote/public-reader requests.
+        internal static bool ExportEncrypted(string path)
+        {
+            if (String.IsNullOrWhiteSpace(path)) return false;
+            try
+            {
+                string json = Serializer.Serialize(Snapshot());
+                byte[] protectedBytes = ProtectedData.Protect(Encoding.UTF8.GetBytes(json), HandoffEntropy,
+                    DataProtectionScope.CurrentUser);
+                string temporary = path + ".tmp";
+                string directory = Path.GetDirectoryName(path);
+                if (!String.IsNullOrWhiteSpace(directory)) Directory.CreateDirectory(directory);
+                File.WriteAllBytes(temporary, protectedBytes);
+                if (File.Exists(path)) File.Replace(temporary, path, null);
+                else File.Move(temporary, path);
+                return true;
+            }
+            catch { return false; }
+        }
+
+        internal static bool ImportEncrypted(string path)
+        {
+            if (String.IsNullOrWhiteSpace(path) || !File.Exists(path)) return false;
+            try
+            {
+                byte[] protectedBytes = File.ReadAllBytes(path);
+                byte[] bytes = ProtectedData.Unprotect(protectedBytes, HandoffEntropy,
+                    DataProtectionScope.CurrentUser);
+                List<BrowserSessionCookie> cookies = Serializer.Deserialize<List<BrowserSessionCookie>>(
+                    Encoding.UTF8.GetString(bytes));
+                Replace(cookies);
+                return Count > 0;
+            }
+            catch { return false; }
         }
 
         private static bool IsCookieDomainAllowed(string value)

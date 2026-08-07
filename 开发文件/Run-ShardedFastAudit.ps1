@@ -271,6 +271,8 @@ $oldQuickIndependent = $env:FAST_AUDIT_QUICK_INDEPENDENT_EVIDENCE
 $oldAiMode = $env:FAST_AUDIT_AI_MODE
 $oldAiMaxCandidates = $env:FAST_AUDIT_AI_MAX_CANDIDATES
 $oldAiWorkers = $env:FAST_AUDIT_AI_WORKERS
+$oldCookieHandoff = $env:FAST_AUDIT_COOKIE_HANDOFF
+$cookieHandoffPath = Join-Path $env:TEMP ('LinkCheckerCookieHandoff-' + $inputHash.Substring(0, 16).ToLowerInvariant() + '.bin')
 try {
     $env:FAST_AUDIT_WORKERS = [string][Math]::Max(1, $Workers)
     $env:FAST_AUDIT_PLATFORM_INTERVAL_MS = [string]$PlatformIntervalMs
@@ -280,6 +282,7 @@ try {
     $env:FAST_AUDIT_AI_MODE = if ($AiMode -eq 'off') { $null } else { $AiMode }
     $env:FAST_AUDIT_AI_MAX_CANDIDATES = [string]$AiMaxCandidates
     $env:FAST_AUDIT_AI_WORKERS = [string]$AiWorkers
+    $env:FAST_AUDIT_COOKIE_HANDOFF = $cookieHandoffPath
     if ($UseSavedLogin -or $LoginFirst) { $env:FAST_AUDIT_USE_SAVED_LOGIN = '1' }
     $interactiveLoginPending = [bool]$LoginFirst
     # A sharded run is resumable by contract.  The manifest and per-shard
@@ -418,6 +421,10 @@ finally {
     $env:FAST_AUDIT_AI_MODE = $oldAiMode
     $env:FAST_AUDIT_AI_MAX_CANDIDATES = $oldAiMaxCandidates
     $env:FAST_AUDIT_AI_WORKERS = $oldAiWorkers
+    $env:FAST_AUDIT_COOKIE_HANDOFF = $oldCookieHandoff
+    if (Test-Path -LiteralPath $cookieHandoffPath) {
+        Remove-Item -LiteralPath $cookieHandoffPath -Force -ErrorAction SilentlyContinue
+    }
     if ($runnerInfo -and (Test-Path -LiteralPath $runnerInfo.Directory)) { Remove-Item -LiteralPath $runnerInfo.Directory -Recurse -Force -ErrorAction SilentlyContinue }
 }
 

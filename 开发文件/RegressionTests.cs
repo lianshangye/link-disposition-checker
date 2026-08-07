@@ -35,6 +35,26 @@ internal static class RegressionTests
         cookieBridgePassed = cookieBridgePassed && AuthenticatedCookieBridge.Count == 0;
         Console.WriteLine((cookieBridgePassed ? "PASS " : "FAIL ") + "登录会话 Cookie 仅进程内桥接、过滤无效域名并可清空");
         if (!cookieBridgePassed) _failures++;
+        string cookieHandoff = Path.Combine(Path.GetTempPath(), "LinkCheckerCookieHandoff-" + Guid.NewGuid().ToString("N") + ".bin");
+        bool cookieHandoffPassed = false;
+        try
+        {
+            AuthenticatedCookieBridge.Replace(new[]
+            {
+                new BrowserSessionCookie { Name = "sid", Value = "handoff", Domain = ".example.com", Path = "/", IsSecure = true }
+            });
+            cookieHandoffPassed = AuthenticatedCookieBridge.ExportEncrypted(cookieHandoff);
+            AuthenticatedCookieBridge.Clear();
+            cookieHandoffPassed = cookieHandoffPassed && AuthenticatedCookieBridge.ImportEncrypted(cookieHandoff) &&
+                AuthenticatedCookieBridge.Count == 1 && AuthenticatedCookieBridge.Snapshot()[0].Value == "handoff";
+        }
+        finally
+        {
+            AuthenticatedCookieBridge.Clear();
+            try { if (File.Exists(cookieHandoff)) File.Delete(cookieHandoff); } catch { }
+        }
+        Console.WriteLine((cookieHandoffPassed ? "PASS " : "FAIL ") + "登录 Cookie 分片交接使用当前用户 DPAPI 且可清理");
+        if (!cookieHandoffPassed) _failures++;
         bool routeIsolationPassed = Checker.ShouldAttachBrowserCookies(false) && !Checker.ShouldAttachBrowserCookies(true);
         Console.WriteLine((routeIsolationPassed ? "PASS " : "FAIL ") + "远程取证客户端不携带登录 Cookie");
         if (!routeIsolationPassed) _failures++;

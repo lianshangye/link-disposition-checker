@@ -19,7 +19,13 @@ internal static class RotatingSampleBuilder
         public string UrlKey;
     }
 
-    private const int MaximumRowsPerInfrastructure = 24;
+    // A syndication ledger can contain dozens of domains resolved to the same
+    // shared IP. Letting one infrastructure contribute 24 rows would allow a
+    // single WAF/outage to dominate a 240-row acceptance round. Keep the sample
+    // broad and reproducible while retaining enough net-media rows for the
+    // required coverage stratum. This is a sampling fairness cap, not a
+    // verdict override: failures remain unfinished until target evidence exists.
+    private const int MaximumRowsPerInfrastructure = 16;
 
     private const string OutputHeader =
         "\u5e8f\u53f7,\u5e73\u53f0\u540d\u79f0,\u6807\u9898,\u6458\u8981,\u8d26\u53f7\u6635\u79f0,\u94fe\u63a5,\u5185\u5bb9\u7c7b\u578b," +

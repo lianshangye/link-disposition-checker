@@ -4154,6 +4154,32 @@ namespace LinkDispositionChecker
                             probeUrl = alternateProbeUrl;
                         }
                     }
+                    // The include-heavy endpoint is intermittently challenged
+                    // with HTTP 403, while the same official answer resource
+                    // without optional fields remains publicly readable. Try
+                    // that minimal representation before leaving the row for
+                    // login review; identity checks below remain mandatory.
+                    if (probe == null || probe.Status == 403 || probe.Status == 429)
+                    {
+                        string minimalProbeUrl = "https://www.zhihu.com/api/v4/answers/" + id;
+                        ProbeResponse minimalProbe = await TryReadProbeAsync(minimalProbeUrl, headers, token);
+                        if (minimalProbe != null && (minimalProbe.Status == 403 || minimalProbe.Status == 429))
+                        {
+                            await Task.Delay(500, token);
+                            minimalProbe = await ReadProbeWithClientAsync(_zhihuClient, minimalProbeUrl, headers, token);
+                        }
+                        if (minimalProbe != null && (minimalProbe.Status == 403 || minimalProbe.Status == 429))
+                        {
+                            ProbeResponse directMinimal = await ReadProbeWithClientAsync(_directClient,
+                                minimalProbeUrl, headers, token);
+                            if (directMinimal != null && directMinimal.Status > 0) minimalProbe = directMinimal;
+                        }
+                        if (minimalProbe != null && minimalProbe.Status == 200)
+                        {
+                            probe = minimalProbe;
+                            probeUrl = minimalProbeUrl;
+                        }
+                    }
                 }
                 finally { ZhihuProbeGate.Release(); }
                 if (probe == null) return null;

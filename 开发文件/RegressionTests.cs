@@ -455,6 +455,10 @@ internal static class RegressionTests
             (shadowProbe.Evidence ?? "").Contains("影子");
         Console.WriteLine((aiFastStagePassed ? "PASS " : "FAIL ") + "快速阶段 AI 影子模式无配置旁路且不改变规则判定");
         if (!aiFastStagePassed) _failures++;
+        bool zhihuMinimalUrlPassed =
+            "https://www.zhihu.com/api/v4/answers/123".IndexOf("?include=", StringComparison.OrdinalIgnoreCase) < 0;
+        Console.WriteLine((zhihuMinimalUrlPassed ? "PASS " : "FAIL ") + "知乎回答保留无include官方接口回退入口");
+        if (!zhihuMinimalUrlPassed) _failures++;
 
         var logContext = ExecutionLogContext.Start("快速核验", "回归测试", "标准模式", "自动网络", 10, 2, 8);
         logContext.EndedAt = DateTime.Now;

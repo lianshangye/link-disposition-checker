@@ -13,6 +13,8 @@ param(
     [double]$MaximumUnresolvedRate = 0.05,
     [int]$MaximumNetworkAttempts = 3,
     [switch]$QuickIndependentEvidence,
+    [switch]$LoginFirst,
+    [switch]$UseSavedLogin,
     [ValidateSet('off','shadow','assist')][string]$AiMode = 'off',
     [int]$AiMaxCandidates = 50,
     [int]$AiWorkers = 3,
@@ -77,6 +79,12 @@ $manifestLines = @(
     'MINIMUM_HOSTS=' + $MinimumHosts,
     'MAXIMUM_UNRESOLVED_RATE=' + $MaximumUnresolvedRate.ToString('0.0000', [Globalization.CultureInfo]::InvariantCulture),
     'MAXIMUM_NETWORK_ATTEMPTS=' + $MaximumNetworkAttempts,
+    'AI_MODE=' + $AiMode,
+    'AI_MAX_CANDIDATES=' + $AiMaxCandidates,
+    'AI_WORKERS=' + $AiWorkers,
+    'QUICK_INDEPENDENT_EVIDENCE=' + [bool]$QuickIndependentEvidence,
+    'LOGIN_FIRST=' + [bool]$LoginFirst,
+    'USE_SAVED_LOGIN=' + [bool]$UseSavedLogin,
     'SEED_PREFIX=' + $SeedPrefix,
     'SOURCE_LIST=' + $SourceList,
     'HISTORY=' + $HistoryCsv
@@ -146,6 +154,7 @@ try {
                         -RowsPerShard ([Math]::Max(100, $SampleRows)) -Workers $Workers `
                         -QuickIndependentEvidence:$QuickIndependentEvidence -AiMode $AiMode `
                         -AiMaxCandidates $AiMaxCandidates -AiWorkers $AiWorkers `
+                        -LoginFirst:$LoginFirst -UseSavedLogin:$UseSavedLogin `
                         *>&1
                     $attemptOutput | ForEach-Object { Write-Host $_ }
                     $attemptOutput | Out-File -FilePath $attemptLog -Append -Encoding utf8

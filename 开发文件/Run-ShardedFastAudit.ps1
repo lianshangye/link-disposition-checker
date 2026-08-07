@@ -272,7 +272,23 @@ $oldAiMode = $env:FAST_AUDIT_AI_MODE
 $oldAiMaxCandidates = $env:FAST_AUDIT_AI_MAX_CANDIDATES
 $oldAiWorkers = $env:FAST_AUDIT_AI_WORKERS
 $oldCookieHandoff = $env:FAST_AUDIT_COOKIE_HANDOFF
+$oldLoginOrigins = $env:FAST_AUDIT_LOGIN_ORIGINS
 $cookieHandoffPath = Join-Path $env:TEMP ('LinkCheckerCookieHandoff-' + $inputHash.Substring(0, 16).ToLowerInvariant() + '.bin')
+$loginOrigins = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+foreach ($inputPartForLogin in $shardInputs) {
+    foreach ($rowForLogin in @(Import-Csv -LiteralPath $inputPartForLogin.FullName)) {
+        $urlForLogin = ''
+        foreach ($property in @('链接','url','网址','文章链接','原链接','发布链接')) {
+            if ($rowForLogin.PSObject.Properties[$property]) { $urlForLogin = [string]$rowForLogin.$property; if ($urlForLogin) { break } }
+        }
+        try {
+            $uriForLogin = [Uri]$urlForLogin
+            if ($uriForLogin.Scheme -in @('http','https')) {
+                [void]$loginOrigins.Add($uriForLogin.GetLeftPart([UriPartial]::Authority) + '/')
+            }
+        } catch { }
+    }
+}
 try {
     $env:FAST_AUDIT_WORKERS = [string][Math]::Max(1, $Workers)
     $env:FAST_AUDIT_PLATFORM_INTERVAL_MS = [string]$PlatformIntervalMs
@@ -283,6 +299,7 @@ try {
     $env:FAST_AUDIT_AI_MAX_CANDIDATES = [string]$AiMaxCandidates
     $env:FAST_AUDIT_AI_WORKERS = [string]$AiWorkers
     $env:FAST_AUDIT_COOKIE_HANDOFF = $cookieHandoffPath
+    $env:FAST_AUDIT_LOGIN_ORIGINS = [String]::Join(';', @($loginOrigins | Sort-Object))
     if ($UseSavedLogin -or $LoginFirst) { $env:FAST_AUDIT_USE_SAVED_LOGIN = '1' }
     $interactiveLoginPending = [bool]$LoginFirst
     # A sharded run is resumable by contract.  The manifest and per-shard
@@ -422,6 +439,7 @@ finally {
     $env:FAST_AUDIT_AI_MAX_CANDIDATES = $oldAiMaxCandidates
     $env:FAST_AUDIT_AI_WORKERS = $oldAiWorkers
     $env:FAST_AUDIT_COOKIE_HANDOFF = $oldCookieHandoff
+    $env:FAST_AUDIT_LOGIN_ORIGINS = $oldLoginOrigins
     if (Test-Path -LiteralPath $cookieHandoffPath) {
         Remove-Item -LiteralPath $cookieHandoffPath -Force -ErrorAction SilentlyContinue
     }

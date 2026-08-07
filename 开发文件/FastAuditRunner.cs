@@ -489,7 +489,21 @@ internal static class FastAuditRunner
     private static void CaptureBrowserLogin(IEnumerable<CheckJob> jobs, bool automatic)
     {
         Exception browserError = null;
-        var items = (jobs ?? Enumerable.Empty<CheckJob>()).Where(job => job != null)
+        var sourceJobs = (jobs ?? Enumerable.Empty<CheckJob>()).Where(job => job != null).ToList();
+        string origins = Environment.GetEnvironmentVariable("FAST_AUDIT_LOGIN_ORIGINS");
+        if (!String.IsNullOrWhiteSpace(origins))
+        {
+            int number = -1;
+            foreach (string origin in origins.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                Uri uri;
+                if (!Uri.TryCreate(origin.Trim(), UriKind.Absolute, out uri)) continue;
+                if (sourceJobs.Any(job => String.Equals(job.Url, uri.GetLeftPart(UriPartial.Authority) + "/",
+                    StringComparison.OrdinalIgnoreCase))) continue;
+                sourceJobs.Add(new CheckJob { Number = number--, Url = uri.GetLeftPart(UriPartial.Authority) + "/" });
+            }
+        }
+        var items = sourceJobs
             .Select(job => new CheckResult
             {
                 Number = job.Number,

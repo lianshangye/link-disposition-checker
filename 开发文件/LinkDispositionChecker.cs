@@ -454,8 +454,8 @@ namespace LinkDispositionChecker
         public static PerformanceProfile Resolve(string selection)
         {
             if (selection == "低配模式") return new PerformanceProfile { Name = "低配", Workers = 1, GridRows = 700, BodyBytes = 240000, RefreshMilliseconds = 500 };
-            if (selection == "标准模式") return new PerformanceProfile { Name = "标准", Workers = 3, GridRows = 2500, BodyBytes = 550000, RefreshMilliseconds = 260 };
-            if (selection == "高性能模式") return new PerformanceProfile { Name = "高性能", Workers = 6, GridRows = 5000, BodyBytes = 900000, RefreshMilliseconds = 180 };
+            if (selection == "标准模式") return new PerformanceProfile { Name = "标准", Workers = 6, GridRows = 2500, BodyBytes = 550000, RefreshMilliseconds = 260 };
+            if (selection == "高性能模式") return new PerformanceProfile { Name = "高性能", Workers = 12, GridRows = 5000, BodyBytes = 900000, RefreshMilliseconds = 180 };
             if (!Environment.Is64BitProcess) return Resolve("低配模式");
             long memory = GetPhysicalMemoryBytes();
             int processors = Math.Max(1, Environment.ProcessorCount);
@@ -1815,7 +1815,7 @@ namespace LinkDispositionChecker
     {
         private static readonly string[] RemovedSignals = new[]
         {
-            "该内容已删除", "内容已被删除", "内容已删除", "原文已删除", "作者已删除", "视频已删除", "该文章已被删除", "该文章已被作者删除", "抱歉，该文章已被删除",
+            "该内容已删除", "内容已被删除", "内容已删除", "原文已删除", "作者已删除", "视频已删除", "该文章已被删除", "该文章已被作者删除", "抱歉，该文章已被删除", "内容已被作者或管理员删除",
             "该内容已经删除", "内容已经删除", "该文章已删除", "该文章已经删除", "文章已经删除",
             "该视频已经删除", "视频已经删除", "该帖子已删除", "帖子已删除", "该笔记已被删除", "笔记已删除",
             "该内容已下架", "内容已下架", "视频已下架", "商品已下架", "该内容不存在", "内容不存在",
@@ -1976,7 +1976,11 @@ namespace LinkDispositionChecker
                 host == "weibo.cn" || host.EndsWith(".weibo.cn", StringComparison.Ordinal) ||
                 host == "toutiao.com" || host.EndsWith(".toutiao.com", StringComparison.Ordinal) ||
                 host == "douyin.com" || host.EndsWith(".douyin.com", StringComparison.Ordinal) ||
-                host == "iesdouyin.com" || host.EndsWith(".iesdouyin.com", StringComparison.Ordinal);
+                host == "iesdouyin.com" || host.EndsWith(".iesdouyin.com", StringComparison.Ordinal) ||
+                host == "a.mp.uc.cn" || host == "mparticle.uc.cn" ||
+                host == "uczzd.cn" || host.EndsWith(".uczzd.cn", StringComparison.Ordinal) ||
+                host == "qctt.cn" || host.EndsWith(".qctt.cn", StringComparison.Ordinal) ||
+                host == "radioidaily.com" || host.EndsWith(".radioidaily.com", StringComparison.Ordinal);
         }
 
         internal static async Task WaitForRequestSlotAsync(Uri uri, CancellationToken token)
@@ -2209,6 +2213,22 @@ namespace LinkDispositionChecker
                 StringComparison.OrdinalIgnoreCase);
         }
 
+        internal static bool IsQuickRenderedEvidenceEnabled()
+        {
+            // Browser rendering is a separate deep-review operation by
+            // default. It can be explicitly enabled for a directed run.
+            return String.Equals(Environment.GetEnvironmentVariable("FAST_AUDIT_QUICK_RENDER"), "1",
+                StringComparison.OrdinalIgnoreCase);
+        }
+
+        internal static int TransportFallbackBudgetMilliseconds()
+        {
+            // The fast runner must release a worker quickly when a host is
+            // unreachable. Deep review keeps the longer allowance because it
+            // is an explicit, single-target action.
+            return IsQuickPassEnabled() ? 10000 : 18000;
+        }
+
         internal static IWebProxy ResolveConfiguredProxy()
         {
             string configuredProxy = Environment.GetEnvironmentVariable("LINK_CHECKER_HTTP_PROXY");
@@ -2427,6 +2447,15 @@ namespace LinkDispositionChecker
                         platformProbe = ProbeOutcome(EvidenceKind.TargetRemovalExplicit, EvidenceStrength.Conclusive,
                             "official-page", "汽车之家", "",
                             "汽车之家最终地址带有 pc-error-no-hidden 目标错误标记，且已跳离原文章路径",
+                            result.FinalUrl, true);
+                    }
+                    if ((platformProbe == null || !platformProbe.Resolved) && code == 200 &&
+                        IsTargetContentModerationState(body) && IsSameTargetLocation(uri,
+                            new Uri(result.FinalUrl, UriKind.Absolute)))
+                    {
+                        platformProbe = ProbeOutcome(EvidenceKind.TargetRemovalExplicit,
+                            EvidenceStrength.Conclusive, "official-page", result.Platform, "",
+                            "目标内容页明确提示内容不适合展示，当前无法公开查看",
                             result.FinalUrl, true);
                     }
                     // A supplier URL may legitimately redirect to the publisher's
@@ -2657,11 +2686,15 @@ namespace LinkDispositionChecker
                         bool reliableTitleIdentity = String.IsNullOrEmpty(signal) &&
                             HasReliablePageTitleIdentity(expectedTitle, title, visible, uri, result.FinalUrl);
 
-                        if (strongContentIdentity || reliableTitleIdentity || crossDomainArticle)
+                        bool rewrittenTitleIdentity = HasSameHostArticleAuthorIdentity(
+                            result, title, visible, body, result.FinalUrl);
+                        if (strongContentIdentity || reliableTitleIdentity || crossDomainArticle || rewrittenTitleIdentity)
                         {
                             result.Verdict = "仍可访问";
                             result.Evidence = crossDomainArticle
                                 ? "原链接已跳转到其他站点，但最终页面标题、正文结构和目标内容仍可核验（HTTP " + code + "）"
+                                : rewrittenTitleIdentity && !strongContentIdentity && !reliableTitleIdentity
+                                ? "同站同路径保留目标编号、发文作者和正文结构；页面标题可能已修改（HTTP " + code + "）"
                                 : authorMatch && expectedMatch
                                 ? "页面仍能找到目标内容片段及发文作者“" + expectedAuthor.Trim() + "”（HTTP " + code + "）"
                                 : !String.IsNullOrEmpty(signal)
@@ -2758,7 +2791,8 @@ namespace LinkDispositionChecker
                 }
                 result.Verdict = "暂时异常";
                 result.StatusCode = "超时";
-                result.Evidence = "18 秒内未响应，建议稍后重试";
+                result.Evidence = TransportFallbackBudgetMilliseconds() / 1000 +
+                    " 秒内未响应，建议稍后重试";
             }
             catch (HttpRequestException ex)
             {
@@ -2835,7 +2869,10 @@ namespace LinkDispositionChecker
                 // Platform APIs are optional fast-stage evidence. Bound the
                 // complete probe (including proxy/direct retries) so one
                 // challenged platform cannot occupy a worker for a minute.
-                quickProbeTimeout.CancelAfter(8000);
+                // A few known dynamic targets need slightly longer for their
+                // first browser render; keep that allowance platform-specific
+                // rather than slowing every ordinary URL in a large batch.
+                quickProbeTimeout.CancelAfter(QuickPlatformProbeBudgetMilliseconds(original));
                 effectiveToken = quickProbeTimeout.Token;
             }
             try
@@ -2857,11 +2894,68 @@ namespace LinkDispositionChecker
             }
         }
 
+        internal static int QuickPlatformProbeBudgetMilliseconds(Uri original)
+        {
+            string host = original == null ? "" : (original.Host ?? "").ToLowerInvariant();
+            if (host.EndsWith("10jqka.com.cn", StringComparison.Ordinal) ||
+                host.EndsWith("xueqiu.com", StringComparison.Ordinal) ||
+                host.EndsWith("ixigua.com", StringComparison.Ordinal)) return 8000;
+            return 5000;
+        }
+
         private async Task<PlatformProbeOutcome> ProbePlatformContentCoreAsync(Uri original, string expectedTitle, string expectedExcerpt, string expectedAuthor, CancellationToken token)
         {
             if (original == null) return null;
             string host = original.Host.ToLowerInvariant();
             Match identity;
+            if (host.EndsWith("360kuai.com", StringComparison.Ordinal))
+            {
+                Match article = Regex.Match(original.AbsolutePath ?? "", @"^/([a-f0-9]{16,})(?:/|$)", RegexOptions.IgnoreCase);
+                if (article.Success)
+                {
+                    ProbeResponse page = await TryReadProbeAsync(original.AbsoluteUri, null, token);
+                    if (page != null && page.Status == 200 &&
+                        TryMatch360KuaiTargetPage(page.Body, article.Groups[1].Value,
+                            expectedTitle, expectedExcerpt))
+                        return ProbeOutcome(EvidenceKind.TargetContentPresent, EvidenceStrength.Conclusive,
+                            "official-page", "快资讯", article.Groups[1].Value,
+                            "快资讯官方目标页返回不可变内容编号和匹配当前标题/摘要", page.FinalUrl, true);
+                }
+            }
+            if (host.EndsWith("pcauto.com.cn", StringComparison.Ordinal))
+            {
+                Match article = Regex.Match(original.AbsolutePath ?? "", @"/article/([0-9]+)\.html$", RegexOptions.IgnoreCase);
+                if (article.Success)
+                {
+                    string id = article.Groups[1].Value;
+                    string mobileUrl = "https://m.pcauto.com.cn/hj/article/" + id + ".html";
+                    ProbeResponse mobile = await TryReadProbeAsync(mobileUrl, new Dictionary<string, string>
+                    {
+                        { "User-Agent", "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 Chrome/124 Mobile Safari/537.36" },
+                        { "Referer", "https://m.pcauto.com.cn/" }
+                    }, token);
+                    if (mobile != null && mobile.Status == 200 &&
+                        TryMatchPcautoMobileArticle(mobile.Body, id, expectedTitle, expectedExcerpt, expectedAuthor))
+                        return ProbeOutcome(EvidenceKind.TargetContentPresent, EvidenceStrength.Conclusive,
+                            "official-mobile-page", "太平洋汽车网", id,
+                            "太平洋汽车官方移动页返回相同文章编号和匹配标题/正文", mobile.FinalUrl, true);
+                }
+            }
+            if (host.EndsWith("bianews.com", StringComparison.Ordinal))
+            {
+                Match article = Regex.Match(original.Query ?? "", @"(?:^|[?&])id=([0-9]+)", RegexOptions.IgnoreCase);
+                if (article.Success)
+                {
+                    string id = article.Groups[1].Value;
+                    ProbeResponse page = await TryReadProbeAsync(original.AbsoluteUri, null, token);
+                    if (page != null && page.Status == 200 &&
+                        TryMatchBiaNewsArticle(page.Body, id, expectedTitle, expectedExcerpt, expectedAuthor))
+                        return ProbeOutcome(EvidenceKind.TargetContentPresent, EvidenceStrength.Conclusive,
+                            "official-page", "BiaNews学院", id,
+                            "BiaNews官方详情页返回目标编号、当前标题、作者和正文；原标题可能已改写",
+                            page.FinalUrl, true);
+                }
+            }
             if (host.EndsWith("3g.k.sohu.com", StringComparison.OrdinalIgnoreCase) &&
                 (original.AbsolutePath ?? "").IndexOf("/h5apps/t/feed", StringComparison.OrdinalIgnoreCase) >= 0)
             {
@@ -3014,6 +3108,23 @@ namespace LinkDispositionChecker
                         StringComparison.OrdinalIgnoreCase))
                 {
                     string articleId = articleIdentity.Groups[1].Value;
+                    // The official article route often contains complete SSR
+                    // metadata even when a browser later shows a security
+                    // challenge. Prefer that target-bound response before an
+                    // external reader: exact route id + matching title/author +
+                    // meaningful description is sufficient current evidence.
+                    ProbeResponse officialPage = await TryReadProbeAsync(original.AbsoluteUri,
+                        new Dictionary<string, string>
+                        {
+                            { "User-Agent", "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 Chrome/124 Mobile Safari/537.36" },
+                            { "Accept-Language", "zh-CN,zh;q=0.9" }
+                        }, token);
+                    if (officialPage != null && officialPage.Status == 200 &&
+                        TryMatchJianshuOfficialPage(officialPage.Body, articleId,
+                            expectedTitle, expectedExcerpt, expectedAuthor))
+                        return ProbeOutcome(EvidenceKind.TargetContentPresent, EvidenceStrength.Conclusive,
+                            "official-page", "简书", articleId,
+                            "简书官方文章页返回目标编号、匹配标题、摘要和作者", officialPage.FinalUrl, true);
                     RemoteEvidenceResponse articleCloud = await TryPublicCloudEvidenceAsync(original, token);
                     string articleCloudText = WebUtility.HtmlDecode(articleCloud == null ? "" :
                         (articleCloud.Title ?? "") + " " + (articleCloud.Text ?? ""));
@@ -3338,6 +3449,14 @@ namespace LinkDispositionChecker
                                 cloudResult.Evidence, cloudResult.FinalUrl, true);
                         return new PlatformProbeOutcome { Resolved = false, PublicCloudAttempted = true };
                     }
+                    if (IsQuickRenderedEvidenceEnabled())
+                    {
+                        // A fresh headless render is bounded to this platform
+                        // only; it is not part of the generic fast HTTP path.
+                        PlatformProbeOutcome rendered = await ProbeFastRenderedPageAsync(
+                            original.AbsoluteUri, "雪球", id, expectedTitle, expectedExcerpt, expectedAuthor, token);
+                        if (rendered != null) return rendered;
+                    }
                     PlatformProbeOutcome xueqiuProbe = await ProbeRenderedSocialPostAsync(original.AbsoluteUri,
                         "雪球", id, expectedTitle, expectedExcerpt, expectedAuthor, token);
                     if (xueqiuProbe != null) return xueqiuProbe;
@@ -3494,6 +3613,13 @@ namespace LinkDispositionChecker
                 Match mobileNewsId = Regex.Match(original.AbsolutePath ?? "", @"/m([0-9]+)/?$", RegexOptions.IgnoreCase);
                 if (mobileNewsId.Success)
                 {
+                    if (IsQuickRenderedEvidenceEnabled())
+                    {
+                        PlatformProbeOutcome rendered = await ProbeFastRenderedPageAsync(
+                            original.AbsoluteUri, "同花顺资讯", mobileNewsId.Groups[1].Value,
+                            expectedTitle, expectedExcerpt, expectedAuthor, token);
+                        if (rendered != null) return rendered;
+                    }
                     ProbeResponse page = await TryReadProbeAsync(original.AbsoluteUri, null, token);
                     string redirect = page == null ? "" : (page.FinalUrl ?? "");
                     if (page != null && page.Status == 200 && !String.IsNullOrWhiteSpace(redirect) &&
@@ -3616,6 +3742,88 @@ namespace LinkDispositionChecker
                         return ProbeOutcome(EvidenceKind.TargetContentPresent, EvidenceStrength.Conclusive,
                             "official-page", "汽车头条", video.Groups[1].Value,
                             "汽车头条视频原页返回目标视频编号、匹配标题和作者", page.FinalUrl, true);
+                }
+                Match news = Regex.Match(original.AbsolutePath ?? "", @"/news/([0-9]+)(?:/|$)", RegexOptions.IgnoreCase);
+                if (news.Success)
+                {
+                    ProbeResponse page = await TryReadProbeAsync(original.AbsoluteUri, null, token);
+                    string pageTitle = page == null ? "" : ExtractTitle(page.Body);
+                    string pageVisible = page == null ? "" : ExtractVisibleText(page.Body);
+                    if (page != null && page.Status == 200 &&
+                        IsQcttMissingArticlePage(page.Body, page.FinalUrl, news.Groups[1].Value))
+                        return ProbeOutcome(EvidenceKind.TargetRemovalExplicit, EvidenceStrength.Conclusive,
+                            "official-page", "汽车头条", news.Groups[1].Value,
+                            "汽车头条同站目标文章页明确提示内容丢失", page.FinalUrl, true);
+                    if (page != null && page.Status == 200 &&
+                        MatchesExpectedContent(expectedTitle, expectedExcerpt, pageTitle + " " + pageVisible) &&
+                        (String.IsNullOrWhiteSpace(expectedAuthor) || MatchesExpectedAuthor(expectedAuthor, pageTitle + " " + pageVisible)))
+                        return ProbeOutcome(EvidenceKind.TargetContentPresent, EvidenceStrength.Strong,
+                            "official-page", "汽车头条", news.Groups[1].Value,
+                            "汽车头条文章页返回目标编号和匹配内容", page.FinalUrl, true);
+                }
+            }
+            if (host.EndsWith("tianyancha.com", StringComparison.Ordinal) &&
+                Regex.IsMatch(original.AbsolutePath ?? "", @"/ll_[A-Za-z0-9_-]+\.html$", RegexOptions.IgnoreCase))
+            {
+                UriBuilder mobileBuilder = new UriBuilder(original) { Host = "mnews.tianyancha.com" };
+                ProbeResponse mobile = await TryReadProbeAsync(mobileBuilder.Uri.AbsoluteUri,
+                    new Dictionary<string, string>
+                    {
+                        { "User-Agent", "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 Chrome/124 Mobile Safari/537.36" },
+                        { "Referer", "https://mnews.tianyancha.com/" }
+                    }, token);
+                if (mobile != null && mobile.Status == 200)
+                {
+                    string combined = ExtractTitle(mobile.Body) + " " +
+                        ExtractMetaDescription(mobile.Body) + " " + ExtractVisibleText(mobile.Body);
+                    if (MatchesExpectedContent(expectedTitle, expectedExcerpt, combined) &&
+                        (String.IsNullOrWhiteSpace(expectedAuthor) || MatchesExpectedAuthor(expectedAuthor, combined + " " + mobile.Body)))
+                        return ProbeOutcome(EvidenceKind.TargetContentPresent, EvidenceStrength.Conclusive,
+                            "official-mobile-page", "天眼查新闻", "",
+                            "天眼查新闻官方移动页返回匹配标题、摘要和发布账号", mobile.FinalUrl, true);
+                }
+            }
+            if (host.EndsWith("ixigua.com", StringComparison.Ordinal))
+            {
+                Match video = Regex.Match(original.AbsolutePath ?? "", @"/(?:video/)?([0-9]{12,})(?:/|$)", RegexOptions.IgnoreCase);
+                if (video.Success)
+                {
+                    // The mobile route renders a target-level 404 state even
+                    // when the desktop response is only an obfuscated shell.
+                    string id = video.Groups[1].Value;
+                    string mobileUrl = "https://m.ixigua.com/video/" + id + "?wid_try=1";
+                    if (IsQuickRenderedEvidenceEnabled())
+                    {
+                        PlatformProbeOutcome rendered = await ProbeFastRenderedPageAsync(mobileUrl,
+                            "西瓜视频", id, expectedTitle, expectedExcerpt, expectedAuthor, token);
+                        if (rendered != null) return rendered;
+                    }
+                }
+            }
+            // Some ordinary news publishers return the article shell first and
+            // inject the body through a same-host AJAX endpoint.  A bounded POST
+            // to that endpoint is deterministic evidence when the response is
+            // tied to the exact source URL and contains the target title/body.
+            if (host.EndsWith("radioidaily.com", StringComparison.Ordinal))
+            {
+                ProbeResponse shell = await TryReadProbeAsync(original.AbsoluteUri, null, token);
+                if (shell != null && shell.Status == 200 &&
+                    (shell.Body ?? "").IndexOf("ajaxContent", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    string ajaxUrl = new Uri(original, "/ajaxContent").AbsoluteUri;
+                    ProbeResponse ajax = await TryPostProbeAsync(ajaxUrl,
+                        "param=" + Uri.EscapeDataString(original.AbsoluteUri),
+                        new Dictionary<string, string>
+                        {
+                            { "Referer", original.AbsoluteUri },
+                            { "X-Requested-With", "XMLHttpRequest" },
+                            { "Accept", "application/json, text/plain, */*" }
+                        }, token);
+                    if (ajax != null && ajax.Status == 200 &&
+                        TryMatchAjaxArticleResponse(ajax.Body, expectedTitle, expectedExcerpt, ""))
+                        return ProbeOutcome(EvidenceKind.TargetContentPresent, EvidenceStrength.Conclusive,
+                            "same-host-ajax", "普通网媒", "",
+                            "同站 AJAX 正文接口返回匹配原标题和正文", ajaxUrl, true);
                 }
             }
             if (host.EndsWith("hexun.com", StringComparison.Ordinal))
@@ -4174,7 +4382,13 @@ namespace LinkDispositionChecker
                             minimalProbeUrl, headers, token);
                         if (directMinimal != null && directMinimal.Status > 0) minimalProbe = directMinimal;
                     }
-                        if (minimalProbe != null && minimalProbe.Status == 200)
+                        // Preserve an exact 404/410 from the no-include
+                        // official resource as well as a 200. The common
+                        // decision block below still requires a recognized
+                        // removal body and, where applicable, target-page
+                        // corroboration; this only prevents valid evidence
+                        // from being overwritten by the earlier 403 shell.
+                        if (minimalProbe != null && ShouldAdoptZhihuMinimalProbe(minimalProbe.Status))
                         {
                             probe = minimalProbe;
                             probeUrl = minimalProbeUrl;
@@ -4625,6 +4839,23 @@ namespace LinkDispositionChecker
                 !String.IsNullOrWhiteSpace(ucArticleId))
             {
                 string id = ucArticleId;
+                string apiUrl = "https://a.mp.uc.cn/api/articleinfo?aid=" + Uri.EscapeDataString(id) + "&source=2";
+                ProbeResponse api = await TryReadProbeAsync(apiUrl, new Dictionary<string, string>
+                {
+                    { "Referer", original.AbsoluteUri },
+                    { "Accept", "application/json, text/plain, */*" }
+                }, token);
+                if (api != null && api.Status == 200)
+                {
+                    if (TryMatchUcArticleInfo(api.Body, id, expectedTitle, expectedExcerpt, expectedAuthor))
+                        return ProbeOutcome(EvidenceKind.TargetContentPresent, EvidenceStrength.Conclusive,
+                            "official-api", "UC/大鱼号", id,
+                            "UC/大鱼号官方 articleinfo 接口返回目标编号、正文和作者", apiUrl, true);
+                    // Legacy UC articles are not guaranteed to exist in this
+                    // newer endpoint. error 40010/data-null therefore means
+                    // only "not found in this interface" and must fall through
+                    // to the official mobile page; it is not removal evidence.
+                }
                 string probeUrl = "https://m.uczzd.cn/ucnews/news?aid=" + id;
                 var headers = new Dictionary<string, string>
                 {
@@ -4768,6 +4999,11 @@ namespace LinkDispositionChecker
             return null;
         }
 
+        internal static bool ShouldAdoptZhihuMinimalProbe(int statusCode)
+        {
+            return statusCode == 200 || statusCode == 404 || statusCode == 410;
+        }
+
         // Zhihu often returns a security JSON body with HTTP 403. Only a target
         // removal response is strong evidence; generic "resource not found"
         // text can be emitted by the anti-bot redirect and must stay reviewable.
@@ -4776,8 +5012,21 @@ namespace LinkDispositionChecker
             string source = body ?? "";
             if (String.IsNullOrWhiteSpace(source)) return false;
             if (Regex.IsMatch(source, "该回答不存在|回答不存在", RegexOptions.IgnoreCase)) return true;
+            // The exact no-include answer resource currently returns this
+            // structured 404 when an answer is gone. Accept it only as an
+            // official resource-level response and reject bodies carrying
+            // security/login markers, which can reuse generic error wording.
+            if (ExtractJsonInt(source, "code", Int32.MinValue) == 4041 &&
+                Regex.IsMatch(source, "ResourceNotFoundException", RegexOptions.IgnoreCase) &&
+                !Regex.IsMatch(source, "need_login|unhuman|安全验证|访问异常|验证码|captcha|security", RegexOptions.IgnoreCase))
+                return true;
             if (!Regex.IsMatch(source, "资源不存在", RegexOptions.IgnoreCase)) return false;
             return !Regex.IsMatch(source, "need_login|unhuman|安全验证|访问异常|验证码|captcha|security", RegexOptions.IgnoreCase);
+        }
+
+        internal static bool IsZhihuRemovedApiResponseForTest(string body)
+        {
+            return IsZhihuRemovedApiResponse(body);
         }
 
         internal static bool TryExtractYicheThreadIdentity(Uri uri, out string forum, out string threadId)
@@ -4826,8 +5075,79 @@ namespace LinkDispositionChecker
             string host = uri.Host.ToLowerInvariant();
             if (!(host.EndsWith("uczzd.cn", StringComparison.Ordinal) || host == "a.mp.uc.cn" || host == "mparticle.uc.cn")) return "";
             string source = (uri.Query ?? "") + "&" + (uri.Fragment ?? "");
-            Match match = Regex.Match(source, @"(?:^|[?&!#])(?:aid|wm_aid|sm_article_id|xss_item_id|video_id)=([0-9]{8,})", RegexOptions.IgnoreCase);
+            Match match = Regex.Match(source, @"(?:^|[?&!#])(?:aid|wm_aid|wm_cid|sm_article_id|xss_item_id|video_id)=([0-9]{8,})", RegexOptions.IgnoreCase);
             return match.Success ? match.Groups[1].Value : "";
+        }
+
+        internal static bool TryMatchUcArticleInfo(string json, string id, string expectedTitle,
+            string expectedExcerpt, string expectedAuthor)
+        {
+            string source = json ?? "";
+            if (String.IsNullOrWhiteSpace(id) ||
+                !Regex.IsMatch(source, "\\\"content_id\\\"\\s*:\\s*\\\"" + Regex.Escape(id) + "\\\"", RegexOptions.IgnoreCase) ||
+                ExtractJsonInt(source, "status", Int32.MinValue) != 1) return false;
+            string title = ExtractJsonStringLong(source, "title", 2000);
+            string body = ExtractJsonStringLong(source, "text", 60000);
+            string author = ExtractJsonStringLong(source, "origin_author", 500);
+            if (String.IsNullOrWhiteSpace(author)) author = ExtractJsonStringLong(source, "author_name", 500);
+            if (String.IsNullOrWhiteSpace(body)) return false;
+            string combined = title + " " + ExtractVisibleText(body);
+            bool contentMatch = MatchesExpectedContent(expectedTitle, expectedExcerpt, combined) ||
+                (String.IsNullOrWhiteSpace(expectedTitle) && String.IsNullOrWhiteSpace(expectedExcerpt));
+            bool authorMatch = String.IsNullOrWhiteSpace(expectedAuthor) ||
+                MatchesExpectedAuthor(expectedAuthor, author + " " + combined);
+            return contentMatch && authorMatch && CleanText(ExtractVisibleText(body), 60000).Length >= 40;
+        }
+
+        internal static bool TryMatch360KuaiTargetPage(string html, string id,
+            string expectedTitle, string expectedExcerpt)
+        {
+            string source = html ?? "";
+            if (String.IsNullOrWhiteSpace(id) ||
+                !Regex.IsMatch(source, "(?:url=|[\\\"'/])" + Regex.Escape(id) + "(?:[&\\\"'/?]|$)",
+                    RegexOptions.IgnoreCase)) return false;
+            string title = ExtractTitle(source);
+            string description = ExtractMetaDescription(source);
+            return !LooksGenericTitle(title) &&
+                (MatchesExpectedTitle(expectedTitle, title) ||
+                 MatchesExpectedExcerpt(expectedExcerpt, title + " " + description));
+        }
+
+        internal static bool TryMatchPcautoMobileArticle(string html, string id,
+            string expectedTitle, string expectedExcerpt, string expectedAuthor)
+        {
+            string source = html ?? "";
+            if (String.IsNullOrWhiteSpace(id) ||
+                source.IndexOf(id, StringComparison.OrdinalIgnoreCase) < 0) return false;
+            string title = ExtractTitle(source);
+            string visible = ExtractVisibleText(source);
+            string description = ExtractMetaDescription(source);
+            string combined = title + " " + description + " " + visible;
+            bool contentMatch = MatchesExpectedContent(expectedTitle, expectedExcerpt, combined);
+            bool authorMatch = String.IsNullOrWhiteSpace(expectedAuthor) ||
+                MatchesExpectedAuthor(expectedAuthor, combined);
+            return contentMatch && authorMatch &&
+                (HasArticleBodyStructure(source, visible) || visible.Length >= 120);
+        }
+
+        internal static bool TryMatchBiaNewsArticle(string html, string id,
+            string expectedTitle, string expectedExcerpt, string expectedAuthor)
+        {
+            string source = html ?? "";
+            if (String.IsNullOrWhiteSpace(id)) return false;
+            string title = ExtractTitle(source);
+            string visible = ExtractVisibleText(source);
+            string main = ExtractProbableMainContentText(source);
+            string combined = title + " " + main + " " + visible;
+            bool authorMatch = String.IsNullOrWhiteSpace(expectedAuthor) ||
+                MatchesExpectedAuthor(expectedAuthor, combined);
+            bool contentMatch = MatchesExpectedContent(expectedTitle, expectedExcerpt, combined) ||
+                MatchesExpectedTitleByFragments(expectedTitle, combined);
+            bool explicitArticleRegion = Regex.IsMatch(source, @"<(?:article|main)\b", RegexOptions.IgnoreCase) ||
+                Regex.IsMatch(source, @"(?:class|id)\s*=\s*[\""'][^\""']*(?:article-content|detail-content|main-content)[^\""']*[\""']",
+                    RegexOptions.IgnoreCase);
+            return !LooksGenericTitle(title) && contentMatch && authorMatch &&
+                explicitArticleRegion && main.Length >= 60;
         }
 
         internal static bool IsCurrentToutiaoContentSource(string groupSource)
@@ -5048,7 +5368,15 @@ namespace LinkDispositionChecker
                 bool authorMatch = MatchesExpectedAuthor(expectedAuthor, combined);
                 bool structuredBody = HasArticleBodyStructure(html, mainText) ||
                     Regex.IsMatch(html, "<(?:article|main)[^>]*>", RegexOptions.IgnoreCase);
-                if (targetIdentity && contentMatch && structuredBody)
+                bool routeIdentity = platform == "同花顺资讯" &&
+                    Regex.IsMatch(probeUrl ?? "", @"/m[0-9]+/?(?:\?|$)", RegexOptions.IgnoreCase);
+                bool acceptedStructure = structuredBody ||
+                    (platform == "同花顺资讯" && CleanText(combined, 120000).Length >= 300);
+                bool reliableRenderedTitle = platform == "雪球" &&
+                    MatchesExpectedContent(expectedTitle, expectedExcerpt, title) && !LooksGenericTitle(title);
+                bool acceptedAuthor = platform == "同花顺资讯" || reliableRenderedTitle ||
+                    String.IsNullOrWhiteSpace(expectedAuthor) || authorMatch;
+                if ((targetIdentity || routeIdentity) && contentMatch && acceptedStructure && acceptedAuthor)
                     return ProbeOutcome(EvidenceKind.TargetContentPresent, EvidenceStrength.Conclusive,
                         "official-rendered-page", platform, id, platform + "目标页返回原内容编号、匹配正文" +
                             (authorMatch ? "和作者“" + expectedAuthor.Trim() + "”" : ""), probeUrl, true);
@@ -5060,9 +5388,11 @@ namespace LinkDispositionChecker
         internal static bool IsXueqiuRenderedRemoval(string html, string id)
         {
             string source = html ?? "";
-            if (Regex.IsMatch(source, "当前内容不适合展示[，,]?无法查看", RegexOptions.IgnoreCase)) return true;
-            return Regex.IsMatch(source, "原帖已被作者删除|该帖已被作者删除", RegexOptions.IgnoreCase) &&
-                (String.IsNullOrWhiteSpace(id) || source.IndexOf(id, StringComparison.OrdinalIgnoreCase) >= 0);
+            if (String.IsNullOrWhiteSpace(id) ||
+                source.IndexOf(id, StringComparison.OrdinalIgnoreCase) < 0) return false;
+            return Regex.IsMatch(source,
+                "当前内容不适合展示[，,]?无法查看|原帖已被作者删除|该帖已被作者删除",
+                RegexOptions.IgnoreCase);
         }
 
         internal static bool IsWeiboRenderedUnavailable(string html, string id)
@@ -5072,6 +5402,57 @@ namespace LinkDispositionChecker
                 Regex.IsMatch(source,
                     "微博不存在或暂无查看权限|抱歉[，,]?此微博已被删除|博文涉及营销推广正在审核中[，,]?暂时无法传播|该博文仅自己可见|该微博已被屏蔽",
                     RegexOptions.IgnoreCase);
+        }
+
+        private async Task<PlatformProbeOutcome> ProbeFastRenderedPageAsync(string probeUrl, string platform,
+            string id, string expectedTitle, string expectedExcerpt, string expectedAuthor, CancellationToken token)
+        {
+            await RenderedSocialProbeGate.WaitAsync(token);
+            try
+            {
+                BrowserSnapshot snapshot = await RenderWithBrowserAsync(probeUrl, token);
+                if (snapshot == null || String.IsNullOrWhiteSpace(snapshot.Html)) return null;
+                string html = snapshot.Html ?? "";
+                string title = ExtractTitle(html);
+                string visible = ExtractVisibleText(html);
+                string mainText = ExtractProbableMainContentText(html);
+                string combined = title + " " + mainText + " " + visible;
+                if (platform == "西瓜视频" && IsIxiguaRenderedRemoval(html, id))
+                    return ProbeOutcome(EvidenceKind.TargetRemovalExplicit, EvidenceStrength.Conclusive,
+                        "official-rendered-page", platform, id,
+                        "西瓜视频目标页返回 HTTP 404 状态和内容可能已删除空状态", probeUrl, true);
+                bool contentMatch = MatchesExpectedContent(expectedTitle, expectedExcerpt, combined);
+                bool authorMatch = String.IsNullOrWhiteSpace(expectedAuthor) || MatchesExpectedAuthor(expectedAuthor, combined);
+                bool targetIdentity = !String.IsNullOrWhiteSpace(id) &&
+                    html.IndexOf(id, StringComparison.OrdinalIgnoreCase) >= 0;
+                bool routeIdentity = platform == "同花顺资讯" &&
+                    Regex.IsMatch(probeUrl ?? "", @"/m[0-9]+/?(?:\?|$)", RegexOptions.IgnoreCase);
+                bool reliableRenderedTitle = platform == "雪球" &&
+                    MatchesExpectedContent(expectedTitle, expectedExcerpt, title) && !LooksGenericTitle(title);
+                bool acceptedAuthor = platform == "同花顺资讯" || reliableRenderedTitle || authorMatch;
+                bool acceptedStructure = platform != "同花顺资讯" ||
+                    CleanText(combined, 120000).Length >= 300;
+                if ((targetIdentity || routeIdentity) && contentMatch && acceptedAuthor && acceptedStructure)
+                    return ProbeOutcome(EvidenceKind.TargetContentPresent, EvidenceStrength.Conclusive,
+                        "official-rendered-page", platform, id,
+                        platform + "目标页返回目标编号或原始内容路径，并包含匹配标题/正文" +
+                            (authorMatch && !String.IsNullOrWhiteSpace(expectedAuthor)
+                                ? "和作者“" + expectedAuthor.Trim() + "”" : ""), probeUrl, true);
+                if (platform == "雪球" && IsXueqiuRenderedRemoval(html, id))
+                    return ProbeOutcome(EvidenceKind.TargetRemovalExplicit, EvidenceStrength.Conclusive,
+                        "official-rendered-page", platform, id,
+                        "雪球目标页明确提示当前内容不适合展示或原帖已被作者删除", probeUrl, true);
+                return null;
+            }
+            finally { RenderedSocialProbeGate.Release(); }
+        }
+
+        internal static bool IsIxiguaRenderedRemoval(string html, string id)
+        {
+            string source = html ?? "";
+            if (String.IsNullOrWhiteSpace(id) || source.IndexOf(id, StringComparison.OrdinalIgnoreCase) < 0) return false;
+            return Regex.IsMatch(source, "内容可能已删除", RegexOptions.IgnoreCase) &&
+                Regex.IsMatch(source, "\\\"httpStatus\\\"\\s*:\\s*404\\b", RegexOptions.IgnoreCase);
         }
 
         internal static bool IsWechatAccountClosed(string originalUrl, string currentUrl,
@@ -5413,6 +5794,53 @@ namespace LinkDispositionChecker
             // those fields are consistency signals, not a prerequisite for
             // confirming that this exact link still exists.
             return publishedPayload;
+        }
+
+        internal static bool TryMatchAjaxArticleResponse(string json, string expectedTitle,
+            string expectedExcerpt, string expectedAuthor)
+        {
+            string source = json ?? "";
+            if (String.IsNullOrWhiteSpace(source) || ExtractJsonInt(source, "code", Int32.MinValue) != 200) return false;
+            string title = ExtractJsonStringLong(source, "title", 2000);
+            string content = ExtractJsonStringLong(source, "content", 60000);
+            if (String.IsNullOrWhiteSpace(content)) return false;
+            string combined = title + " " + ExtractVisibleText(content);
+            // The endpoint is queried with the exact target URL and returns one
+            // current article payload.  Publishers occasionally correct a model
+            // name or a few headline characters after collection (for example
+            // V10 -> V6).  Accept strong whole-title character overlap here,
+            // while still requiring a substantial non-empty article body.
+            bool contentMatch = MatchesExpectedContent(expectedTitle, expectedExcerpt, combined) ||
+                MatchesExpectedTitleByCharacterOverlap(expectedTitle, combined);
+            bool authorMatch = String.IsNullOrWhiteSpace(expectedAuthor) ||
+                MatchesExpectedAuthor(expectedAuthor, combined + " " + source);
+            return contentMatch && authorMatch && CleanText(ExtractVisibleText(content), 60000).Length >= 40;
+        }
+
+        internal static bool TryMatchJianshuOfficialPage(string html, string id,
+            string expectedTitle, string expectedExcerpt, string expectedAuthor)
+        {
+            string source = html ?? "";
+            if (String.IsNullOrWhiteSpace(id) ||
+                source.IndexOf(id, StringComparison.OrdinalIgnoreCase) < 0) return false;
+            string title = ExtractTitle(source);
+            string description = ExtractMetaDescription(source);
+            string combined = title + " " + description;
+            if (CleanText(description, 4000).Length < 40 ||
+                !MatchesExpectedContent(expectedTitle, expectedExcerpt, combined)) return false;
+            return String.IsNullOrWhiteSpace(expectedAuthor) ||
+                MatchesExpectedAuthor(expectedAuthor, title + " " + source);
+        }
+
+        internal static bool IsTargetContentModerationState(string body)
+        {
+            string visible = ExtractVisibleText(body ?? "");
+            if (visible.Length == 0 || visible.Length > 600) return false;
+            if (Regex.IsMatch(body ?? "", "<(?:article|main)\\b", RegexOptions.IgnoreCase) &&
+                CleanText(ExtractProbableMainContentText(body ?? ""), 4000).Length >= 40) return false;
+            return Regex.IsMatch(visible,
+                "内容存在不合适展示内容|内容因不适合展示无法查看|该内容不适合展示",
+                RegexOptions.IgnoreCase);
         }
 
         internal static bool IsDongchediArticleUnavailableResponse(string json)
@@ -5773,6 +6201,15 @@ namespace LinkDispositionChecker
                 return null;
             }
             catch { return null; }
+        }
+
+        internal static bool IsQcttMissingArticlePage(string body, string finalUrl, string id)
+        {
+            Uri final;
+            if (String.IsNullOrWhiteSpace(id) || !Uri.TryCreate(finalUrl, UriKind.Absolute, out final) ||
+                !final.Host.EndsWith("qctt.cn", StringComparison.OrdinalIgnoreCase) ||
+                !Regex.IsMatch(final.AbsolutePath ?? "", @"/news/" + Regex.Escape(id) + @"(?:/|$)", RegexOptions.IgnoreCase)) return false;
+            return Regex.IsMatch(ExtractVisibleText(body ?? ""), "内容君走丢了|内容丢失|文章不存在|文章已删除", RegexOptions.IgnoreCase);
         }
 
         private async Task<ProbeResponse> ReadDirectProbeWithWebRequestAsync(string url,
@@ -7647,7 +8084,7 @@ namespace LinkDispositionChecker
         {
             using (var fallbackBudget = CancellationTokenSource.CreateLinkedTokenSource(token))
             {
-                fallbackBudget.CancelAfter(TimeSpan.FromSeconds(18));
+                fallbackBudget.CancelAfter(TransportFallbackBudgetMilliseconds());
                 return await SendWithFallbackWithinBudgetAsync(uri, token, fallbackBudget.Token);
             }
         }
@@ -7697,13 +8134,15 @@ namespace LinkDispositionChecker
                     throw;
                 }
                 if (retainedResponse != null) return retainedResponse;
-                throw new TaskCanceledException("代理和直连重试超过 18 秒");
+                throw new TaskCanceledException("代理和直连重试超过 " +
+                    (TransportFallbackBudgetMilliseconds() / 1000) + " 秒");
             }
 
             if (retainedResponse != null) return retainedResponse;
             Exception error = errors.LastOrDefault();
             if (fallbackToken.IsCancellationRequested && !callerToken.IsCancellationRequested)
-                throw new TaskCanceledException("代理和直连重试超过 18 秒");
+                throw new TaskCanceledException("代理和直连重试超过 " +
+                    (TransportFallbackBudgetMilliseconds() / 1000) + " 秒");
             if (error is TaskCanceledException) throw (TaskCanceledException)error;
             if (error is HttpRequestException) throw (HttpRequestException)error;
             throw new HttpRequestException("HTTP/HTTPS 的系统代理和直连均无法建立连接", error);
@@ -7715,7 +8154,46 @@ namespace LinkDispositionChecker
             {
                 await WaitForRequestSlotAsync(uri, token);
                 using (var request = new HttpRequestMessage(HttpMethod.Get, uri))
-                    return new SendAttempt { Response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token) };
+                {
+                    HttpResponseMessage response = await client.SendAsync(request,
+                        HttpCompletionOption.ResponseHeadersRead, token);
+                    // Several ordinary publishers place a short WAF/challenge
+                    // page in front of the article. The first 403 response sets
+                    // a per-session cookie; retry the exact URL once so the
+                    // same HttpClient can present that cookie and obtain the
+                    // public article. A plain 403 without Set-Cookie is never
+                    // retried and remains a genuine access restriction.
+                    IEnumerable<string> setCookies;
+                    bool hasSetCookie = response.Headers.TryGetValues("Set-Cookie", out setCookies) ||
+                        (response.Content != null && response.Content.Headers.TryGetValues("Set-Cookie", out setCookies));
+                    if (ShouldRetryCookieChallenge((int)response.StatusCode, hasSetCookie))
+                    {
+                        response.Dispose();
+                        await Task.Delay(120, token);
+                        using (var retryRequest = new HttpRequestMessage(HttpMethod.Get, uri))
+                        {
+                            response = await client.SendAsync(retryRequest,
+                                HttpCompletionOption.ResponseHeadersRead, token);
+                        }
+                    }
+                    // Ordinary publishers occasionally return a brief upstream
+                    // 502/503/504 while the next request succeeds. Retry the
+                    // exact route once, after a small delay, inside the existing
+                    // 18-second transport budget. This is deliberately not used
+                    // for 403/CAPTCHA/login responses and cannot create a verdict
+                    // without normal target-content evidence.
+                    if (ShouldRetryTransientServerStatus((int)response.StatusCode))
+                    {
+                        response.Dispose();
+                        await Task.Delay(300, token);
+                        using (var retryRequest = new HttpRequestMessage(HttpMethod.Get, uri))
+                        {
+                            response = await client.SendAsync(retryRequest,
+                                HttpCompletionOption.ResponseHeadersRead, token);
+                        }
+                    }
+                    return new SendAttempt { Response = response };
+                }
             }
             catch (OperationCanceledException ex)
             {
@@ -7725,11 +8203,36 @@ namespace LinkDispositionChecker
             catch (Exception ex) { return new SendAttempt { Error = ex }; }
         }
 
+        internal static bool ShouldRetryCookieChallenge(int statusCode, bool hasSetCookie)
+        {
+            return statusCode == 403 && hasSetCookie;
+        }
+
+        internal static bool ShouldRetryTransientServerStatus(int statusCode)
+        {
+            return statusCode == 502 || statusCode == 503 || statusCode == 504;
+        }
+
+        internal static bool ShouldTrySamePathHttps(HttpResponseMessage response, Uri candidate)
+        {
+            if (response == null || candidate == null || candidate.Scheme != Uri.UriSchemeHttp ||
+                String.IsNullOrWhiteSpace(candidate.AbsolutePath) || candidate.AbsolutePath == "/") return false;
+            Uri final = response.RequestMessage == null ? null : response.RequestMessage.RequestUri;
+            if (final == null || !String.Equals(final.Host, candidate.Host, StringComparison.OrdinalIgnoreCase)) return false;
+            string finalPath = (final.AbsolutePath ?? "").TrimEnd('/');
+            string targetPath = (candidate.AbsolutePath ?? "").TrimEnd('/');
+            return targetPath.Length > 0 && finalPath.Length == 0;
+        }
+
         private static bool IsRetryableTransportStatus(HttpResponseMessage response, Uri candidate)
         {
             if (response == null) return true;
             int code = (int)response.StatusCode;
             if (code == 407 || code == 408 || code == 426 || code == 502 || code == 503 || code == 504) return true;
+            // Some HTTP article routes (including Caiwen) redirect to the site
+            // homepage while the exact HTTPS path still serves the full target.
+            // Preserve this response only as fallback and try that HTTPS path.
+            if (code >= 200 && code < 400 && ShouldTrySamePathHttps(response, candidate)) return true;
             return candidate != null && candidate.Scheme == Uri.UriSchemeHttp && (code == 400 || code == 403);
         }
 
@@ -8169,6 +8672,32 @@ namespace LinkDispositionChecker
                 path.Contains("/video") || path.Contains("/v/") || path.Contains("/detail");
             return articleRoute && original.AbsolutePath.Trim('/').Length >= 4 &&
                 CleanText(visible, 120000).Length >= 20;
+        }
+
+        // A publisher may edit a headline after the source ledger was created.
+        // Permit that narrow case only when the immutable target route remains
+        // on the same host, the page contains the expected author, and the
+        // response has a real article body. This never applies to login/error
+        // shells, homepage redirects, or pages without a target URL identity.
+        private static bool HasSameHostArticleAuthorIdentity(CheckResult result,
+            string title, string visible, string html, string currentUrl)
+        {
+            if (result == null || String.IsNullOrWhiteSpace(result.ExpectedAuthor) ||
+                String.IsNullOrWhiteSpace(title) || LooksGenericTitle(title)) return false;
+            Uri original;
+            Uri current;
+            if (!Uri.TryCreate(result.OriginalUrl, UriKind.Absolute, out original) ||
+                !Uri.TryCreate(currentUrl, UriKind.Absolute, out current) ||
+                !String.Equals(original.Host, current.Host, StringComparison.OrdinalIgnoreCase) ||
+                LooksLikeLogin(currentUrl) || LooksLikeErrorPage(currentUrl, title, visible) ||
+                LooksLikeHomepageRedirect(original, currentUrl)) return false;
+            List<string> identities = ExtractContentIdentityTokens(original.AbsoluteUri);
+            if (identities.Count == 0 || !identities.Any(token =>
+                current.AbsoluteUri.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0)) return false;
+            string mainText = ExtractProbableMainContentText(html ?? "");
+            if (String.IsNullOrWhiteSpace(mainText)) mainText = CleanText(visible, 120000);
+            if (mainText.Length < 180 || !HasArticleBodyStructure(html ?? "", mainText)) return false;
+            return MatchesExpectedAuthor(result.ExpectedAuthor, title + " " + mainText);
         }
 
         private static bool HasCrossDomainArticleIdentity(CheckResult result, string title,
@@ -10005,9 +10534,10 @@ namespace LinkDispositionChecker
             // Do not let a CDN/shared IP outage on generic news hosts pause a
             // named platform that happens to resolve to the same address.
             if (!genericPlatform) return "";
-            string infrastructure = (job.InfrastructureKey ?? "").Trim();
-            if (infrastructure.Length > 0) return infrastructure;
             Uri uri;
+            // Shared hosting/IP information controls pacing only. Circuit
+            // breaking by that value would defer unrelated domains on the same
+            // CDN or cloud address. Keep failure scope at the real host.
             return Uri.TryCreate(job.Url, UriKind.Absolute, out uri)
                 ? (uri.Host ?? "").Trim().Trim('.').ToLowerInvariant() : "";
         }

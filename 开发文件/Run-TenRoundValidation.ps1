@@ -9,7 +9,7 @@ param(
     [string]$HistoryCsv = '',
     [string]$OutputDirectory = '',
     [string]$SeedPrefix = '',
-    [int]$Workers = 6,
+    [int]$Workers = 12,
     [double]$MaximumUnresolvedRate = 0.05,
     [int]$MaximumNetworkAttempts = 3,
     [switch]$QuickIndependentEvidence,

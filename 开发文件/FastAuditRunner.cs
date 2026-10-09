@@ -345,7 +345,7 @@ internal static class FastAuditRunner
 
             int configuredWorkers;
             if (!Int32.TryParse(Environment.GetEnvironmentVariable("FAST_AUDIT_WORKERS"), out configuredWorkers))
-                configuredWorkers = 6;
+                configuredWorkers = 12;
 
             // Run the same formal pass as the desktop application. A separate
             // preflight sample duplicates requests and makes the validation runner

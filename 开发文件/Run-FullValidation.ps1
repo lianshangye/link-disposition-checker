@@ -5,7 +5,7 @@ param(
     [int]$ExpectedRows = 0,
     [string]$OriginalSheet = '',
     [int]$ExpectedOriginalRows = 0,
-    [int]$Workers = 6,
+    [int]$Workers = 12,
     [double]$MaximumUnresolvedRate = 0.05,
     [switch]$Resume,
     [switch]$RetryUnresolved,

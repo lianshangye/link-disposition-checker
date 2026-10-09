@@ -75,12 +75,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\开发文件\Run-TenR
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\开发文件\Run-ShardedFastAudit.ps1' `
-  -InputCsv '.\input.csv' -OutputCsv '.\output.csv' -RowsPerShard 10000 -Workers 6 -Resume
+  -InputCsv '.\input.csv' -OutputCsv '.\output.csv' -RowsPerShard 10000 -Workers 12 -Resume
 ```
 
 如本批包含微信、知乎、微博等登录后才能取得目标正文的平台，可在首次运行增加 `-LoginFirst`，集中完成一次登录后继续快速核验；已有工具 WebView2 登录会话时可使用 `-UseSavedLogin` 静默加载。Cookie 只桥接到当前分片进程内存，后续分片从工具自己的 WebView2 配置重新读取，不写入结果、manifest 或公开仓库。
 
-该流程按完整 CSV 记录流式分片，标题或摘要中的逗号、双引号和换行不会拆坏记录。每片独立输出并写入 manifest；默认开启快速阶段检查点，进程中断后可以从已完成片和片内检查点继续。全局编号按每片实际有效 URL 数量计算，不会因空行或无效链接错位。确定结果缓存按分片隔离，避免几十万条任务的后续进程反复加载越来越大的全局缓存；只复用“仍可访问/已失效”且带目标证据的结果，403、验证码、WAF、502、超时、登录壳和空壳页不会缓存为确定结论。同一共享基础设施连续失败后，后续同组条目会保留为待重试而不继续占满工作线程，也不会被改判成失效。
+该流程按完整 CSV 记录流式分片，标题或摘要中的逗号、双引号和换行不会拆坏记录。每片独立输出并写入 manifest；默认开启快速阶段检查点，进程中断后可以从已完成片和片内检查点继续。全局编号按每片实际有效 URL 数量计算，不会因空行或无效链接错位。确定结果缓存按分片隔离，避免几十万条任务的后续进程反复加载越来越大的全局缓存；只复用“仍可访问/已失效”且带目标证据的结果，403、验证码、WAF、502、超时、登录壳和空壳页不会缓存为确定结论。共享 IP 只用于请求节奏和记录，真实域名独立熔断；快速阶段默认不启动无头浏览器，平台渲染属于第二阶段追证。
 
 只验证几十万条输入的规划、记录完整性和资源占用，不发出网络请求：
 

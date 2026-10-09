@@ -127,6 +127,14 @@ internal static class RegressionTests
             "URL Source: https://www.zhihu.com/question/1/answer/2 Title: 你似乎来到了没有知识存在的荒原 5 秒后自动跳转至回答所在的问题页");
         Console.WriteLine((zhihuJointPassed ? "PASS " : "FAIL ") + "知乎回答删除仅接受接口不存在与目标页跳回问题联合证据");
         if (!zhihuJointPassed) _failures++;
+        bool zhihuExactMissingPassed =
+            Checker.IsZhihuRemovedApiResponseForTest(
+                "{\"error\":{\"code\":4041,\"name\":\"ResourceNotFoundException\"}}") &&
+            !Checker.IsZhihuRemovedApiResponseForTest(
+                "{\"error\":{\"code\":4041,\"name\":\"ResourceNotFoundException\",\"message\":\"security challenge\"}}");
+        Console.WriteLine((zhihuExactMissingPassed ? "PASS " : "FAIL ") +
+            "知乎官方回答接口结构化404识别并排除安全挑战响应");
+        if (!zhihuExactMissingPassed) _failures++;
         bool zhihuShellRejected = Checker.IsZhihuAnswerUnavailableEvidence(
             "{\"error\":{\"code\":4041,\"name\":\"ResourceNotFoundException\"}}",
             "https://www.zhihu.com/question/1/answer/2",
@@ -197,10 +205,25 @@ internal static class RegressionTests
             !Checker.ShouldProbePlatformBeforePage(new Uri("https://example.com/page")) &&
             configuredPacingPassed &&
             PerformanceProfile.Resolve("低配模式").Workers == 1 &&
-            PerformanceProfile.Resolve("标准模式").Workers == 3 &&
-            PerformanceProfile.Resolve("高性能模式").Workers == 6;
+            PerformanceProfile.Resolve("标准模式").Workers == 6 &&
+            PerformanceProfile.Resolve("高性能模式").Workers == 12;
         Console.WriteLine((pacingPassed ? "PASS " : "FAIL ") + "平台级限速和保守并发配置");
         if (!pacingPassed) _failures++;
+
+        string oldQuickPassForBudget = Environment.GetEnvironmentVariable("LINK_CHECKER_QUICK_PASS");
+        bool transportBudgetPassed;
+        try
+        {
+            Environment.SetEnvironmentVariable("LINK_CHECKER_QUICK_PASS", "1");
+            int quickBudget = Checker.TransportFallbackBudgetMilliseconds();
+            Environment.SetEnvironmentVariable("LINK_CHECKER_QUICK_PASS", null);
+            int deepBudget = Checker.TransportFallbackBudgetMilliseconds();
+            transportBudgetPassed = quickBudget == 10000 && deepBudget == 18000;
+        }
+        finally { Environment.SetEnvironmentVariable("LINK_CHECKER_QUICK_PASS", oldQuickPassForBudget); }
+        Console.WriteLine((transportBudgetPassed ? "PASS " : "FAIL ") +
+            "快速批量回退预算为10秒且深度复核保留18秒");
+        if (!transportBudgetPassed) _failures++;
 
         string oldQuickIndependentEvidence = Environment.GetEnvironmentVariable("FAST_AUDIT_QUICK_INDEPENDENT_EVIDENCE");
         Environment.SetEnvironmentVariable("FAST_AUDIT_QUICK_INDEPENDENT_EVIDENCE", "1");
@@ -220,6 +243,51 @@ internal static class RegressionTests
         finally { Environment.SetEnvironmentVariable("FAST_AUDIT_QUICK_INDEPENDENT_EVIDENCE", oldQuickIndependentEvidence); }
         Console.WriteLine((quickIndependentEvidencePassed ? "PASS " : "FAIL ") + "快速独立线路只覆盖普通网媒网络异常且排除签名媒体");
         if (!quickIndependentEvidencePassed) _failures++;
+
+        bool cookieChallengeRetryPassed =
+            Checker.ShouldRetryCookieChallenge(403, true) &&
+            !Checker.ShouldRetryCookieChallenge(403, false) &&
+            !Checker.ShouldRetryCookieChallenge(200, true) &&
+            !Checker.ShouldRetryCookieChallenge(503, true) &&
+            Checker.ShouldRetryTransientServerStatus(502) &&
+            Checker.ShouldRetryTransientServerStatus(503) &&
+            Checker.ShouldRetryTransientServerStatus(504) &&
+            !Checker.ShouldRetryTransientServerStatus(403) &&
+            !Checker.ShouldRetryTransientServerStatus(500);
+        Console.WriteLine((cookieChallengeRetryPassed ? "PASS " : "FAIL ") +
+            "403 Cookie 挑战和瞬时 502/503/504 只进行有界同 URL 重试");
+        if (!cookieChallengeRetryPassed) _failures++;
+
+        var redirectedHomepage = new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            RequestMessage = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Get,
+                "http://www.caiwennews.com/")
+        };
+        var retainedArticle = new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            RequestMessage = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Get,
+                "http://www.caiwennews.com/article/1517717.shtml")
+        };
+        bool samePathHttpsPassed = Checker.ShouldTrySamePathHttps(redirectedHomepage,
+                new Uri("http://www.caiwennews.com/article/1517717.shtml")) &&
+            !Checker.ShouldTrySamePathHttps(retainedArticle,
+                new Uri("http://www.caiwennews.com/article/1517717.shtml")) &&
+            !Checker.ShouldTrySamePathHttps(redirectedHomepage,
+                new Uri("https://www.caiwennews.com/article/1517717.shtml"));
+        redirectedHomepage.Dispose();
+        retainedArticle.Dispose();
+        Console.WriteLine((samePathHttpsPassed ? "PASS " : "FAIL ") +
+            "HTTP 文章跳首页时继续尝试同路径 HTTPS");
+        if (!samePathHttpsPassed) _failures++;
+
+        bool platformBudgetPassed =
+            Checker.QuickPlatformProbeBudgetMilliseconds(new Uri("https://news.10jqka.com.cn/m123/")) == 8000 &&
+            Checker.QuickPlatformProbeBudgetMilliseconds(new Uri("https://xueqiu.com/1/12345678")) == 8000 &&
+            Checker.QuickPlatformProbeBudgetMilliseconds(new Uri("https://www.ixigua.com/1234567890123456")) == 8000 &&
+            Checker.QuickPlatformProbeBudgetMilliseconds(new Uri("https://example.com/article")) == 5000;
+        Console.WriteLine((platformBudgetPassed ? "PASS " : "FAIL ") +
+            "动态平台快速渲染使用定向预算且普通页面保持原上限");
+        if (!platformBudgetPassed) _failures++;
 
         bool quickIndependentShellPassed =
             Checker.ShouldTryQuickIndependentContentEvidence(
@@ -282,7 +350,33 @@ internal static class RegressionTests
             !Checker.IsAutohomeArticleErrorRedirect(
                 new Uri("https://chejiahao.autohome.com.cn/info/25934642"),
                 "https://chejiahao.autohome.com.cn/info/25934642",
-                "<html>pc-error-no-hidden</html>");
+                "<html>pc-error-no-hidden</html>") &&
+            Checker.TryMatch360KuaiTargetPage(
+                "<html><head><title>刚刚！魏建军就海报抄袭事件公开致歉_【快资讯】</title>" +
+                "<meta name='description' content='3月6日长城汽车魏建军针对海报抄袭事件进行道歉'></head>" +
+                "<body><script>window.__pcurl_init_params__='url=9428b03a1a03b93f1&city=test';</script></body></html>",
+                "9428b03a1a03b93f1", "刚刚！魏建军就海报抄袭事件公开致歉", "3月6日长城汽车魏建军") &&
+            !Checker.TryMatch360KuaiTargetPage(
+                "<html><head><title>快资讯首页</title></head><body>9428b03a1a03b93f1 推荐内容</body></html>",
+                "9428b03a1a03b93f1", "刚刚！魏建军就海报抄袭事件公开致歉", "") &&
+            Checker.TryMatchPcautoMobileArticle(
+                "<html data-article-id='3255737'><head><title>目标汽车文章_太平洋汽车</title></head>" +
+                "<body><article><p>作者：汽车相对论</p><p>目标汽车文章正文包含足够的连续内容，用于确认相同文章编号在官方移动页面仍然公开可读。</p>" +
+                "<p>这里补充车辆、市场、产品和用户反馈信息，排除只有标题的空壳页面。</p></article></body></html>",
+                "3255737", "目标汽车文章", "", "汽车相对论") &&
+            !Checker.TryMatchPcautoMobileArticle(
+                "<html><head><title>太平洋汽车首页</title></head><body>推荐车辆</body></html>",
+                "3255737", "目标汽车文章", "", "汽车相对论") &&
+            Checker.TryMatchBiaNewsArticle(
+                "<html><head><title>刚刚！魏建军就海报抄袭事件公开致歉</title></head>" +
+                "<body><span class='article-source'>鞭牛士</span><article>3月6日，长城汽车魏建军针对海报抄袭事件进行道歉。" +
+                "愿意承担由此带来的全部法律和经济责任。这里补充足够正文，确认不是首页空壳。</article></body></html>",
+                "233380", "完全无关的另一篇文章标题", "", "BiaNews学院") == false &&
+            Checker.TryMatchBiaNewsArticle(
+                "<html><head><title>刚刚！魏建军就海报抄袭事件公开致歉</title></head>" +
+                "<body><span class='article-source'>鞭牛士</span><article>3月6日，长城汽车魏建军针对海报抄袭事件进行道歉。" +
+                "愿意承担由此带来的全部法律和经济责任。这里补充足够正文，确认不是首页空壳，并继续说明事件背景和责任。</article></body></html>",
+                "233380", "刚刚！魏建军就海报抄袭事件公开致歉", "", "鞭牛士");
         Console.WriteLine((targetSignalPassed ? "PASS " : "FAIL ") + "腾讯视频和汽车之家目标级失效信号");
         if (!targetSignalPassed) _failures++;
 
@@ -456,8 +550,15 @@ internal static class RegressionTests
         Console.WriteLine((aiFastStagePassed ? "PASS " : "FAIL ") + "快速阶段 AI 影子模式无配置旁路且不改变规则判定");
         if (!aiFastStagePassed) _failures++;
         bool zhihuMinimalUrlPassed =
-            "https://www.zhihu.com/api/v4/answers/123".IndexOf("?include=", StringComparison.OrdinalIgnoreCase) < 0;
-        Console.WriteLine((zhihuMinimalUrlPassed ? "PASS " : "FAIL ") + "知乎回答保留无include官方接口回退入口");
+            "https://www.zhihu.com/api/v4/answers/123".IndexOf("?include=", StringComparison.OrdinalIgnoreCase) < 0 &&
+            Checker.ShouldAdoptZhihuMinimalProbe(200) &&
+            Checker.ShouldAdoptZhihuMinimalProbe(404) &&
+            Checker.ShouldAdoptZhihuMinimalProbe(410) &&
+            !Checker.ShouldAdoptZhihuMinimalProbe(403) &&
+            !Checker.ShouldAdoptZhihuMinimalProbe(429) &&
+            !Checker.ShouldAdoptZhihuMinimalProbe(500);
+        Console.WriteLine((zhihuMinimalUrlPassed ? "PASS " : "FAIL ") +
+            "知乎回答保留无include官方接口的200和精确404/410证据");
         if (!zhihuMinimalUrlPassed) _failures++;
 
         var logContext = ExecutionLogContext.Start("快速核验", "回归测试", "标准模式", "自动网络", 10, 2, 8);
@@ -659,18 +760,20 @@ internal static class RegressionTests
 
         var sharedInfrastructureController = new InfrastructureRestrictionController(2);
         var sharedA = new CheckJob { Number = 701, Url = "http://a.shared.test/x", InfrastructureKey = "IP 119.28.42.49" };
-        var sharedB = new CheckJob { Number = 702, Url = "http://b.shared.test/y", InfrastructureKey = "IP 119.28.42.49" };
+        var sharedSameHost = new CheckJob { Number = 702, Url = "http://a.shared.test/y", InfrastructureKey = "IP 119.28.42.49" };
+        var sharedB = new CheckJob { Number = 703, Url = "http://b.shared.test/y", InfrastructureKey = "IP 119.28.42.49" };
         var sharedFailure = new CheckResult { Verdict = "暂时异常", StatusCode = "502", Evidence = "HTTP 502" };
         string pausedInfrastructure;
         bool sharedInfrastructurePassed =
             !sharedInfrastructureController.Observe(sharedA, sharedFailure, out pausedInfrastructure) &&
             sharedInfrastructureController.Observe(sharedA, sharedFailure, out pausedInfrastructure) &&
-            sharedInfrastructureController.IsPaused(sharedB) &&
+            !sharedInfrastructureController.IsPaused(sharedB) &&
+            sharedInfrastructureController.IsPaused(sharedSameHost) &&
             sharedInfrastructureController.PausedInfrastructures.Count == 1 &&
-            sharedInfrastructureController.PausedInfrastructures[0] == "IP 119.28.42.49" &&
+            sharedInfrastructureController.PausedInfrastructures[0] == "a.shared.test" &&
             MainForm.CreateInfrastructureDeferredResult(sharedB, "共享基础设施已暂停重复访问").Verdict == "暂时异常";
         Console.WriteLine((sharedInfrastructurePassed ? "PASS " : "FAIL ") +
-            "共享基础设施异常只触发一次访问并保留可重试状态");
+            "共享 IP 只用于限速，真实域名独立熔断并保留可重试状态");
         if (!sharedInfrastructurePassed) _failures++;
 
         string oldQuickIndependent = Environment.GetEnvironmentVariable("FAST_AUDIT_QUICK_INDEPENDENT_EVIDENCE");
@@ -825,6 +928,37 @@ internal static class RegressionTests
         Console.WriteLine((newPlatformIdentityPassed ? "PASS " : "FAIL ") + "UC、喜马拉雅、易车论坛和 ZAKER 目标身份识别");
         if (!newPlatformIdentityPassed) _failures++;
 
+        bool officialArticleProbePassed =
+            Checker.ExtractUcArticleId(new Uri("http://a.mp.uc.cn/article.html?wm_cid=740339326275042304")) == "740339326275042304" &&
+            Checker.TryMatchUcArticleInfo(
+                "{\"data\":{\"content_id\":\"740339326275042304\",\"title\":\"直面抄袭门，980亿魏建军公开致歉\",\"status\":1,\"body\":{\"text\":\"<p>雷达财经出品 文|彭程</p><p>魏建军公开致歉，长城汽车承担责任。本文正文包含足够的连续内容，用于验证官方接口返回的目标文章仍然可以公开读取。</p>\"},\"_extra\":{\"origin_author\":\"雷达编辑部\"}}}",
+                "740339326275042304", "", "", "") &&
+            Checker.IsQcttMissingArticlePage(
+                "<title>汽车头条</title><p>哎呦~内容君走丢了~</p>",
+                "https://m.qctt.cn/news/1868953", "1868953") &&
+            Checker.IsIxiguaRenderedRemoval(
+                "<title>内容可能已删除</title><div>内容可能已删除</div><script>window._SSR_DATA={\"httpStatus\":404,\"pathname\":\"/video/7614536490906911284\"}</script>",
+                "7614536490906911284") &&
+            Checker.TryMatchAjaxArticleResponse(
+                "{\"code\":200,\"data\":{\"title\":\"从犹豫到下单，V6火炮值得吗？\",\"content\":\"<p>站在长城皮卡4S店门口，本文介绍V6火炮的配置、体验和购买建议，正文内容完整可读。这里补充配置、空间、动力、通过性和实际使用感受，确保返回的是完整文章正文，而不是空壳。</p>\"}}",
+                "从犹豫到下单，V10火炮值得吗？", "", "") &&
+            !Checker.TryMatchAjaxArticleResponse(
+                "{\"code\":200,\"data\":{\"title\":\"完全无关的旅游资讯\",\"content\":\"<p>这是一篇介绍海滨旅游路线、酒店餐饮和假期安排的完整文章，与目标车辆内容没有任何关系。</p>\"}}",
+                "从犹豫到下单，V10火炮值得吗？", "", "") &&
+            Checker.TryMatchJianshuOfficialPage(
+                "<html><head><title>乘用炮对比大道追光者，谁才是你的心动之选？ - 嘎嘎大叫 - 简书</title><meta name=\"description\" content=\"行业现状分析，在当前皮卡市场中，乘用炮凭借动力、舒适性和智能化配置受到关注，本文继续比较两款车型的完整差异和使用体验。\"></head><body>eee08983e7e8</body></html>",
+                "eee08983e7e8", "乘用炮对比大道追光者，谁才是你的心动之选？", "", "嘎嘎大叫") &&
+            !Checker.TryMatchJianshuOfficialPage(
+                "<html><head><title>简书首页</title><meta name=\"description\" content=\"发现更多热门文章和创作者，这里只有推荐内容，并不是目标文章正文或目标作者信息。\"></head><body>eee08983e7e8</body></html>",
+                "eee08983e7e8", "乘用炮对比大道追光者，谁才是你的心动之选？", "", "嘎嘎大叫") &&
+            Checker.IsTargetContentModerationState(
+                "<p>内容存在不合适展示内容！如需申诉，请联系客服，或者网站管理员（Waiting for manual review）</p>") &&
+            !Checker.IsTargetContentModerationState(
+                "<article><p>本文讨论平台对不合适展示内容的治理规则，但目标文章正文完整存在并可正常阅读。</p><p>这里还有大量正文内容。</p></article>");
+        Console.WriteLine((officialArticleProbePassed ? "PASS " : "FAIL ") +
+            "UC/大鱼号官方接口、汽车头条/西瓜删除页和普通网媒 AJAX 正文识别");
+        if (!officialArticleProbePassed) _failures++;
+
         string kuaishouCaption;
         string kuaishouAuthor;
         string kuaishouSsr = "{\"userName\":\"小痞说车\",\"caption\":\"我们车企公关流程不是这样的，魏总！ #魏建军 #长城\",\"share_info\":\"userId=abc&photoId=3xktpbe4x7ujatm\",\"photoStatus\":0}";
@@ -905,7 +1039,7 @@ internal static class RegressionTests
         bool renderedSocialRemovalPassed = Checker.IsXueqiuRenderedRemoval(
                 "<article data-id='373407682'>原帖已被作者删除</article>", "373407682") &&
             Checker.IsXueqiuRenderedRemoval(
-                "<main>当前内容不适合展示，无法查看</main>", "399636095") &&
+                "<main data-id='399636095'>当前内容不适合展示，无法查看</main>", "399636095") &&
             !Checker.IsXueqiuRenderedRemoval(
                 "<aside>推荐内容：原帖已被作者删除</aside>", "373407682") &&
             Checker.IsWeiboRenderedUnavailable(
@@ -1145,6 +1279,38 @@ internal static class RegressionTests
                 Title = "编辑后的新标题",
                 Text = "作者 李四 发布于 2026-07-17 这是一段足够长的目标文章正文，用于确认内容页面并非只有平台外壳。文章继续讨论产品、技术、市场和用户反馈，并包含完整的阅读、评论、收藏和分享区域。",
                 Html = "<main role='main'><article data-content-id='87654321'><p>完整正文</p></article></main>"
+            }));
+
+        Expect("普通网媒标题改写但同路径作者正文仍在", "仍可访问", Checker.ClassifyRenderedPage(
+            new CheckResult
+            {
+                OriginalUrl = "https://news.example.com/article/76543210",
+                FinalUrl = "https://news.example.com/article/76543210",
+                ExpectedTitle = "旧版标题：长城汽车技术路线观察",
+                ExpectedAuthor = "参考信息网"
+            },
+            new RenderedPageData
+            {
+                Url = "https://news.example.com/article/76543210",
+                Title = "长城汽车最新产品策略与技术布局",
+                Text = "参考信息网 发布时间 2026-08-07 本文围绕长城汽车技术路线、产品规划、市场反馈和用户体验展开完整报道。正文包含多段连续内容，页面提供阅读、评论和分享功能。报道还记录了产品测试、售后服务、供应链协作、市场调研和用户反馈等细节，读者可以在正文下方继续阅读、评论、收藏和分享。",
+                Html = "<article data-id='76543210'><p>参考信息网 本文围绕长城汽车技术路线、产品规划、市场反馈和用户体验展开完整报道。</p><p>正文包含多段连续内容，页面提供阅读、评论和分享功能。报道还记录了产品测试、售后服务、供应链协作、市场调研和用户反馈等细节，读者可以在正文下方继续阅读、评论、收藏和分享。</p></article>"
+            }));
+
+        Expect("普通网媒缺作者或正文不能因标题改写放行", "人工复核", Checker.ClassifyRenderedPage(
+            new CheckResult
+            {
+                OriginalUrl = "https://news.example.com/article/76543210",
+                FinalUrl = "https://news.example.com/article/76543210",
+                ExpectedTitle = "旧版标题：长城汽车技术路线观察",
+                ExpectedAuthor = "参考信息网"
+            },
+            new RenderedPageData
+            {
+                Url = "https://news.example.com/article/76543210",
+                Title = "长城汽车最新产品策略与技术布局",
+                Text = "网站导航 推荐内容 页面加载完成",
+                Html = "<main><p>网站导航 推荐内容 页面加载完成</p></main>"
             }));
 
         Expect("雪球采集首句不是网页标题", "仍可访问", Checker.ClassifyRenderedPage(

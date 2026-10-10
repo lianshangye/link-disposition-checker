@@ -4,7 +4,7 @@
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$expectedDisplayVersion = '4.5.6'
+$expectedDisplayVersion = '4.5.7'
 $expectedFileVersion = $expectedDisplayVersion + '.0'
 if ([String]::IsNullOrWhiteSpace($ZipPath)) {
     $ZipPath = Get-ChildItem -LiteralPath $projectRoot -Recurse -Filter '*.zip' |

@@ -105,6 +105,23 @@ try {
     if (@($resumeOutput | ForEach-Object { [string]$_ } | Where-Object { $_ -like 'SHARD_COMPLETED=*' }).Count -ne 0) {
         throw 'Resume run unexpectedly rechecked a completed shard.'
     }
+    $coverageOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $runner `
+        -InputCsv $input -OutputCsv $output -RowsPerShard 100 -Workers 8 -Resume -CoverageFirst 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "Coverage-first resume exited with code $LASTEXITCODE." }
+    $coverageText = @($coverageOutput | ForEach-Object { [string]$_ })
+    if (@($coverageText | Where-Object { $_ -like 'SHARD_COMPLETED=*' }).Count -ne 3 -or
+        @($coverageText | Where-Object { $_ -eq 'COVERAGE_FIRST_RETRY_NUMBERS=100' }).Count -ne 1 -or
+        @($coverageText | Where-Object { $_ -eq 'COVERAGE_FIRST_RETRY_NUMBERS=1' }).Count -ne 1 -or
+        @($coverageText | Where-Object { $_ -eq 'COVERAGE_FIRST_RETRY_NUMBERS=0' }).Count -ne 1 -or
+        @($coverageText | Where-Object { $_ -eq 'SELECTED_NUMBERS=100' }).Count -ne 1 -or
+        @($coverageText | Where-Object { $_ -eq 'SELECTED_NUMBERS=1' }).Count -ne 1 -or
+        @($coverageText | Where-Object { $_ -like 'PHASE=check,*PENDING=100' }).Count -ne 1 -or
+        @($coverageText | Where-Object { $_ -like 'PHASE=check,*PENDING=1' }).Count -ne 1) {
+        throw 'CoverageFirst did not resume completed shards and target only their unresolved rows.'
+    }
+    if (@(Import-Csv -LiteralPath $output | Where-Object { $_.$verdictHeader -notin @($aliveLabel, $removedLabel) }).Count -ne 101) {
+        throw 'CoverageFirst unexpectedly changed local failure results without independent public evidence.'
+    }
     Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$port/enable-retry-targets" -TimeoutSec 2 | Out-Null
     $retryOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $runner `
         -InputCsv $input -OutputCsv $output -RowsPerShard 100 -Workers 8 -Resume -RetryUnresolved 2>&1
@@ -131,6 +148,8 @@ try {
     Write-Host "SMOKE_ROWS=$($rows.Count)"
     Write-Host "SMOKE_SHARDS=$(@($manifest.Shards).Count)"
     Write-Host 'SMOKE_FIRST_PASS_PENDING=101'
+    Write-Host 'SMOKE_COVERAGE_FIRST_RESUMED_SHARDS=3'
+    Write-Host 'SMOKE_COVERAGE_FIRST_RETRIED_ROWS=101'
     Write-Host "SMOKE_INFRASTRUCTURE_DEFERRED=$($deferred.Count)"
     Write-Host 'SMOKE_RETRY_REQUESTS=101'
     Write-Host 'SMOKE_ALIVE_AFTER_RETRY=205'

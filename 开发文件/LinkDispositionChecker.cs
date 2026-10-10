@@ -9,6 +9,7 @@ using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Reflection;
 using System.Security.Cryptography;
@@ -25,8 +26,8 @@ using Microsoft.Web.WebView2.WinForms;
 
 [assembly: AssemblyTitle("链接失效检测工具")]
 [assembly: AssemblyProduct("链接失效检测工具")]
-[assembly: AssemblyVersion("4.5.6.0")]
-[assembly: AssemblyFileVersion("4.5.6.0")]
+[assembly: AssemblyVersion("4.5.7.0")]
+[assembly: AssemblyFileVersion("4.5.7.0")]
 
 namespace LinkDispositionChecker
 {
@@ -610,7 +611,7 @@ namespace LinkDispositionChecker
 
     internal static class SessionStore
     {
-        public const string CurrentEngineVersion = "4.5.6";
+        public const string CurrentEngineVersion = "4.5.7";
         private static readonly object SyncRoot = new object();
         private static readonly JavaScriptSerializer Serializer = new JavaScriptSerializer { MaxJsonLength = Int32.MaxValue };
         public static readonly string SessionPath = Path.Combine(StoragePaths.UserDataDirectory, "last-session.json");
@@ -6999,17 +7000,21 @@ namespace LinkDispositionChecker
 
         internal static bool ShouldTryQuickIndependentEvidence(CheckJob job, CheckResult result)
         {
-            if (job == null || result == null || !NetworkRestrictionCircuitBreaker.IsTransientRestriction(result))
-                return false;
+            if (job == null || result == null) return false;
             string platform = (job.Platform ?? "").Trim();
             bool generic = String.IsNullOrWhiteSpace(platform) || platform == "网媒" ||
                 platform == "未知" || platform == "未知平台";
             bool tieba = platform.IndexOf("贴吧", StringComparison.OrdinalIgnoreCase) >= 0;
-            if (!generic && !tieba) return false;
             Uri target;
             if (!Uri.TryCreate(job.Url ?? "", UriKind.Absolute, out target) ||
                 IsSignedMediaUri(target)) return false;
+            bool publicTarget = generic || tieba || IsPlatformPublicEvidenceCandidate(target, platform);
             int status;
+            if (Int32.TryParse(result.StatusCode ?? "", out status) &&
+                (status == 403 || status == 407 || status == 419))
+                return publicTarget;
+            if (!NetworkRestrictionCircuitBreaker.IsTransientRestriction(result) || (!generic && !tieba))
+                return false;
             if (Int32.TryParse(result.StatusCode ?? "", out status))
                 return status == 403 && tieba || status == 408 || status == 502 || status == 503 || status == 504 || status >= 500;
             return String.Equals(result.StatusCode, "超时", StringComparison.OrdinalIgnoreCase) ||
@@ -7442,11 +7447,61 @@ namespace LinkDispositionChecker
         {
             if (uri == null || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)) return false;
             string host = (uri.Host ?? "").Trim().ToLowerInvariant();
-            if (host.Length == 0 || host == "localhost" || host == "127.0.0.1" || host == "::1") return false;
+            if (host.Length == 0 || uri.UserInfo.Length > 0) return false;
+            host = host.TrimEnd('.');
+            if (host.Length == 0) return false;
+            if (host[0] == '[' && host[host.Length - 1] == ']')
+                host = host.Substring(1, host.Length - 2);
+            IPAddress address;
+            if (IPAddress.TryParse(host, out address)) return IsPublicReaderAddress(address);
+            if (host.IndexOf('.') < 0 ||
+                host == "localhost" || host.EndsWith(".localhost", StringComparison.Ordinal) ||
+                host.EndsWith(".local", StringComparison.Ordinal) ||
+                host.EndsWith(".localdomain", StringComparison.Ordinal) ||
+                host.EndsWith(".internal", StringComparison.Ordinal) ||
+                host.EndsWith(".lan", StringComparison.Ordinal) ||
+                host.EndsWith(".home", StringComparison.Ordinal) ||
+                host.EndsWith(".home.arpa", StringComparison.Ordinal) ||
+                host.EndsWith(".test", StringComparison.Ordinal) ||
+                host.EndsWith(".invalid", StringComparison.Ordinal) ||
+                host.EndsWith(".example", StringComparison.Ordinal)) return false;
             if (host.EndsWith("channels.weixin.qq.com", StringComparison.Ordinal) ||
                 host.EndsWith("finder.video.qq.com", StringComparison.Ordinal) ||
                 host.EndsWith("wxapp.tc.qq.com", StringComparison.Ordinal)) return false;
             return true;
+        }
+
+        private static bool IsPublicReaderAddress(IPAddress address)
+        {
+            if (address == null) return false;
+            byte[] bytes = address.GetAddressBytes();
+            if (address.AddressFamily == AddressFamily.InterNetwork)
+            {
+                int first = bytes[0], second = bytes[1], third = bytes[2];
+                if (first == 0 || first == 10 || first == 127 || first >= 224) return false;
+                if (first == 100 && second >= 64 && second <= 127) return false;
+                if (first == 169 && second == 254) return false;
+                if (first == 172 && second >= 16 && second <= 31) return false;
+                if (first == 192 && ((second == 0 && (third == 0 || third == 2)) || second == 168 || (second == 88 && third == 99))) return false;
+                if (first == 198 && ((second == 18 || second == 19) || (second == 51 && third == 100))) return false;
+                if (first == 203 && second == 0 && third == 113) return false;
+                return true;
+            }
+            if (address.AddressFamily != AddressFamily.InterNetworkV6 || address.Equals(IPAddress.IPv6Any) ||
+                address.Equals(IPAddress.IPv6Loopback) || address.IsIPv6LinkLocal || address.IsIPv6SiteLocal ||
+                address.IsIPv6Multicast) return false;
+            bool ipv4Mapped = bytes.Length == 16;
+            for (int index = 0; ipv4Mapped && index < 10; index++) ipv4Mapped = bytes[index] == 0;
+            if (ipv4Mapped && bytes[10] == 0xff && bytes[11] == 0xff)
+                return IsPublicReaderAddress(new IPAddress(new[] { bytes[12], bytes[13], bytes[14], bytes[15] }));
+            if ((bytes[0] & 0xfe) == 0xfc) return false; // IPv6 unique-local (fc00::/7)
+            if (bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] == 0x0d && bytes[3] == 0xb8) return false; // 2001:db8::/32
+            return true;
+        }
+
+        internal static bool IsBroadPublicCloudCandidateForTest(Uri uri)
+        {
+            return IsBroadPublicCloudCandidate(uri);
         }
 
         private static bool IsGenericWebMedia(string platform)
@@ -7602,6 +7657,13 @@ namespace LinkDispositionChecker
         private async Task<RemoteEvidenceResponse> TryPublicCloudEvidenceAsync(Uri target,
             CancellationToken token, string expectedTitle, string expectedExcerpt, string expectedAuthor)
         {
+            if (!IsBroadPublicCloudCandidate(target))
+                return new RemoteEvidenceResponse
+                {
+                    Error = "目标不是可安全转发到公开阅读器的公网 HTTP(S) 地址",
+                    Source = "公开阅读器安全门禁",
+                    TargetUnreachable = false
+                };
             if (IsQuickPassEnabled() && !IsQuickIndependentEvidenceEnabled())
                 return new RemoteEvidenceResponse
                 {

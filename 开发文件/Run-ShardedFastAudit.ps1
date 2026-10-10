@@ -22,6 +22,7 @@ $planningWatch = [Diagnostics.Stopwatch]::StartNew()
 if ($RowsPerShard -lt 100) { throw 'RowsPerShard must be at least 100.' }
 if ($PlatformIntervalMs -lt 400 -or $PlatformIntervalMs -gt 5000) { throw 'PlatformIntervalMs must be between 400 and 5000.' }
 if ($GenericIntervalMs -lt 50 -or $GenericIntervalMs -gt 2000) { throw 'GenericIntervalMs must be between 50 and 2000.' }
+if ($CoverageFirst -and $RetryUnresolved) { throw 'CoverageFirst already retries unresolved rows; omit RetryUnresolved.' }
 if ($AiMaxCandidates -lt 1 -or $AiMaxCandidates -gt 200) { throw 'AiMaxCandidates must be between 1 and 200.' }
 if ($AiWorkers -lt 1 -or $AiWorkers -gt 8) { throw 'AiWorkers must be between 1 and 8.' }
 if (-not (Test-Path -LiteralPath $InputCsv -PathType Leaf)) { throw "Input CSV not found: $InputCsv" }
@@ -320,7 +321,7 @@ try {
             $entry = [pscustomobject]@{ Index = $entries.Count; InputPath = $inputPart.FullName; OutputPath = $resultPart; Status = 'pending'; StartedAt = ''; CompletedAt = ''; Error = '' }
             $entries += $entry
         }
-        if (-not $RetryUnresolved -and $entry.Status -eq 'completed' -and
+        if (-not $RetryUnresolved -and -not $CoverageFirst -and $entry.Status -eq 'completed' -and
             (Test-Path -LiteralPath $resultPart)) { continue }
         $entry.Status = 'running'; $entry.StartedAt = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'); $entry.Error = ''
         $manifest.Shards = $entries; Save-Manifest $manifest

@@ -233,6 +233,10 @@ internal static class RegressionTests
             quickIndependentEvidencePassed =
                 Checker.ShouldTryQuickIndependentEvidence(new CheckJob { Platform = "网媒", Url = "https://example.com/a" },
                     new CheckResult { Verdict = "暂时异常", StatusCode = "502" }) &&
+                Checker.ShouldTryQuickIndependentEvidence(new CheckJob { Platform = "知乎", Url = "https://www.zhihu.com/a" },
+                    new CheckResult { Verdict = "人工复核", StatusCode = "403" }) &&
+                Checker.ShouldTryQuickIndependentEvidence(new CheckJob { Platform = "天眼查", Url = "https://www.tianyancha.com/article/1" },
+                    new CheckResult { Verdict = "人工复核", StatusCode = "419" }) &&
                 !Checker.ShouldTryQuickIndependentEvidence(new CheckJob { Platform = "知乎", Url = "https://www.zhihu.com/a" },
                     new CheckResult { Verdict = "暂时异常", StatusCode = "502" }) &&
                 !Checker.ShouldTryQuickIndependentEvidence(new CheckJob { Platform = "网媒", Url = "https://example.com/a?token=secret" },
@@ -241,7 +245,7 @@ internal static class RegressionTests
                     new CheckResult { Verdict = "人工复核", StatusCode = "200" });
         }
         finally { Environment.SetEnvironmentVariable("FAST_AUDIT_QUICK_INDEPENDENT_EVIDENCE", oldQuickIndependentEvidence); }
-        Console.WriteLine((quickIndependentEvidencePassed ? "PASS " : "FAIL ") + "快速独立线路只覆盖普通网媒网络异常且排除签名媒体");
+        Console.WriteLine((quickIndependentEvidencePassed ? "PASS " : "FAIL ") + "快速独立线路对403/419和普通网媒网络异常做有限补证并排除签名媒体");
         if (!quickIndependentEvidencePassed) _failures++;
 
         bool cookieChallengeRetryPassed =
@@ -313,6 +317,28 @@ internal static class RegressionTests
         Console.WriteLine((readerTrackingQueryPassed ? "PASS " : "FAIL ") +
             "独立阅读器忽略跟踪参数但保留目标查询参数");
         if (!readerTrackingQueryPassed) _failures++;
+
+        bool publicReaderSafetyPassed =
+            Checker.IsBroadPublicCloudCandidateForTest(new Uri("https://www.zhihu.com/question/123")) &&
+            Checker.IsBroadPublicCloudCandidateForTest(new Uri("https://8.8.8.8/article/1")) &&
+            Checker.IsBroadPublicCloudCandidateForTest(new Uri("https://[2001:4860:4860::8888]/article/1")) &&
+            !Checker.IsBroadPublicCloudCandidateForTest(new Uri("http://localhost/article/1")) &&
+            !Checker.IsBroadPublicCloudCandidateForTest(new Uri("http://service.local/article/1")) &&
+            !Checker.IsBroadPublicCloudCandidateForTest(new Uri("http://service.internal/article/1")) &&
+            !Checker.IsBroadPublicCloudCandidateForTest(new Uri("http://service.test/article/1")) &&
+            !Checker.IsBroadPublicCloudCandidateForTest(new Uri("http://127.0.0.1/article/1")) &&
+            !Checker.IsBroadPublicCloudCandidateForTest(new Uri("http://10.1.2.3/article/1")) &&
+            !Checker.IsBroadPublicCloudCandidateForTest(new Uri("http://172.16.0.1/article/1")) &&
+            !Checker.IsBroadPublicCloudCandidateForTest(new Uri("http://192.168.1.1/article/1")) &&
+            !Checker.IsBroadPublicCloudCandidateForTest(new Uri("http://169.254.169.254/latest/meta-data/")) &&
+            !Checker.IsBroadPublicCloudCandidateForTest(new Uri("http://[::1]/article/1")) &&
+            !Checker.IsBroadPublicCloudCandidateForTest(new Uri("http://[fc00::1]/article/1")) &&
+            !Checker.IsBroadPublicCloudCandidateForTest(new Uri("http://[fe80::1]/article/1")) &&
+            !Checker.IsBroadPublicCloudCandidateForTest(new Uri("http://[::ffff:192.168.1.10]/article/1")) &&
+            !Checker.IsBroadPublicCloudCandidateForTest(new Uri("http://user:secret@www.example.org/article/1"));
+        Console.WriteLine((publicReaderSafetyPassed ? "PASS " : "FAIL ") +
+            "公开阅读器仅接收公网 HTTP(S) 目标并拦截本机、私网、保留地址和内嵌凭据");
+        if (!publicReaderSafetyPassed) _failures++;
 
         bool changedTitleOverlapPassed =
             Checker.MatchesExpectedTitleByCharacterOverlap("魏建军道歉：承认抄袭",
@@ -673,7 +699,7 @@ internal static class RegressionTests
                 },
                 new RemoteEvidenceResponse { TargetUnreachable = true });
         bool evidenceEscalationRoutingPassed =
-            SessionStore.CurrentEngineVersion == "4.5.6" &&
+            SessionStore.CurrentEngineVersion == "4.5.7" &&
             infrastructureDeferred.Number == 88 &&
             infrastructureDeferred.Verdict == "暂时异常" &&
             infrastructureDeferred.SkipDeepReview &&

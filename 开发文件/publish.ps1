@@ -57,7 +57,7 @@ Copy-Item -LiteralPath (Join-Path $buildOutputDirectory 'NetworkDiagnostics.exe'
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot $diagnosticLauncherName) -Destination (Join-Path $staging $publishedDiagnosticLauncherName) -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot $diagnosticLinksName) -Destination $staging -Force
 [IO.File]::WriteAllLines((Join-Path $staging 'VersionStatus.txt'), @(
-    'Link checker 4.5.5',
+    'Link checker 4.5.6',
     ('Package time: ' + (Get-Date -Format "yyyy-MM-dd HH:mm:ss")),
     ('Release status: ' + $releaseStatus),
     'Candidate package: core tests passed; current human truth is still required for accuracy acceptance.'

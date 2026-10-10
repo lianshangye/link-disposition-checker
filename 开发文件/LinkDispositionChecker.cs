@@ -25,8 +25,8 @@ using Microsoft.Web.WebView2.WinForms;
 
 [assembly: AssemblyTitle("链接失效检测工具")]
 [assembly: AssemblyProduct("链接失效检测工具")]
-[assembly: AssemblyVersion("4.5.5.0")]
-[assembly: AssemblyFileVersion("4.5.5.0")]
+[assembly: AssemblyVersion("4.5.6.0")]
+[assembly: AssemblyFileVersion("4.5.6.0")]
 
 namespace LinkDispositionChecker
 {
@@ -610,7 +610,7 @@ namespace LinkDispositionChecker
 
     internal static class SessionStore
     {
-        public const string CurrentEngineVersion = "4.5.5";
+        public const string CurrentEngineVersion = "4.5.6";
         private static readonly object SyncRoot = new object();
         private static readonly JavaScriptSerializer Serializer = new JavaScriptSerializer { MaxJsonLength = Int32.MaxValue };
         public static readonly string SessionPath = Path.Combine(StoragePaths.UserDataDirectory, "last-session.json");

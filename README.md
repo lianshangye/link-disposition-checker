@@ -1,6 +1,6 @@
 # 链接失效核验工具
 
-面向中文内容平台和新闻网站的 Windows 批量链接状态核验工具。当前版本为 4.5.5。
+面向中文内容平台和新闻网站的 Windows 批量链接状态核验工具。当前版本为 4.5.6。
 
 支持百度贴吧、百度知道、百度文库/百科、百家号、百度共享页，以及微博、知乎、抖音、快手、B站、雪球、懂车帝、小红书、简书、汽车之家论坛、虎扑、豆瓣、CSDN、掘金、NGA、天涯等平台；未知域名仍按通用网页证据规则处理，不会因平台名缺失而强判。
 
@@ -77,6 +77,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\开发文件\Run-TenR
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\开发文件\Run-ShardedFastAudit.ps1' `
   -InputCsv '.\input.csv' -OutputCsv '.\output.csv' -RowsPerShard 10000 -Workers 12 -Resume
 ```
+
+默认命令优先保证吞吐量；如果本轮更关注把未完成率压低，可增加 `-CoverageFirst`。它会先完成同样的快速 HTTP/API 阶段，再只对首轮未完成行做一次有界独立公开证据重试，不会为整批数据启动浏览器。该模式通常更慢，并受公开阅读器额度和目标站点限制影响，不能把网络异常或登录壳直接改判为失效。
 
 如本批包含微信、知乎、微博等登录后才能取得目标正文的平台，可在首次运行增加 `-LoginFirst`，集中完成一次登录后继续快速核验；已有工具 WebView2 登录会话时可使用 `-UseSavedLogin` 静默加载。Cookie 只桥接到当前分片进程内存，后续分片从工具自己的 WebView2 配置重新读取，不写入结果、manifest 或公开仓库。
 

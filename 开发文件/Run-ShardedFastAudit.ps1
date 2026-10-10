@@ -10,6 +10,7 @@
     [switch]$Resume,
     [switch]$RetryUnresolved,
     [switch]$QuickIndependentEvidence,
+    [switch]$CoverageFirst,
     [ValidateSet('off','shadow','assist')][string]$AiMode = 'off',
     [int]$AiMaxCandidates = 50,
     [int]$AiWorkers = 3,
@@ -294,6 +295,11 @@ try {
     $env:FAST_AUDIT_PLATFORM_INTERVAL_MS = [string]$PlatformIntervalMs
     $env:FAST_AUDIT_GENERIC_INTERVAL_MS = [string]$GenericIntervalMs
     $env:FAST_AUDIT_PUBLIC_RETRY = '1'
+    # CoverageFirst keeps the first pass fast, then performs one bounded
+    # independent-evidence retry only for rows that remain unresolved. It is
+    # deliberately opt-in because public readers are slower and quota-bound.
+    # Do not enable the reader for the first pass here; the retry block below
+    # turns it on only for the selected unresolved numbers.
     $env:FAST_AUDIT_QUICK_INDEPENDENT_EVIDENCE = if ($QuickIndependentEvidence) { '1' } else { $null }
     $env:FAST_AUDIT_AI_MODE = if ($AiMode -eq 'off') { $null } else { $AiMode }
     $env:FAST_AUDIT_AI_MAX_CANDIDATES = [string]$AiMaxCandidates
@@ -306,7 +312,7 @@ try {
     # checkpoint files make an interrupted 300k-row run restart-safe without
     # rechecking completed work.  Use a new output path for a deliberate fresh run.
     $env:FAST_AUDIT_RESUME = '1'
-    if ($RetryUnresolved) { $env:FAST_AUDIT_RETRY_UNRESOLVED = '1' }
+    $env:FAST_AUDIT_RETRY_UNRESOLVED = if ($RetryUnresolved) { '1' } else { $null }
     foreach ($inputPart in $shardInputs) {
         $resultPart = Join-Path $shardDirectory (($inputPart.BaseName -replace '\.input$','') + '.result.csv')
         $entry = @($entries | Where-Object { $_.InputPath -eq $inputPart.FullName }) | Select-Object -First 1
@@ -337,6 +343,26 @@ try {
             $interactiveLoginPending = $false
             if ($process.ExitCode -ne 0) { throw "Shard runner exited with code $($process.ExitCode)." }
             if (-not (Test-Path -LiteralPath $resultPart)) { throw 'Shard runner did not produce a result file.' }
+            if ($CoverageFirst -and -not $RetryUnresolved) {
+                $coverageRetryNumbers = @(Import-Csv -LiteralPath $resultPart | Where-Object {
+                    $_.'核验结果' -notin @('仍可访问','已失效') -and $_.'序号' -match '^\d+$'
+                } | ForEach-Object { [string]$_.'序号' })
+                if ($coverageRetryNumbers.Count -gt 0) {
+                    $quickIndependentBeforeCoverageRetry = if ($QuickIndependentEvidence) { '1' } else { $null }
+                    $retryBeforeCoverageRetry = $env:FAST_AUDIT_RETRY_UNRESOLVED
+                    $numbersBeforeCoverageRetry = $env:FAST_AUDIT_NUMBERS
+                    $env:FAST_AUDIT_QUICK_INDEPENDENT_EVIDENCE = '1'
+                    $env:FAST_AUDIT_RETRY_UNRESOLVED = '1'
+                    $env:FAST_AUDIT_NUMBERS = [string]::Join(',', $coverageRetryNumbers)
+                    Write-Host "COVERAGE_FIRST_RETRY_NUMBERS=$($coverageRetryNumbers.Count)"
+                    $retryProcess = Start-Process -FilePath $runnerInfo.Path -ArgumentList ('"' + $inputPart.FullName + '" "' + $resultPart + '"') -WorkingDirectory $runnerInfo.Directory -Wait -PassThru -NoNewWindow
+                    if ($retryProcess.ExitCode -ne 0) { throw "Coverage-first retry exited with code $($retryProcess.ExitCode)." }
+                    $env:FAST_AUDIT_QUICK_INDEPENDENT_EVIDENCE = $quickIndependentBeforeCoverageRetry
+                    $env:FAST_AUDIT_RETRY_UNRESOLVED = $retryBeforeCoverageRetry
+                    $env:FAST_AUDIT_NUMBERS = $numbersBeforeCoverageRetry
+                }
+                else { Write-Host 'COVERAGE_FIRST_RETRY_NUMBERS=0' }
+            }
             $entry.Status = 'completed'; $entry.CompletedAt = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
             Write-Host "SHARD_COMPLETED=$($entry.Index)|OUTPUT=$resultPart"
         }
@@ -415,6 +441,7 @@ try {
     Write-Host "REMOVED=$removed"
     Write-Host "CONTRACT_PENDING=$pending"
     Write-Host "UNRESOLVED_RATE=$($pendingRate.ToString('0.00'))%"
+    Write-Host "COVERAGE_FIRST=$(if ($CoverageFirst) { '1' } else { '0' })"
     Write-Host "STRICT_BELOW_5_PERCENT=$(if ($strictBelowFive) { '1' } else { '0' })"
     Write-Host "ELAPSED_SECONDS=$($elapsedSeconds.ToString('0.00'))"
     Write-Host "ROWS_PER_SECOND=$($rowsPerSecond.ToString('0.00'))"

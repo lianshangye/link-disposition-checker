@@ -42,7 +42,7 @@ if (-not (Test-Path -LiteralPath $InputCsv -PathType Leaf)) {
 }
 $InputCsv = [IO.Path]::GetFullPath($InputCsv)
 if ([String]::IsNullOrWhiteSpace($OutputCsv)) {
-    $OutputCsv = Join-Path $testData 'representative-validation-result-4.5.5-report.csv'
+    $OutputCsv = Join-Path $testData 'representative-validation-result-4.5.6-report.csv'
 }
 $OutputCsv = [IO.Path]::GetFullPath($OutputCsv)
 $outputDirectory = Split-Path -Parent $OutputCsv
